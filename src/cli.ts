@@ -487,9 +487,14 @@ async function cmdWrite(config: Config, path: string, flags: Record<string, stri
   } else if (process.stdin.isTTY) {
     throw new CliError("bad_request", "Provide content via --content flag or pipe to stdin", 1);
   } else {
-    // Read content from stdin
+    // Read content from stdin.
+    // Cast-on-entry because @types/node >=25 types the stdin data
+    // callback as `string | Buffer` (depending on encoding state),
+    // but we never call setEncoding so runtime is always Buffer.
     const chunks: Buffer[] = [];
-    process.stdin.on("data", (c) => chunks.push(c));
+    process.stdin.on("data", (c: string | Buffer) => {
+      chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
+    });
     await new Promise<void>((resolve) => process.stdin.on("end", resolve));
     content = Buffer.concat(chunks).toString().trim();
   }
@@ -2435,8 +2440,11 @@ async function main() {
       // Read content from stdin if not provided via --content.
       let content = typeof flags.content === "string" ? flags.content : "";
       if (!content && !process.stdin.isTTY) {
+        // Same stdin-type quirk as cmdWrite; see that note.
         const chunks: Buffer[] = [];
-        process.stdin.on("data", (c) => chunks.push(c));
+        process.stdin.on("data", (c: string | Buffer) => {
+          chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
+        });
         await new Promise<void>((resolve) => process.stdin.on("end", resolve));
         content = Buffer.concat(chunks).toString();
       }
