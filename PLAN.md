@@ -433,7 +433,7 @@ Closes SSRF/localhost-bypass holes: even if the proxy is bypassed, the backend r
 7. `INSERT INTO vaults`; find-or-create `users` row by email; `INSERT INTO vault_members` (owner role); mint API key with `vault_id=<new-id>`
 8. **Regenerate `ecosystem.config.cjs` from `SELECT * FROM vaults`** (don't append — Caleb's point)
 9. `sudo pm2 reload ecosystem.config.cjs`
-10. Poll `http://127.0.0.1:<server_port>/health` until 200 (timeout 60s)
+10. Poll `http://127.0.0.1:<server_port>/health` until the response body parses as `{ok: true}` (timeout 60s). Note: since Tier 2 (commit `e7f55a9`) the handler returns `{ok, sha, started_at, uptime_sec, checks}` and emits HTTP 503 when any dependency is down — a 200 response no longer implies full readiness on its own, so check the body.
 11. Print: slug, ports, git_path, owner's API key (once), connector URL, sample invite email body
 
 **Files:** `src/vault-provision.ts` (new), `src/ecosystem-gen.ts` (new), `src/cli.ts` (new `vault create` subcommand), `docs/cli.md` (document)

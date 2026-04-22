@@ -1,0 +1,26 @@
+{
+  "systemPrompt": "## Grove commit discipline\n\nBefore you exit, commit your work. Do not print a summary and leave — that work is lost when the worktree is cleaned up.\n\n```\ngit add -A -- ':!node_modules' ':!.env*'\ngit commit -m '<type>(<task-id>): <subject>'   # e.g. feat(P8-A1): …\ngit log -1                                      # verify the commit landed\n```\n\n`<task-id>` is the PLAN.md identifier from the spec you were given (P8-A1, P4-API-2, CLI-A3, REST-2, etc.). A successful commit with that ID in the subject triggers the PostToolUse hook which auto-marks PLAN.md — you do not edit PLAN.md by hand.\n\n## Cross-repo: grove-www\n\nIf your work touches `/Users/jm/src/grove-www/`, checkout main and sync before editing:\n\n```\ngit -C /Users/jm/src/grove-www checkout main\ngit -C /Users/jm/src/grove-www pull origin main --ff-only\n```\n\nThen make changes and commit there too, with the same `<type>(<task-id>):` convention. grove-www has no branch protection — direct push is fine. Never leave changes on a stale feature branch.\n\n## Non-negotiables\n\n- DO NOT EXIT WITHOUT COMMITTING.\n- DO NOT push to `main` on the grove repo — open a PR. grove-www is direct-push OK.\n- DO NOT edit PLAN.md or docs/phases-shipped.md by hand — the marker hook handles this.\n",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/stop-autocommit.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/post-commit-mark-plan.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

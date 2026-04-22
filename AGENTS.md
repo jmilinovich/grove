@@ -69,6 +69,30 @@ PRs that touch `.github/workflows/*`. If `gh pr merge` fails with
 "refusing to allow an OAuth App to create or update workflow", run
 `gh auth refresh -s workflow` once to grant the scope.
 
+## Claude Code hooks
+
+`.claude/settings.json` wires two hooks active for every agent session in this repo:
+
+- **`Stop`** (`.claude/hooks/stop-autocommit.sh`) — runs only inside agent
+  worktrees (`.claude/worktrees/<branch>/`), never in the main repo. If the
+  worktree has uncommitted work when the agent exits, auto-commits with
+  subject `auto: Stop hook safety-net — agent exited without committing`.
+  Protects against data loss when an agent finishes work and exits without
+  committing. Review these commits — they're a signal the prompt's commit
+  step was skipped and may need reinforcement. Don't propagate them as
+  real feature commits; squash or rewrite before merging.
+- **`PostToolUse`** on `Bash` (`.claude/hooks/post-commit-mark-plan.sh`) —
+  after any successful `git commit`, parses the subject for a task ID
+  (`feat(P8-A1): …`, `fix(CLI-A3): …`, etc.) and delegates to
+  `scripts/mark-plan-task.mjs`, which idempotently appends `✅ COMPLETE
+  <date> (<sha>)` to the corresponding `#### <id>:` heading in PLAN.md
+  and stages the change. Ignores `auto:`-prefixed safety-net commits.
+  Run `bash scripts/test-hooks.sh` to verify the hooks locally.
+
+Net: agents don't hand-edit PLAN.md, and the main-repo `scripts/check-plan-drift.ts`
+CI gate stays as belt-and-suspenders for non-agent commits (manual PRs,
+Dependabot).
+
 ## CI topology
 
 **`check` workflow (`.github/workflows/ci.yml`)** runs on every PR:
