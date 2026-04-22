@@ -17,7 +17,8 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createHash, randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { RateLimiter } from "./rate-limit.js";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -97,6 +98,30 @@ import {
 } from "./graph-health.js";
 
 installCrashHandlers("grove-proxy");
+
+// ── Deploy + boot metadata ──────────────────────────────────────────
+// /health returns these so the deploy workflow can verify it's seeing
+// the new process (not a stale pre-deploy one) and auto-rollback if
+// the new SHA doesn't come up within the health-poll window.
+const BOOT_TIME_MS = Date.now();
+const BOOT_TIME_ISO = new Date(BOOT_TIME_MS).toISOString();
+const DEPLOYED_SHA = readDeployedSha();
+
+function readDeployedSha(): string {
+  // Primary: `.deployed_sha` file written by the deploy workflow after
+  // `git pull`. Secondary: `git rev-parse HEAD` from the proxy's cwd
+  // (works in dev, may fail on the VPS if cwd isn't the repo). Final
+  // fallback: "unknown" — /health still works, just no SHA to verify.
+  try {
+    const sha = readFileSync(join(process.cwd(), ".deployed_sha"), "utf8").trim();
+    if (sha && /^[0-9a-f]{7,40}$/.test(sha)) return sha;
+  } catch { /* fall through */ }
+  try {
+    const sha = execSync("git rev-parse HEAD", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    if (sha) return sha;
+  } catch { /* fall through */ }
+  return process.env.GROVE_DEPLOYED_SHA ?? "unknown";
+}
 
 const QMD_PORT = Number(process.env.QMD_PORT ?? 8181);
 const GROVE_SERVER_PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
@@ -919,7 +944,13 @@ const server = createServer(async (req, res) => {
     checks.qmd = qmdOk;
     checks.embed = embedOk;
     const allOk = groveOk && qmdOk && embedOk;
-    sendJson(res, allOk ? 200 : 503, { ok: allOk, checks });
+    sendJson(res, allOk ? 200 : 503, {
+      ok: allOk,
+      sha: DEPLOYED_SHA,
+      started_at: BOOT_TIME_ISO,
+      uptime_sec: Math.floor((Date.now() - BOOT_TIME_MS) / 1000),
+      checks,
+    });
     return;
   }
 

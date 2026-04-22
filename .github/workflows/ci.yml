@@ -5,7 +5,12 @@ on:
     branches: [main]
   push:
     branches: [main]
-  workflow_dispatch: # manual deploy trigger
+  workflow_dispatch:
+    inputs:
+      confirm_schema_change:
+        description: "Confirm deploy may apply better-sqlite3 schema migrations (src/db-migration*.ts or src/db.ts changed)"
+        type: boolean
+        default: false
 
 # Cancel stale runs on the same ref — saves minutes on rapid-fire pushes.
 concurrency:
@@ -63,21 +68,131 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Health-gated deploy with auto-rollback.
+  #
+  # Flow (all in one SSH script to keep it atomic):
+  #   1. Snapshot the current VPS HEAD (BEFORE_SHA) — our rollback target.
+  #   2. Fetch origin/main and diff for schema changes. Schema-touching
+  #      files (src/db-migration*.ts, src/db.ts) require the manual
+  #      `confirm_schema_change` input. Rollback CAN'T undo a migration
+  #      safely, so we refuse to ship one by accident.
+  #   3. git pull, write .deployed_sha (read by proxy.ts /health), npm
+  #      ci --production, pm2 restart.
+  #   4. Health-poll https://api.grove.md/health up to 12 × 5s = 60s.
+  #      Success = HTTP 200 + JSON {ok: true, sha: TARGET_SHA}. The
+  #      SHA match confirms we're seeing the new process, not a stale one.
+  #   5. On health success → exit 0. A follow-up step appends the
+  #      deploy to deploys.md via the GitHub API (DEPLOY_LOG_PAT).
+  #   6. On health failure → reset --hard BEFORE_SHA, reinstall, restart,
+  #      re-poll rollback health. If that works, exit 1 with a clear
+  #      rollback log. If the rollback also fails, exit 2 —
+  #      api.grove.md is down and needs human attention.
   deploy:
     needs: [test, audit, secrets]
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Deploy to VPS
+      - name: Deploy with health gate + auto-rollback
         uses: appleboy/ssh-action@v1
         with:
           host: 52.37.76.231
           username: deploy
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: CONFIRM_SCHEMA_CHANGE,HEALTH_URL
           script: |
+            set -eu
             cd /root/grove
+
+            BEFORE_SHA=$(git rev-parse HEAD)
+            echo "[deploy] before SHA: $BEFORE_SHA"
+
+            git fetch --quiet origin main
+            TARGET_SHA=$(git rev-parse origin/main)
+            echo "[deploy] target SHA: $TARGET_SHA"
+
+            if [ "$BEFORE_SHA" = "$TARGET_SHA" ]; then
+              echo "[deploy] already up to date — nothing to do"
+              exit 0
+            fi
+
+            # Schema-change guard. better-sqlite3 migrations can't be
+            # rolled back code-only, so refuse unless the operator
+            # ticked confirm_schema_change.
+            SCHEMA_DIFF=$(git diff --name-only "$BEFORE_SHA" "$TARGET_SHA" -- 'src/db-migration*.ts' 'src/db.ts' 2>/dev/null || true)
+            if [ -n "$SCHEMA_DIFF" ] && [ "${CONFIRM_SCHEMA_CHANGE:-false}" != "true" ]; then
+              echo "::error::Schema change detected in: $SCHEMA_DIFF"
+              echo "::error::Re-run workflow_dispatch with confirm_schema_change=true to proceed."
+              exit 1
+            fi
+            if [ -n "$SCHEMA_DIFF" ]; then
+              echo "[deploy] schema-change deploy acknowledged: $SCHEMA_DIFF"
+            fi
+
+            # Deploy.
             git pull --ff-only
+            echo "$TARGET_SHA" > .deployed_sha
             npm ci --production
             sudo pm2 restart grove-server grove-proxy
-            sleep 5
-            curl -sf https://api.grove.md/health || (echo "DEPLOY HEALTH CHECK FAILED" && exit 1)
+
+            # Health poll — 12 × 5s = 60s window.
+            for i in $(seq 1 12); do
+              sleep 5
+              RESP=$(curl -sf "$HEALTH_URL" || echo "")
+              if echo "$RESP" | grep -q "\"ok\":true" && echo "$RESP" | grep -q "\"sha\":\"$TARGET_SHA\""; then
+                echo "[deploy] healthy on attempt $i"
+                exit 0
+              fi
+              echo "[deploy] attempt $i: $RESP"
+            done
+
+            # Health failed — roll back.
+            echo "::error::health-check failed after 60s; rolling back to $BEFORE_SHA"
+            git reset --hard "$BEFORE_SHA"
+            echo "$BEFORE_SHA" > .deployed_sha
+            npm ci --production
+            sudo pm2 restart grove-server grove-proxy
+
+            # Verify rollback health.
+            for i in $(seq 1 6); do
+              sleep 5
+              if curl -sf "$HEALTH_URL" | grep -q "\"ok\":true"; then
+                echo "::error::deploy failed; rolled back to $BEFORE_SHA successfully"
+                exit 1
+              fi
+            done
+
+            echo "::error::ROLLBACK ALSO FAILED — api.grove.md is down; manual intervention required"
+            exit 2
+        env:
+          CONFIRM_SCHEMA_CHANGE: ${{ github.event.inputs.confirm_schema_change || 'false' }}
+          HEALTH_URL: https://api.grove.md/health
+
+      - name: Append deploy to deploys.md
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.DEPLOY_LOG_PAT }}
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TODAY=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          LINE="$TODAY  $SHA  $ACTOR  $RUN_URL"
+
+          RESPONSE=$(gh api "repos/${{ github.repository }}/contents/deploys.md" 2>/dev/null || echo '{"content":"","sha":null}')
+          BLOB_SHA=$(echo "$RESPONSE" | jq -r '.sha // empty')
+
+          if [ -z "$BLOB_SHA" ]; then
+            NEW_CONTENT=$(printf '# Grove production deploys\n\nAppend-only log written by `.github/workflows/ci.yml`.\nFormat: `<utc-iso>  <commit>  <actor>  <workflow-run-url>`.\n\n%s\n' "$LINE" | base64 -w0)
+            gh api -X PUT "repos/${{ github.repository }}/contents/deploys.md" \
+              -f message="chore: log deploy $SHA" \
+              -f content="$NEW_CONTENT"
+          else
+            OLD_CONTENT=$(echo "$RESPONSE" | jq -r '.content' | base64 -d)
+            NEW_CONTENT=$(printf '%s\n%s' "$OLD_CONTENT" "$LINE" | base64 -w0)
+            gh api -X PUT "repos/${{ github.repository }}/contents/deploys.md" \
+              -f message="chore: log deploy $SHA" \
+              -f content="$NEW_CONTENT" \
+              -f sha="$BLOB_SHA"
+          fi
