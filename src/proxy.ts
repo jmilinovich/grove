@@ -1752,6 +1752,26 @@ const server = createServer(async (req, res) => {
         .get(restKey.id) as { session_id: string | null } | undefined;
       const currentSessionId = currentSessionRow?.session_id ?? null;
 
+      // P8-B3/B4 — vaults the caller has access to (via vault_members). Each
+      // entry carries the owner's handle so grove-www can build `@<handle>/
+      // <slug>/...` URLs without a second round-trip.
+      const vaults = db
+        .prepare(
+          `SELECT v.id, v.slug, v.display_name AS name, v.created_at,
+                  vm.role, vm.joined_at, vm.last_active_at,
+                  ou.username AS owner_handle
+             FROM vault_members vm
+             JOIN vaults v  ON v.id  = vm.vault_id
+             JOIN users  ou ON ou.id = v.owner_id
+            WHERE vm.user_id = ?
+            ORDER BY vm.last_active_at DESC, vm.joined_at DESC`,
+        )
+        .all(user.id) as Array<{
+          id: string; slug: string; name: string; created_at: string;
+          role: string; joined_at: string; last_active_at: string | null;
+          owner_handle: string;
+        }>;
+
       res.writeHead(200, restHeaders);
       res.end(JSON.stringify({
         id: user.id,
@@ -1768,6 +1788,7 @@ const server = createServer(async (req, res) => {
           scopes: k.scopes.split(",").filter(Boolean),
         })),
         trails: trailRows.map((t) => ({ id: t.id, name: t.name, description: t.description, enabled: !!t.enabled })),
+        vaults,
         sessions: listUserSessions(user.id).map((s) => ({
           ...s,
           is_current: s.id === currentSessionId,

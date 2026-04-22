@@ -575,7 +575,7 @@ Bare `/dashboard`, `/profile`, etc. → 301 redirect to user's most-recently-use
 - Redirects from legacy bare routes preserve query params
 - `last_active_at` updates on navigation but not more than once per minute
 
-#### P8-B4: Vault switcher component (`grove-www/src/components/vault-switcher.tsx`)
+#### P8-B4: Vault switcher component (`grove-www/src/components/vault-switcher.tsx`) ✅ COMPLETE 2026-04-22 (d0e1451)
 
 Header dropdown in `grove-www/src/components/header.tsx`:
 
