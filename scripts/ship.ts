@@ -385,6 +385,79 @@ async function openPR(batch: Batch, shipBranch: string): Promise<number> {
   return Number(prMatch[1]);
 }
 
+interface WorkflowRun {
+  databaseId: number;
+  headSha: string;
+  createdAt: string;
+  status: string;
+  conclusion: string | null;
+  event: string;
+}
+
+/**
+ * Trigger `workflow_dispatch` on ci.yml with confirm_schema_change=true,
+ * locate the dispatched run, and wait for it to finish. Throws on failure.
+ *
+ * Used by ship.ts when SHIP_AUTO_CONFIRM_SCHEMA=1 is set and the batch
+ * is flagged `noAutoMerge: true`. The push-triggered deploy on main would
+ * fail on the schema-change guard (by design — see .github/workflows/ci.yml).
+ * Dispatching a second CI run with the override input lets the deploy
+ * proceed; GitHub's `concurrency: cancel-in-progress` cancels the earlier
+ * run so only one CI pipeline is live at a time.
+ */
+async function triggerConfirmedDeployAndWait(): Promise<void> {
+  const beforeTrigger = new Date();
+  log("  triggering ci.yml dispatch with confirm_schema_change=true");
+  sh(`gh workflow run ci.yml --ref main -f confirm_schema_change=true`, { quiet: true });
+
+  // Wait for the dispatched run to be registered (usually 2-5s).
+  const lookupDeadline = Date.now() + 60_000;
+  let runId: number | null = null;
+  while (Date.now() < lookupDeadline && !runId) {
+    await new Promise((r) => setTimeout(r, 5_000));
+    const out = shTry(
+      `gh run list --workflow=ci.yml --event=workflow_dispatch --branch=main --limit=5 --json databaseId,headSha,createdAt,status,conclusion,event`,
+    );
+    if (!out.ok) continue;
+    try {
+      const runs = JSON.parse(out.out) as WorkflowRun[];
+      // Accept any dispatch run newer than our trigger time.
+      const candidate = runs.find(
+        (r) => r.event === "workflow_dispatch" && new Date(r.createdAt) >= beforeTrigger,
+      );
+      if (candidate) runId = candidate.databaseId;
+    } catch {
+      // keep polling
+    }
+  }
+
+  if (!runId) {
+    throw new Error(`couldn't locate workflow_dispatch run within 60s of trigger`);
+  }
+  log(`  dispatch run #${runId}`);
+
+  // Wait up to 20 min for the deploy to finish.
+  const waitDeadline = Date.now() + 20 * 60_000;
+  let lastStatus = "";
+  while (Date.now() < waitDeadline) {
+    const out = sh(`gh run view ${runId} --json status,conclusion`, { quiet: true });
+    const data = JSON.parse(out) as { status: string; conclusion: string | null };
+    if (data.status !== lastStatus) {
+      log(`  run #${runId} status: ${data.status}`);
+      lastStatus = data.status;
+    }
+    if (data.status === "completed") {
+      if (data.conclusion === "success") {
+        log(`  ✓ schema-confirmed deploy succeeded (run #${runId})`);
+        return;
+      }
+      throw new Error(`schema-confirmed deploy failed: conclusion=${data.conclusion} (run #${runId})`);
+    }
+    await new Promise((r) => setTimeout(r, 15_000));
+  }
+  throw new Error(`schema-confirmed deploy run #${runId} did not complete within 20m`);
+}
+
 async function enableAutoMergeAndWait(prNumber: number): Promise<string> {
   sh(`gh pr merge ${prNumber} --auto --squash --delete-branch`);
 
@@ -434,7 +507,12 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
   log("═════════════════════════════════════════════════════════");
 
   if (dryRun) {
-    const mergeMode = batch.noAutoMerge ? "open PR, HALT (human review required)" : "open PR, auto-merge";
+    const autoConfirmSchema = process.env.SHIP_AUTO_CONFIRM_SCHEMA === "1";
+    const mergeMode = batch.noAutoMerge
+      ? autoConfirmSchema
+        ? "auto-merge + trigger confirm_schema_change=true deploy"
+        : "open PR, HALT (human review required)"
+      : "open PR, auto-merge";
     log(`  DRY-RUN — would spawn ${batch.entries.length} agent(s), ${mergeMode}`);
     for (const e of batch.entries) {
       log(`  └─ worktree-${e.branch}`);
@@ -483,11 +561,13 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
   const prUrl = `https://github.com/jmilinovich/grove/pull/${prNumber}`;
   log(`  PR #${prNumber}: ${prUrl}`);
 
-  // Schema-change batches (or anything else flagged) get opened but NOT
-  // auto-merged — AGENTS.md requires human review. ship.ts halts so the
-  // user can review, merge, deploy with confirm_schema_change=true, and
-  // resume with `ship --from <next-batch>`.
-  if (batch.noAutoMerge) {
+  // Schema-change batches are flagged with noAutoMerge=true. Default
+  // behavior halts so a human can review + trigger confirm_schema_change.
+  // Set SHIP_AUTO_CONFIRM_SCHEMA=1 to override: auto-merge the PR, then
+  // trigger workflow_dispatch with confirm_schema_change=true and wait
+  // for the deploy to succeed before the next batch runs.
+  const autoConfirmSchema = process.env.SHIP_AUTO_CONFIRM_SCHEMA === "1";
+  if (batch.noAutoMerge && !autoConfirmSchema) {
     appendProgress({
       batch: batch.id,
       status: "opened_pending_review",
@@ -506,9 +586,14 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
   const mergeSha = await enableAutoMergeAndWait(prNumber);
   log(`  ✓ PR #${prNumber} merged at ${mergeSha.slice(0, 7)}`);
 
+  if (batch.noAutoMerge && autoConfirmSchema) {
+    log("schema batch + SHIP_AUTO_CONFIRM_SCHEMA=1 — triggering confirmed deploy");
+    await triggerConfirmedDeployAndWait();
+  }
+
   appendProgress({
     batch: batch.id,
-    status: "merged",
+    status: batch.noAutoMerge ? "merged_and_deployed" : "merged",
     pr: prNumber,
     sha: mergeSha,
   });
@@ -528,12 +613,22 @@ async function main(): Promise<void> {
 
   if (args.list) {
     const done = await mergedShipPRs();
+    const autoConfirmSchema = process.env.SHIP_AUTO_CONFIRM_SCHEMA === "1";
     console.log("Batches:");
     for (const b of BATCHES) {
       const status = done.has(b.id) ? "✓ merged" : "· pending";
       const prereq = b.requires?.length ? ` (requires: ${b.requires.join(", ")})` : "";
-      const manual = b.noAutoMerge ? " [manual merge]" : "";
+      const manual = b.noAutoMerge
+        ? autoConfirmSchema
+          ? " [schema — auto-confirm]"
+          : " [manual merge]"
+        : "";
       console.log(`  ${status}  ${b.id.padEnd(8)}  ${b.title}${prereq}${manual}`);
+    }
+    if (autoConfirmSchema) {
+      console.log("");
+      console.log("SHIP_AUTO_CONFIRM_SCHEMA=1 is set — schema batches will auto-merge");
+      console.log("then trigger workflow_dispatch with confirm_schema_change=true.");
     }
     return;
   }

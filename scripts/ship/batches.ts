@@ -84,7 +84,7 @@ export const BATCHES: Batch[] = [
       {
         branch: "p8a-observability",
         prompt:
-          "Read PLAN.md task P8-A6. Extend src/logger.ts so every line includes vault_id + vault_slug. Add src/vault-usage.ts with in-memory counters (requests/writes/embed_tokens/search_queries) that flush to vault_usage_daily every 60s via upsert. Propagate X-Grove-Vault-Id from grove-server to embed-server so embed logs include vault context. Run npm test. Commit as feat(P8-A6).",
+          "Read PLAN.md task P8-A6. Extend src/logger.ts so every line includes vault_id + vault_slug. Add src/vault-usage.ts with in-memory counters (requests/writes/embed_tokens/search_queries) that flush to vault_usage_daily every 60s via upsert. NOTE: the embed-server was retired (#22) — embeddings go direct to Voyage AI from grove-server. Instead of header propagation, log vault_id + vault_slug + embed_tokens around each Voyage call in src/embed.ts (or wherever the Voyage API is invoked). Run npm test. Commit as feat(P8-A6).",
       },
     ],
   },
