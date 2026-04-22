@@ -26,9 +26,9 @@
  *   ./scripts/ship.ts --from p8a-1            # run from p8a-1 to end
  *   ./scripts/ship.ts                         # run next pending batch onwards
  *
- * Cross-repo: grove-www is a sibling checkout at ../grove-www with NO branch
- * protection. We push directly to its main. If that changes, update
- * groveWwwSyncAfter() to go PR-based there too.
+ * Cross-repo: grove-www is a sibling checkout at ../grove-www. Both repos
+ * have branch protection on main; ship.ts uses the same PR-based flow for
+ * each — push the agent's branch, open a PR, enable auto-merge, wait.
  */
 
 import { execSync, spawn } from "node:child_process";
@@ -193,16 +193,34 @@ function groveWwwBranch(): string {
   return sh(`git rev-parse --abbrev-ref HEAD`, { cwd: GROVE_WWW, quiet: true });
 }
 
-function groveWwwSyncBefore(): void {
+async function groveWwwSyncBefore(): Promise<void> {
   log("grove-www: sync before batch");
   const branch = groveWwwBranch();
   if (branch !== "main") {
     // Fold anything ahead on a stray branch onto main first
-    groveWwwSyncAfter(branch);
+    await groveWwwSyncAfter(branch);
   }
   sh(`git fetch origin main --quiet`, { cwd: GROVE_WWW });
   sh(`git checkout main --quiet`, { cwd: GROVE_WWW });
-  sh(`git merge origin/main --ff-only`, { cwd: GROVE_WWW });
+
+  // If local main diverged but its commits are already upstream (via squash
+  // merge of a prior PR), --rebase drops them cleanly. Raw --ff-only fails
+  // on any divergence, including the benign already-squashed case.
+  const localSha = sh(`git rev-parse main`, { cwd: GROVE_WWW, quiet: true });
+  const remoteSha = sh(`git rev-parse origin/main`, { cwd: GROVE_WWW, quiet: true });
+  if (localSha !== remoteSha) {
+    const ahead = Number(sh(`git log origin/main..main --oneline | wc -l`, { cwd: GROVE_WWW, quiet: true }).trim());
+    const behind = Number(sh(`git log main..origin/main --oneline | wc -l`, { cwd: GROVE_WWW, quiet: true }).trim());
+    log(`grove-www: main ahead=${ahead} behind=${behind} — rebasing onto origin/main`);
+    sh(`git pull --rebase origin main`, { cwd: GROVE_WWW });
+    const reboundAhead = Number(sh(`git log origin/main..main --oneline | wc -l`, { cwd: GROVE_WWW, quiet: true }).trim());
+    if (reboundAhead > 0) {
+      // Genuine local commits that aren't upstream. Route them through a PR.
+      log(`grove-www: ${reboundAhead} local commit(s) survive rebase — opening PR instead of direct push`);
+      await groveWwwSyncAfter("main");
+    }
+  }
+
   const status = sh(`git status --porcelain`, { cwd: GROVE_WWW, quiet: true });
   if (status) {
     throw new Error(`grove-www dirty pre-batch:\n${status}`);
@@ -211,39 +229,129 @@ function groveWwwSyncBefore(): void {
   log(`  grove-www on main @ ${head}`);
 }
 
-function groveWwwSyncAfter(overrideBranch?: string): void {
+async function groveWwwSyncAfter(overrideBranch?: string): Promise<void> {
   const branch = overrideBranch ?? groveWwwBranch();
+
   if (branch === "main") {
     sh(`git fetch origin main --quiet`, { cwd: GROVE_WWW });
-    const toPush = sh(`git log origin/main..main --oneline | wc -l`, { cwd: GROVE_WWW, quiet: true }).trim();
-    if (Number(toPush) > 0) {
-      log(`grove-www: pushing ${toPush} commit(s) from main`);
-      sh(`git push origin main`, { cwd: GROVE_WWW });
-    } else {
+    const toPush = Number(sh(`git log origin/main..main --oneline | wc -l`, { cwd: GROVE_WWW, quiet: true }).trim());
+    if (toPush === 0) {
       log("grove-www: no new commits on main");
+      return;
     }
+    // Move local main commits onto a throwaway branch and route through a PR —
+    // branch protection rejects direct pushes to main.
+    const stamp = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
+    const newBranch = `ship/grove-www-${stamp}`;
+    log(`grove-www: moving ${toPush} local main commit(s) onto ${newBranch} for PR flow`);
+    sh(`git branch ${newBranch} main`, { cwd: GROVE_WWW });
+    sh(`git reset --hard origin/main`, { cwd: GROVE_WWW });
+    sh(`git checkout ${newBranch} --quiet`, { cwd: GROVE_WWW });
+    await groveWwwMergeViaPr(newBranch, toPush);
     return;
   }
-  const ahead = sh(`git log main..${branch} --oneline | wc -l`, { cwd: GROVE_WWW, quiet: true }).trim();
-  if (Number(ahead) === 0) {
+
+  const ahead = Number(sh(`git log main..${branch} --oneline | wc -l`, { cwd: GROVE_WWW, quiet: true }).trim());
+  if (ahead === 0) {
     log(`grove-www: on ${branch}, no commits ahead of main — checkout main`);
     sh(`git checkout main --quiet`, { cwd: GROVE_WWW });
     return;
   }
-  log(`grove-www: ${branch} has ${ahead} commit(s) ahead of main — consolidating onto main`);
+  log(`grove-www: ${branch} has ${ahead} commit(s) ahead of main — merging via PR`);
+  await groveWwwMergeViaPr(branch, ahead);
+}
+
+/**
+ * Push the branch (if it's behind origin), find or open a PR, enable
+ * auto-merge, wait for merge, then check out main and sync. Used by
+ * both the before-sync (clean up stray branches) and after-sync (fold
+ * agent work) paths — the agent may have already pushed + opened a PR,
+ * in which case we reuse it.
+ */
+async function groveWwwMergeViaPr(branch: string, commitCount: number): Promise<void> {
+  // Push if local is ahead of origin. --force-with-lease is safe here
+  // because the branch is ours; if something else grew on top, we want
+  // to know. (An agent might have pushed already — the push is a no-op.)
+  sh(`git fetch origin --quiet`, { cwd: GROVE_WWW });
+  const remoteExists = shTry(`git rev-parse --verify origin/${branch}`, { cwd: GROVE_WWW });
+  if (!remoteExists.ok) {
+    log(`  pushing ${branch} → origin (new)`);
+    sh(`git push -u origin ${branch}`, { cwd: GROVE_WWW });
+  } else {
+    const localSha = sh(`git rev-parse ${branch}`, { cwd: GROVE_WWW, quiet: true });
+    const remoteSha = sh(`git rev-parse origin/${branch}`, { cwd: GROVE_WWW, quiet: true });
+    if (localSha !== remoteSha) {
+      log(`  pushing ${branch} → origin (update)`);
+      sh(`git push origin ${branch} --force-with-lease`, { cwd: GROVE_WWW });
+    }
+  }
+
+  // Find existing PR or open one.
+  let prNumber: number;
+  const existing = shTry(
+    `gh pr list --repo jmilinovich/grove-www --head ${branch} --state open --json number --jq '.[0].number // empty'`,
+    { cwd: GROVE_WWW },
+  );
+  if (existing.ok && existing.out.trim()) {
+    prNumber = Number(existing.out.trim());
+    log(`  using existing grove-www PR #${prNumber}`);
+  } else {
+    // Title from the last commit's subject. For multi-commit branches this is
+    // the most recent work; good enough for an auto-opened PR.
+    const title = sh(`git log -1 --format=%s ${branch}`, { cwd: GROVE_WWW, quiet: true });
+    const body = [
+      `Opened automatically by \`scripts/ship.ts\` — agent produced ${commitCount} commit(s) on \`${branch}\`.`,
+      "",
+      "Auto-merge enabled; merges when required checks pass.",
+    ].join("\n");
+    const out = sh(
+      `gh pr create --repo jmilinovich/grove-www --title ${JSON.stringify(title)} --body ${JSON.stringify(body)} --base main --head ${branch}`,
+      { cwd: GROVE_WWW, quiet: true },
+    );
+    const match = out.match(/\/pull\/(\d+)/);
+    if (!match) throw new Error(`grove-www: couldn't parse PR number from: ${out}`);
+    prNumber = Number(match[1]);
+    log(`  opened grove-www PR #${prNumber}: https://github.com/jmilinovich/grove-www/pull/${prNumber}`);
+  }
+
+  // Enable auto-merge (idempotent — already-enabled is a no-op failure we swallow).
+  shTry(`gh pr merge ${prNumber} --repo jmilinovich/grove-www --auto --squash --delete-branch`, {});
+
+  await waitForGroveWwwMerge(prNumber);
+
+  // Sync local main with the merge result.
   sh(`git checkout main --quiet`, { cwd: GROVE_WWW });
   sh(`git fetch origin main --quiet`, { cwd: GROVE_WWW });
-  sh(`git merge origin/main --ff-only`, { cwd: GROVE_WWW });
+  sh(`git reset --hard origin/main`, { cwd: GROVE_WWW });
+}
 
-  const commits = sh(`git log main..${branch} --format=%H --reverse`, { cwd: GROVE_WWW, quiet: true })
-    .split("\n")
-    .filter(Boolean);
-  for (const sha of commits) {
-    log(`  cherry-pick ${sha.slice(0, 7)}`);
-    sh(`git cherry-pick ${sha}`, { cwd: GROVE_WWW });
+async function waitForGroveWwwMerge(prNumber: number): Promise<void> {
+  const deadline = Date.now() + PR_MERGE_TIMEOUT_MS;
+  let lastState = "";
+  while (Date.now() < deadline) {
+    const out = sh(
+      `gh pr view ${prNumber} --repo jmilinovich/grove-www --json state,mergedAt,mergeStateStatus`,
+      { quiet: true },
+    );
+    const data = JSON.parse(out) as { state: string; mergedAt: string | null; mergeStateStatus: string };
+    if (data.state === "MERGED") {
+      log(`  ✓ grove-www PR #${prNumber} merged`);
+      return;
+    }
+    if (data.state === "CLOSED") {
+      throw new Error(`grove-www PR #${prNumber} closed without merging`);
+    }
+    if (data.mergeStateStatus === "BEHIND") {
+      log(`  grove-www PR #${prNumber} BEHIND main — updating branch`);
+      shTry(`gh pr update-branch ${prNumber} --repo jmilinovich/grove-www`, {});
+    }
+    if (data.mergeStateStatus !== lastState) {
+      log(`  grove-www PR #${prNumber}: ${data.mergeStateStatus}`);
+      lastState = data.mergeStateStatus;
+    }
+    await new Promise((r) => setTimeout(r, PR_POLL_INTERVAL_MS));
   }
-  sh(`git push origin main`, { cwd: GROVE_WWW });
-  log(`grove-www: pushed ${ahead} commit(s) to origin/main`);
+  throw new Error(`grove-www PR #${prNumber} did not merge within ${PR_MERGE_TIMEOUT_MS / 60000}m`);
 }
 
 // ── Worktree lifecycle (claude --worktree creates the worktree) ────
@@ -528,7 +636,7 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
   }
 
   assertCleanAndOnMain(REPO_ROOT, "grove");
-  groveWwwSyncBefore();
+  await groveWwwSyncBefore();
 
   // Per-batch log directory — each agent gets its own file under here
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -555,9 +663,10 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
     throw new Error(`${failures.length} agent(s) failed — halting. Worktrees preserved for inspection.`);
   }
 
-  // Fold grove-www work (cherry-pick from any branch onto main, push).
-  // grove-www has no branch protection — direct push to main is fine.
-  groveWwwSyncAfter();
+  // Fold grove-www work — agent may have pushed its branch + opened a PR
+  // already, or it may have committed to local main. Either way route
+  // through a PR so branch protection's required checks run.
+  await groveWwwSyncAfter();
 
   log("building ship branch");
   const { sha, shipBranch } = buildShipBranch(batch);
