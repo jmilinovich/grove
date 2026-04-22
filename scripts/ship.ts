@@ -2,10 +2,17 @@
 /**
  * ship.ts — PR-based autonomous batch orchestrator for grove.
  *
- * Replaces scripts/run-batch.sh + the three ship-*.sh driver scripts. Uses
- * @anthropic-ai/claude-agent-sdk to spawn agents in parallel worktrees,
- * merges their commits into a `ship/<batch-id>` branch, opens a PR, waits
- * for required checks to pass, and triggers auto-merge.
+ * Replaces scripts/run-batch.sh + the three ship-*.sh driver scripts. Spawns
+ * `claude --worktree <branch> --print --dangerously-skip-permissions <prompt>`
+ * processes in parallel, waits for them to exit with hard + stall timeouts,
+ * merges their resulting branches into a `ship/<batch-id>` branch, opens a
+ * PR, and triggers GitHub's auto-merge.
+ *
+ * Why shell out instead of using the Agent SDK: the SDK's platform-specific
+ * optional deps don't resolve cleanly across macOS/Linux lockfiles (npm ci
+ * fails in CI). Shelling out is the same pattern run-batch.sh used, has no
+ * cross-platform dep footprint, and costs us only the loss of structured
+ * events — we get stall detection via stdio watchdog instead.
  *
  * Why PR-based: branch protection on main now requires `test`, `plan-drift`,
  * `audit`, `secrets` to pass (no admin bypass). Direct `git push origin
@@ -25,12 +32,11 @@
  */
 
 import { execSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, appendFileSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { createWriteStream, existsSync, mkdirSync, appendFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { query } from "@anthropic-ai/claude-agent-sdk";
 
-import { BATCHES, findBatch, type Batch, type BatchEntry } from "./ship/batches.ts";
+import { BATCHES, type Batch, type BatchEntry } from "./ship/batches.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
@@ -39,8 +45,8 @@ const PROGRESS_LOG = resolve(REPO_ROOT, ".agents/progress.jsonl");
 
 // Hard cap per agent. Kills the p18-style 2-hour hang.
 const AGENT_TIMEOUT_MS = 30 * 60 * 1000;
-// Stale heartbeat cap: if no tool use or message in this window, consider agent stuck.
-const STALE_HEARTBEAT_MS = 5 * 60 * 1000;
+// Stale-stdout cap: if no output for this long, consider the agent stuck.
+const STALE_STDOUT_MS = 5 * 60 * 1000;
 // Poll interval while waiting for PR merge.
 const PR_POLL_INTERVAL_MS = 15_000;
 // Max time to wait for PR merge (CI + auto-merge queue).
@@ -240,83 +246,93 @@ function groveWwwSyncAfter(overrideBranch?: string): void {
   log(`grove-www: pushed ${ahead} commit(s) to origin/main`);
 }
 
-// ── Worktree management ────────────────────────────────────────────
+// ── Worktree lifecycle (claude --worktree creates the worktree) ────
 
-function worktreePath(branch: string): string {
-  return resolve(REPO_ROOT, ".claude/worktrees", branch);
-}
-
-function setupWorktree(entry: BatchEntry): string {
-  const wtPath = worktreePath(entry.branch);
-  const wtBranch = `worktree-${entry.branch}`;
-  // Clean up any stale worktree from a prior run
-  shTry(`git worktree remove ${wtPath} --force`, {});
-  shTry(`git branch -D ${wtBranch}`, {});
-  sh(`git worktree prune`, {});
-  sh(`git worktree add ${wtPath} -b ${wtBranch} origin/main`);
-  return wtPath;
+function worktreePath(entry: BatchEntry): string {
+  return resolve(REPO_ROOT, ".claude/worktrees", entry.branch);
 }
 
 function cleanupWorktree(entry: BatchEntry): void {
-  const wtPath = worktreePath(entry.branch);
+  const wtPath = worktreePath(entry);
   if (existsSync(wtPath)) {
     shTry(`git worktree remove ${wtPath} --force`, {});
   }
+  shTry(`git branch -D worktree-${entry.branch}`, {});
 }
 
-// ── Agent spawn ────────────────────────────────────────────────────
+// ── Agent spawn (shells out to `claude --worktree`) ────────────────
 
-async function runAgent(entry: BatchEntry, wtPath: string): Promise<{ ok: boolean; msg?: string }> {
-  const abort = new AbortController();
-  const hardTimeout = setTimeout(() => {
-    log(`⚠ ${entry.branch}: 30-minute hard timeout — aborting`);
-    abort.abort();
-  }, AGENT_TIMEOUT_MS);
+interface AgentResult {
+  branch: string;
+  ok: boolean;
+  msg?: string;
+  logPath: string;
+}
 
-  let lastActivity = Date.now();
-  const heartbeatCheck = setInterval(() => {
-    if (Date.now() - lastActivity > STALE_HEARTBEAT_MS) {
-      log(`⚠ ${entry.branch}: no activity for 5 min — aborting (suspected hang)`);
-      abort.abort();
-      clearInterval(heartbeatCheck);
-    }
-  }, 30_000);
+function runAgent(entry: BatchEntry, logDir: string): Promise<AgentResult> {
+  return new Promise((resolvePromise) => {
+    const logPath = resolve(logDir, `${entry.branch}.log`);
+    const out = createWriteStream(logPath, { flags: "a" });
 
-  try {
-    const stream = query({
-      prompt: entry.prompt,
-      options: {
-        abortController: abort,
-        cwd: wtPath,
-        permissionMode: "bypassPermissions",
-        maxTurns: 200,
-      },
+    const child = spawn(
+      "claude",
+      [
+        "--worktree",
+        entry.branch,
+        "--print",
+        "--dangerously-skip-permissions",
+        entry.prompt,
+      ],
+      { cwd: REPO_ROOT, stdio: ["ignore", "pipe", "pipe"] },
+    );
+
+    let lastOutput = Date.now();
+    let aborted = false;
+
+    const hardKill = setTimeout(() => {
+      if (!aborted) {
+        aborted = true;
+        log(`  ⚠ ${entry.branch}: 30-min hard timeout — killing`);
+        try { child.kill("SIGTERM"); } catch {}
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
+      }
+    }, AGENT_TIMEOUT_MS);
+
+    const stallCheck = setInterval(() => {
+      if (!aborted && Date.now() - lastOutput > STALE_STDOUT_MS) {
+        aborted = true;
+        log(`  ⚠ ${entry.branch}: no output for 5 min — killing`);
+        try { child.kill("SIGTERM"); } catch {}
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 5000);
+        clearInterval(stallCheck);
+      }
+    }, 30_000);
+
+    child.stdout?.on("data", (chunk: Buffer) => { lastOutput = Date.now(); out.write(chunk); });
+    child.stderr?.on("data", (chunk: Buffer) => { lastOutput = Date.now(); out.write(chunk); });
+
+    child.on("exit", (code, signal) => {
+      clearTimeout(hardKill);
+      clearInterval(stallCheck);
+      out.end();
+      if (aborted) {
+        resolvePromise({ branch: entry.branch, ok: false, msg: "killed (timeout or stall)", logPath });
+      } else if (signal) {
+        resolvePromise({ branch: entry.branch, ok: false, msg: `signal ${signal}`, logPath });
+      } else if (code === 0) {
+        resolvePromise({ branch: entry.branch, ok: true, logPath });
+      } else {
+        resolvePromise({ branch: entry.branch, ok: false, msg: `exit ${code}`, logPath });
+      }
     });
 
-    let toolCount = 0;
-    for await (const msg of stream) {
-      lastActivity = Date.now();
-      // Tight log — one line per meaningful event. The agent's own stdout is
-      // irrelevant to us; we care about forward progress + final state.
-      if (msg.type === "assistant") {
-        toolCount++;
-      } else if (msg.type === "result") {
-        // Terminal message from the SDK. Break the loop.
-        break;
-      }
-    }
-
-    log(`  ${entry.branch}: ${toolCount} agent messages, exiting`);
-    return { ok: true };
-  } catch (e: any) {
-    if (abort.signal.aborted) {
-      return { ok: false, msg: "aborted (timeout or heartbeat)" };
-    }
-    return { ok: false, msg: e?.message ?? String(e) };
-  } finally {
-    clearTimeout(hardTimeout);
-    clearInterval(heartbeatCheck);
-  }
+    child.on("error", (err) => {
+      clearTimeout(hardKill);
+      clearInterval(stallCheck);
+      out.end();
+      resolvePromise({ branch: entry.branch, ok: false, msg: err.message, logPath });
+    });
+  });
 }
 
 // ── Ship branch + PR ───────────────────────────────────────────────
@@ -425,50 +441,42 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
     return;
   }
 
-  // Preflight (after any previous batch's sync completed)
   assertCleanAndOnMain(REPO_ROOT, "grove");
   groveWwwSyncBefore();
 
-  // Set up worktrees
-  log(`setting up ${batch.entries.length} worktree(s)`);
-  for (const e of batch.entries) {
-    setupWorktree(e);
-    log(`  ✓ worktree-${e.branch} @ ${worktreePath(e.branch)}`);
-  }
+  // Per-batch log directory — each agent gets its own file under here
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const logDir = resolve(REPO_ROOT, `.agents/${batch.id}_${stamp}`);
+  mkdirSync(logDir, { recursive: true });
+  log(`agent logs → ${logDir}`);
 
-  // Run agents in parallel
-  log(`launching ${batch.entries.length} agent(s)`);
+  // Run agents in parallel. `claude --worktree` creates the worktree itself;
+  // we don't pre-create it. Each process writes to logDir/<branch>.log.
+  log(`launching ${batch.entries.length} agent(s) via claude --worktree`);
   const started = Date.now();
-  const results = await Promise.all(
-    batch.entries.map(async (entry) => {
-      const wtPath = worktreePath(entry.branch);
-      const res = await runAgent(entry, wtPath);
-      return { entry, res };
-    }),
-  );
+  const results = await Promise.all(batch.entries.map((e) => runAgent(e, logDir)));
   const elapsed = Math.round((Date.now() - started) / 1000);
   log(`all agents settled in ${elapsed}s`);
 
-  const failures = results.filter((r) => !r.res.ok);
+  const failures = results.filter((r) => !r.ok);
   if (failures.length > 0) {
-    for (const f of failures) log(`  ✗ ${f.entry.branch}: ${f.res.msg}`);
+    for (const f of failures) log(`  ✗ ${f.branch}: ${f.msg} (log: ${f.logPath})`);
     appendProgress({
       batch: batch.id,
       status: "agent_failed",
-      failures: failures.map((f) => ({ branch: f.entry.branch, msg: f.res.msg })),
+      failures: failures.map((f) => ({ branch: f.branch, msg: f.msg, log: f.logPath })),
     });
     throw new Error(`${failures.length} agent(s) failed — halting. Worktrees preserved for inspection.`);
   }
 
-  // Fold grove-www work (cherry-pick from any branch onto main, push)
+  // Fold grove-www work (cherry-pick from any branch onto main, push).
+  // grove-www has no branch protection — direct push to main is fine.
   groveWwwSyncAfter();
 
-  // Merge worktree branches into ship/<batch>
   log("building ship branch");
   const { sha, shipBranch } = buildShipBranch(batch);
   log(`  ship branch ${shipBranch} @ ${sha.slice(0, 7)}`);
 
-  // Open PR + auto-merge
   log("opening PR");
   const prNumber = await openPR(batch, shipBranch);
   log(`  PR #${prNumber}: https://github.com/jmilinovich/grove/pull/${prNumber}`);
@@ -484,11 +492,10 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
     sha: mergeSha,
   });
 
-  // Sync local main with the new merge commit + clean up worktrees
+  // Sync local main with the merge + clean up worktrees
   sh(`git checkout main`);
   sh(`git pull origin main --ff-only`);
   for (const e of batch.entries) cleanupWorktree(e);
-  shTry(`git branch -D worktree-${batch.entries.map((e) => e.branch).join(" worktree-")}`, {});
 
   log(`batch ${batch.id} complete`);
 }
