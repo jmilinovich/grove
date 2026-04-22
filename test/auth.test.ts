@@ -371,7 +371,15 @@ describe("auth", () => {
 
     it("rejects tampered token", () => {
       const token = generateCsrfToken();
-      const tampered = "x" + token.slice(1);
+      // Flip the first char to something guaranteed-different. The
+      // original implementation used "x" + token.slice(1), which
+      // accidentally passed through the original token ~1.5% of the
+      // time (base64url → 1/64 chance first char is already 'x'),
+      // flaking CI on Dependabot bumps.
+      const first = token[0];
+      const replacement = first === "x" ? "y" : "x";
+      const tampered = replacement + token.slice(1);
+      expect(tampered).not.toBe(token);
       expect(validateCsrfToken(tampered)).toBe(false);
     });
 
