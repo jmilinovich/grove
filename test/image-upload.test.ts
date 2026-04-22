@@ -41,16 +41,24 @@ beforeEach(() => {
   tempVault = mkdtempSync(join(tmpdir(), "grove-image-upload-"));
   process.env.GROVE_VAULT = tempVault;
   process.env.GROVE_VAULT_ID = "life";
+  // Per-test sqlite DB so write-path provenance recording has a schema
+  // in CI runs (local runs happen to have a populated default db).
+  process.env.GROVE_DB_PATH = join(tempVault, "grove.db");
 });
 
 afterEach(() => {
   vi.clearAllMocks();
   delete process.env.GROVE_VAULT;
   delete process.env.GROVE_VAULT_ID;
+  delete process.env.GROVE_DB_PATH;
 });
 
 async function loadRest() {
   vi.resetModules();
+  // Bring schema up so write_provenance exists when handleWriteNote runs.
+  const db = await import("../src/db.js");
+  db.resetDb();
+  db.createSchema();
   return import("../src/rest.js");
 }
 
