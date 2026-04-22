@@ -16,6 +16,8 @@ import {
   gitCommit,
   gitCommitPaths,
   gitMv,
+  gitRevParseHead,
+  gitResetHard,
   qmdReindex,
   gitPush,
   readNoteFile,
@@ -36,6 +38,8 @@ import {
   getDb,
   recordWrite,
   getSourceHash,
+  getProvenance,
+  setProvenanceRow,
   deleteProvenance,
   renameProvenance,
   discoveryQueueDepth,
@@ -1030,6 +1034,51 @@ export async function handleStatusPerf(): Promise<Record<string, unknown>> {
 // ── Write ──────────────────────────────────────────────────────────
 
 /**
+ * In-mutex disk write: serialize the note, write it to disk, commit to git,
+ * record provenance, and return the result shape. MUST be called from
+ * within writeQueue.enqueue — it does no locking of its own.
+ *
+ * Extracted so handleWriteNote (single) and handleWriteBatch (many) can
+ * share the exact same write semantics under one mutex acquisition.
+ */
+async function executeWriteInMutex(params: {
+  absPath: string;
+  relPath: string;
+  frontmatter: Record<string, unknown>;
+  content: string;
+  isNew: boolean;
+  keyName?: string;
+  handle?: string;
+}): Promise<WriteNoteResult> {
+  const { absPath, relPath, frontmatter, content, isNew, keyName, handle } = params;
+
+  const serialized = serializeNote(frontmatter, content);
+  const dir = dirname(absPath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  writeNoteFile(absPath, serialized);
+  invalidateFrontmatterCache(absPath);
+
+  const action = isNew ? "create" : "update";
+  const who = keyName ? `grove (${keyName})` : "grove (api)";
+  const commitMsg = `${who}: ${action} ${relPath}`;
+  const sha = await gitCommit(VAULT_PATH, relPath, commitMsg);
+
+  const sourceHash = contentHash(serialized);
+  recordWrite(relPath, sourceHash, sha, keyName ?? "api");
+
+  qmdReindex(relPath).catch(() => {});
+
+  return {
+    path: relPath,
+    action,
+    source_hash: sourceHash,
+    content_hash: sourceHash,
+    commit: sha,
+    url: noteUrl(relPath, handle ?? getVaultOwnerHandle()),
+  };
+}
+
+/**
  * Optimistic-concurrency check shared by write / move / delete.
  * Prefers provenance.source_hash (stable across discovery-worker mutations);
  * falls back to the on-disk hash for paths with no provenance entry yet.
@@ -1113,44 +1162,17 @@ export async function handleWriteNote(
   // Optimistic concurrency check (prefers provenance, falls back to disk).
   if (options.ifHash) assertIfHashMatches(relPath, absPath, options.ifHash);
 
-  // Enqueue the write
-  const result = await writeQueue.enqueue(async () => {
-    const serialized = serializeNote(frontmatter, content);
-    const dir = dirname(absPath);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeNoteFile(absPath, serialized);
-    invalidateFrontmatterCache(absPath);
-
-    const isNew = !options.ifHash;
-    const action = isNew ? "create" : "update";
-    const who = options.keyName ? `grove (${options.keyName})` : "grove (api)";
-    const commitMsg = `${who}: ${action} ${relPath}`;
-    const sha = await gitCommit(VAULT_PATH, relPath, commitMsg);
-
-    // source_hash is the hash of what the CALLER wrote, before any
-    // discovery-worker mutation. content_hash is equal at this point but
-    // may drift once discovery runs; source_hash stays pinned.
-    const sourceHash = contentHash(serialized);
-    recordWrite(relPath, sourceHash, sha, options.keyName ?? "api");
-
-    // qmd reindex is full-vault and takes ~10s on a large vault.
-    // Fire-and-forget: the dedup+coalesce in qmdReindex() ensures at most
-    // one in-flight run + one queued tail run, so search catches up within
-    // ~10-20s of the last write without blocking any individual response.
-    qmdReindex(relPath).catch(() => {});
-
-    // Refresh stats cache (fire-and-forget; deduped in-flight)
-    // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
-
-    return {
-      path: relPath,
-      action,
-      source_hash: sourceHash,
-      content_hash: sourceHash,
-      commit: sha,
-      url: noteUrl(relPath, options.handle ?? getVaultOwnerHandle()),
-    };
-  });
+  // Enqueue the write. All disk + git work is done by executeWriteInMutex,
+  // so single writes and batched writes share identical semantics.
+  const result = await writeQueue.enqueue(() => executeWriteInMutex({
+    absPath,
+    relPath,
+    frontmatter,
+    content,
+    isNew: !options.ifHash,
+    keyName: options.keyName,
+    handle: options.handle,
+  }));
 
   // Enqueue for discovery processing
   try {
@@ -1176,6 +1198,170 @@ export async function handleWriteNote(
   });
 
   return result;
+}
+
+// ── Batch write ────────────────────────────────────────────────────
+
+export interface BatchOperation {
+  path: string;
+  frontmatter: Record<string, unknown>;
+  content: string;
+  /** Optimistic-concurrency check against recorded source_hash. */
+  if_hash?: string;
+  /**
+   * Use the source_hash result of an earlier op in this batch (0-based
+   * index). Lets a caller chain a create + update atomically without a
+   * round-trip for the intermediate hash.
+   */
+  if_hash_from_op?: number;
+}
+
+export interface WriteBatchResult {
+  results: WriteNoteResult[];
+}
+
+/**
+ * Batched writes in a single mutex acquisition. Collapses N round-trips
+ * into 1 and amortizes git overhead across the batch. Currently supports
+ * write actions only (create/update) — move and delete batching remain
+ * single-op for now.
+ *
+ * With `atomic: true` the batch either fully succeeds or rolls back:
+ *   - git HEAD is reset to its pre-batch SHA (discards per-op commits)
+ *   - provenance is restored to its pre-batch state for every touched path
+ *   - the caller sees the original error
+ *
+ * With `atomic: false` (default), ops run in order and partial success is
+ * possible — already-succeeded ops stay committed; the error stops the batch.
+ */
+export async function handleWriteBatch(
+  operations: BatchOperation[],
+  options: { atomic?: boolean; trail?: TrailConfig | null; keyName?: string; handle?: string } = {},
+): Promise<WriteBatchResult> {
+  if (operations.length === 0) {
+    throw Object.assign(new Error("operations array is empty"), { code: "VALIDATION" });
+  }
+  const atomic = options.atomic ?? false;
+
+  // Pre-flight: validate every op up front. Any failure here aborts before
+  // the mutex is ever acquired — cheap feedback, no partial state risk.
+  const validated: Array<{
+    absPath: string;
+    relPath: string;
+    frontmatter: Record<string, unknown>;
+    content: string;
+    if_hash?: string;
+    if_hash_from_op?: number;
+  }> = [];
+  const config = loadVaultConfig(VAULT_PATH);
+
+  for (const [i, op] of operations.entries()) {
+    if (!op || typeof op.path !== "string") {
+      throw Object.assign(new Error(`op ${i}: path is required`), { code: "VALIDATION", errors: [`op ${i}: path is required`] });
+    }
+    if (options.trail && !trailAllowsWrite(options.trail, op.path)) {
+      throw Object.assign(new Error(`op ${i}: path outside trail scope`), { code: "TRAIL_DENIED" });
+    }
+    let absPath: string;
+    try {
+      absPath = validatePath(VAULT_PATH, op.path);
+    } catch (err: any) {
+      throw Object.assign(new Error(`op ${i}: path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
+    }
+    const relPath = relative(VAULT_PATH, absPath);
+    const { errors } = validateNote(relPath, op.frontmatter ?? {}, op.content ?? "", config);
+    if (errors.length > 0) {
+      throw Object.assign(
+        new Error(`op ${i}: validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}`),
+        { code: "VALIDATION", errors: errors.map((e) => `op ${i}: ${e}`) },
+      );
+    }
+    if (op.if_hash_from_op !== undefined) {
+      if (!Number.isInteger(op.if_hash_from_op) || op.if_hash_from_op < 0 || op.if_hash_from_op >= i) {
+        throw Object.assign(
+          new Error(`op ${i}: if_hash_from_op must be an integer < current op index`),
+          { code: "VALIDATION", errors: [`op ${i}: if_hash_from_op out of range`] },
+        );
+      }
+    }
+    validated.push({
+      absPath,
+      relPath,
+      frontmatter: op.frontmatter,
+      content: op.content,
+      if_hash: op.if_hash,
+      if_hash_from_op: op.if_hash_from_op,
+    });
+  }
+
+  // Execute inside the write mutex so no concurrent writer interleaves.
+  const results = await writeQueue.enqueue(async () => {
+    // Snapshot state for atomic rollback. Captured BEFORE any disk change.
+    const preSha: string | null = atomic ? await gitRevParseHead(VAULT_PATH) : null;
+    const preProvenance: Map<string, ReturnType<typeof getProvenance>> | null = atomic
+      ? new Map(validated.map((v) => [v.relPath, getProvenance(v.relPath)]))
+      : null;
+
+    const collected: WriteNoteResult[] = [];
+    try {
+      for (const [i, op] of validated.entries()) {
+        // Resolve chained if_hash references (no DB read — use batch-local result)
+        let ifHash = op.if_hash;
+        if (op.if_hash_from_op !== undefined) {
+          ifHash = collected[op.if_hash_from_op]!.source_hash;
+        }
+        if (ifHash) assertIfHashMatches(op.relPath, op.absPath, ifHash);
+
+        const r = await executeWriteInMutex({
+          absPath: op.absPath,
+          relPath: op.relPath,
+          frontmatter: op.frontmatter,
+          content: op.content,
+          isNew: !ifHash,
+          keyName: options.keyName,
+          handle: options.handle,
+        });
+        collected.push(r);
+      }
+      return collected;
+    } catch (err) {
+      if (atomic && preSha && preProvenance) {
+        // Roll back: hard-reset HEAD discards per-op commits + working-tree
+        // changes. Then restore provenance table to its pre-batch shape so
+        // future if_hash checks behave as if the batch never happened.
+        try {
+          await gitResetHard(VAULT_PATH, preSha);
+        } catch (resetErr) {
+          console.error(`[grove] batch rollback git reset failed: ${(resetErr as Error).message}`);
+        }
+        for (const [path, prior] of preProvenance) {
+          if (prior === null) deleteProvenance(path);
+          else setProvenanceRow(prior);
+          invalidateFrontmatterCache(join(VAULT_PATH, path));
+        }
+      }
+      throw err;
+    }
+  });
+
+  // Post-batch fire-and-forget per path.
+  for (const r of results) {
+    try {
+      enqueueDiscovery(r.path, "write");
+    } catch (enqueueErr) {
+      console.error(`[grove] discovery enqueue failed for ${r.path}:`, (enqueueErr as Error).message);
+    }
+    embedFile(VAULT_PATH, r.path).catch((err) => {
+      console.error(`[grove] embed-single failed for ${r.path}:`, (err as Error).message);
+      try {
+        enqueueDiscovery(r.path, "embed_retry");
+      } catch {
+        /* swallow — already logged */
+      }
+    });
+  }
+
+  return { results };
 }
 
 // ── Delete ─────────────────────────────────────────────────────────

@@ -30,7 +30,15 @@ function noteUrl(vaultPath: string): string {
 
 import { gitLog, startupRecovery, listNotes } from "./vault-ops.js";
 import { parseNote, contentHash, inferTags } from "./notes-validate.js";
-import { handleWriteNote, handleDeleteNote, handleMoveNote, handleStatusPerf, flushWriteQueue } from "./rest.js";
+import {
+  handleWriteNote,
+  handleDeleteNote,
+  handleMoveNote,
+  handleWriteBatch,
+  handleStatusPerf,
+  flushWriteQueue,
+  type BatchOperation,
+} from "./rest.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { getStats, startStatsTimer } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
@@ -89,17 +97,37 @@ type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean
 
 export interface WriteNoteInput {
   action?: "write" | "delete" | "hard_delete" | "move";
-  path: string;
+  path?: string;
   frontmatter?: string;
   content?: string;
   if_hash?: string;
   move_to?: string;
+  /**
+   * Batch mode: an array of write ops executed in one mutex acquisition.
+   * When present, this shape takes precedence over the single-op fields.
+   * Each entry passes its own path, frontmatter, content, and optionally
+   * if_hash or if_hash_from_op (reference an earlier op's source_hash).
+   */
+  operations?: Array<{
+    path: string;
+    /** YAML frontmatter as a JSON string (matching the single-op shape). */
+    frontmatter: string;
+    content: string;
+    if_hash?: string;
+    if_hash_from_op?: number;
+  }>;
+  /**
+   * With operations[] present: atomic=true rolls back all ops if any fail
+   * (git reset to the pre-batch SHA + provenance restored). Default false.
+   */
+  atomic?: boolean;
 }
 
 export interface WriteNoteDeps {
   handleWriteNote: typeof handleWriteNote;
   handleDeleteNote: typeof handleDeleteNote;
   handleMoveNote: typeof handleMoveNote;
+  handleWriteBatch: typeof handleWriteBatch;
   trail?: TrailConfig | null;
 }
 
@@ -107,9 +135,47 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
   const act = input.action ?? "write";
   const trail = deps.trail ?? null;
 
+  // Batch path: operations[] present takes precedence over single-op fields.
+  if (input.operations && input.operations.length > 0) {
+    const parsedOps: BatchOperation[] = [];
+    for (const [i, op] of input.operations.entries()) {
+      if (!op || typeof op.frontmatter !== "string" || typeof op.content !== "string") {
+        return {
+          content: [{ type: "text", text: `op ${i}: frontmatter and content are required (frontmatter as JSON string)` }],
+          isError: true,
+        };
+      }
+      let fm: Record<string, unknown>;
+      try {
+        fm = JSON.parse(op.frontmatter);
+      } catch {
+        return { content: [{ type: "text", text: `op ${i}: invalid frontmatter JSON` }], isError: true };
+      }
+      parsedOps.push({
+        path: op.path,
+        frontmatter: fm,
+        content: op.content,
+        if_hash: op.if_hash,
+        if_hash_from_op: op.if_hash_from_op,
+      });
+    }
+    try {
+      const result = await deps.handleWriteBatch(parsedOps, { atomic: input.atomic, trail });
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    } catch (err: any) {
+      return { content: [{ type: "text", text: err.message }], isError: true };
+    }
+  }
+
+  // Single-op path: `path` is required once operations[] is absent.
+  if (!input.path) {
+    return { content: [{ type: "text", text: "path is required (or use operations[] for batch)" }], isError: true };
+  }
+  const notePath = input.path;
+
   if (act === "delete" || act === "hard_delete") {
     try {
-      const result = await deps.handleDeleteNote(input.path, {
+      const result = await deps.handleDeleteNote(notePath, {
         hard: act === "hard_delete",
         ifHash: input.if_hash,
         trail,
@@ -125,7 +191,7 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
       return { content: [{ type: "text", text: "move_to is required when action is 'move'" }], isError: true };
     }
     try {
-      const result = await deps.handleMoveNote(input.path, input.move_to, {
+      const result = await deps.handleMoveNote(notePath, input.move_to, {
         ifHash: input.if_hash,
         trail,
       });
@@ -146,7 +212,7 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
   }
 
   try {
-    const result = await deps.handleWriteNote(input.path, frontmatter, input.content, {
+    const result = await deps.handleWriteNote(notePath, frontmatter, input.content, {
       ifHash: input.if_hash,
       trail,
     });
@@ -523,20 +589,30 @@ DELETE — prefer soft delete (action: "delete") so notes are recoverable from t
 
 MOVE — action: "move" with move_to. Updates all exact wikilink matches across the vault in the same commit.
 
+BATCH — pass operations: [...] to create/update many notes in one round-trip. Each op carries its own path/frontmatter/content/if_hash. Use if_hash_from_op to chain (reference the source_hash result of an earlier op). Set atomic: true to roll back the whole batch on any failure.
+
 After writing, present the url field from the response to the user.`,
       inputSchema: {
         action: z.enum(["write", "delete", "hard_delete", "move"]).optional().default("write").describe("What to do: write (default), delete (soft/archive), hard_delete, or move"),
-        path: z.string().describe(`File path relative to vault root, kebab-case (e.g., '${entityPath(VAULT_CONFIG, "concept")}context-engineering.md')`),
+        path: z.string().optional().describe(`File path relative to vault root, kebab-case (e.g., '${entityPath(VAULT_CONFIG, "concept")}context-engineering.md'). Required for single-op; omit when using operations[].`),
         frontmatter: z.string().optional().describe("YAML frontmatter as JSON string (required for write; ignored otherwise)"),
         content: z.string().optional().describe("Note body (markdown) (required for write; ignored otherwise)"),
         if_hash: z.string().optional().describe("Content hash from prior read — rejects if file changed since"),
         move_to: z.string().optional().describe("Destination path (required when action is 'move')"),
+        operations: z.array(z.object({
+          path: z.string(),
+          frontmatter: z.string().describe("YAML frontmatter as JSON string"),
+          content: z.string(),
+          if_hash: z.string().optional(),
+          if_hash_from_op: z.number().int().nonnegative().optional().describe("Reference the source_hash of an earlier op in this batch (0-based)"),
+        })).optional().describe("Batch mode: array of write ops executed in one mutex acquisition. Use instead of path/frontmatter/content for multi-note workflows."),
+        atomic: z.boolean().optional().describe("When operations[] is set, atomic=true rolls back the whole batch on any failure. Default false (ops that succeed stay committed)."),
       },
     },
-    async ({ action, path: notePath, frontmatter: fmInput, content, if_hash, move_to }) => {
+    async ({ action, path: notePath, frontmatter: fmInput, content, if_hash, move_to, operations, atomic }) => {
       return await dispatchWriteNote(
-        { action, path: notePath, frontmatter: fmInput, content, if_hash, move_to },
-        { handleWriteNote, handleDeleteNote, handleMoveNote, trail: activeTrail },
+        { action, path: notePath, frontmatter: fmInput, content, if_hash, move_to, operations, atomic },
+        { handleWriteNote, handleDeleteNote, handleMoveNote, handleWriteBatch, trail: activeTrail },
       );
     },
   );

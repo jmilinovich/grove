@@ -1899,7 +1899,11 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "not found" }));
           return;
         }
-        res.writeHead(200, { ...restHeaders, "ETag": `"${note.content_hash}"` });
+        // ETag is source_hash (stable across discovery mutations) so
+        // If-Match round-trips still validate after the worker has
+        // rewritten wikilinks. content_hash is still present in the body
+        // for clients that care about the on-disk form.
+        res.writeHead(200, { ...restHeaders, "ETag": `"${note.source_hash}"` });
         res.end(JSON.stringify(note));
       } catch (err) {
         console.error("[rest] get_note error:", err);
@@ -1954,7 +1958,7 @@ const server = createServer(async (req, res) => {
           keyName: restKey.name,
         });
         const status = result.action === "create" ? 201 : 200;
-        res.writeHead(status, { ...restHeaders, "ETag": `"${result.content_hash}"` });
+        res.writeHead(status, { ...restHeaders, "ETag": `"${result.source_hash}"` });
         res.end(JSON.stringify(result));
       } catch (err: any) {
         if (err.code === "TRAIL_DENIED") {
@@ -2062,7 +2066,7 @@ const server = createServer(async (req, res) => {
           trail: restTrail,
           keyName: restKey.name,
         });
-        res.writeHead(200, { ...restHeaders, "ETag": `"${result.content_hash}"` });
+        res.writeHead(200, { ...restHeaders, "ETag": `"${result.source_hash}"` });
         res.end(JSON.stringify(result));
       } catch (err: any) {
         if (err.code === "NOT_FOUND") {

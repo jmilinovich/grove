@@ -957,3 +957,24 @@ export function renameProvenance(fromPath: string, toPath: string): void {
     .prepare("UPDATE write_provenance SET path = ? WHERE path = ?")
     .run(toPath, fromPath);
 }
+
+/**
+ * Restore a provenance row verbatim (including its original written_at
+ * timestamp). Used by atomic batch rollback to return the table to its
+ * pre-batch state on failure. Regular writes should use recordWrite instead,
+ * which uses the current wall-clock for written_at.
+ */
+export function setProvenanceRow(row: ProvenanceRow): void {
+  const database = getDb();
+  database
+    .prepare(
+      `INSERT INTO write_provenance (path, source_hash, commit_sha, actor, written_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(path) DO UPDATE SET
+         source_hash = excluded.source_hash,
+         commit_sha = excluded.commit_sha,
+         actor = excluded.actor,
+         written_at = excluded.written_at`,
+    )
+    .run(row.path, row.source_hash, row.commit_sha, row.actor, row.written_at);
+}

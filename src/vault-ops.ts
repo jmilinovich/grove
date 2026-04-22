@@ -213,6 +213,17 @@ export async function gitRm(vaultPath: string, filePath: string): Promise<void> 
   await exec("git", ["rm", "-f", "--", filePath], vaultPath);
 }
 
+/** Return the current HEAD commit SHA. */
+export async function gitRevParseHead(vaultPath: string): Promise<string> {
+  const sha = await exec("git", ["rev-parse", "HEAD"], vaultPath);
+  return sha.trim();
+}
+
+/** Hard-reset HEAD to a prior commit, discarding working-tree changes. */
+export async function gitResetHard(vaultPath: string, sha: string): Promise<void> {
+  await exec("git", ["reset", "--hard", sha], vaultPath);
+}
+
 /** Move/rename a tracked file via git. Does not commit. */
 export async function gitMv(
   vaultPath: string,
