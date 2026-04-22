@@ -11,3 +11,12 @@ description = "Fake tokens in test fixtures"
 paths = [
   '''^test/''',
 ]
+
+# Historical leaked Voyage key — rotated and dead. Left in git history
+# (commit 7f6b2d9 and any downstream) instead of rewriting history.
+# Allowlisted so full-history scans (workflow_dispatch) don't trip on it.
+[[allowlists]]
+description = "Rotated-and-dead Voyage key from commit 7f6b2d9"
+regexes = [
+  '''pa-YeWvGAICiNOdKK14wGSX2XYpSSfoYMhDA5yaLGPAKhE''',
+]
