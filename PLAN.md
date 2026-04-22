@@ -379,7 +379,7 @@ Add multi-vault schema with up + down migrations. Transactional; entire migratio
 - After merge, the production deploy is blocked until `workflow_dispatch` is triggered with `confirm_schema_change=true` (Tier 2 schema-change guard). Rollback cannot safely undo a SQLite migration — the guard is intentional.
 - `scripts/check-plan-drift.ts` will still pass because the PostToolUse hook auto-marks the heading on commit.
 
-#### P8-A2: Vault router in grove-proxy (`src/proxy.ts`, `src/vault-router.ts`)
+#### P8-A2: Vault router in grove-proxy (`src/proxy.ts`, `src/vault-router.ts`) ✅ COMPLETE 2026-04-22 (3a87504)
 
 New routing middleware.
 
@@ -408,7 +408,7 @@ New routing middleware.
 - Backend down returns 503 with `Retry-After: 5`
 - No retry storms under load (1 retry max)
 
-#### P8-A3: Backend self-authentication (`src/server.ts`)
+#### P8-A3: Backend self-authentication (`src/server.ts`) ✅ COMPLETE 2026-04-22 (3a87504)
 
 Per security panel: `grove-server` must independently validate every token. Proxy routing is defense-in-depth, not the sole control.
 
@@ -469,7 +469,7 @@ Per panels: `pm2 reload` currently cuts in-flight writes.
 - `test/write-queue-stress.test.ts` continues passing (CLAUDE.md rule #3 — "all writes serialized, no concurrent git ops, ever")
 - Full shutdown-plus-startup completes in <60s, matching Tier 2's deploy health-poll window (12 × 5s = 60s)
 
-#### P8-A6: Per-vault observability (`src/logger.ts`, `src/proxy.ts`, `src/vault-usage.ts`, embed server)
+#### P8-A6: Per-vault observability (`src/logger.ts`, `src/proxy.ts`, `src/vault-usage.ts`, embed server) ✅ COMPLETE 2026-04-22 (3a87504)
 
 Measurement substrate for future rate limiting + billing.
 

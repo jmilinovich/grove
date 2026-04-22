@@ -2554,19 +2554,41 @@ const server = createServer(async (req, res) => {
     }
 
     // Rate limit tool calls
+    const isMcpWrite = mcpMethod === "tools/call" && toolName === "write_note";
     if (mcpMethod === "tools/call" && toolName) {
-      const isWrite = toolName === "write_note";
-      const { allowed, retryAfterMs } = rateLimiter.check(key.id, isWrite ? "write" : "read");
+      const { allowed, retryAfterMs } = rateLimiter.check(key.id, isMcpWrite ? "write" : "read");
       if (!allowed) {
         sendJson(res, 429, { error: "rate_limited", retry_after_ms: retryAfterMs });
         return;
       }
-      rateLimiter.record(key.id, isWrite ? "write" : "read");
+      rateLimiter.record(key.id, isMcpWrite ? "write" : "read");
     }
+
+    // P8-A6: bump per-vault request + write counters. Flushed to
+    // vault_usage_daily every 60s by the startup timer below.
+    try {
+      const vu = await import("./vault-usage.js");
+      vu.bumpRequest(key.vault_id);
+      if (isMcpWrite) vu.bumpWrite(key.vault_id);
+    } catch {
+      // counter failure must never block the request path
+    }
+
+    // P8-A3: capture vault_id outside the closure so TypeScript's narrowing
+    // holds — inside groveHeaders, `key` is through a closure and narrowing
+    // would be lost otherwise.
+    const authedVaultId = key.vault_id;
 
     // Build headers for Grove server (strip auth, add Accept, pass correlation ID + trail info, optionally strip stale session)
     function groveHeaders(stripSession = false): Record<string, string> {
-      const h: Record<string, string> = { "Accept": "application/json, text/event-stream", "X-Request-Id": rid };
+      const h: Record<string, string> = {
+        "Accept": "application/json, text/event-stream",
+        "X-Request-Id": rid,
+        // tell the backend which vault the authenticated token is bound to.
+        // grove-server compares this to its pinned GROVE_VAULT_ID env and
+        // refuses cross-vault requests.
+        "X-Grove-Vault-Id": authedVaultId,
+      };
       if (trail) {
         h["X-Trail-Id"] = trail.id;
         h["X-Trail-Config"] = JSON.stringify({
@@ -2698,6 +2720,33 @@ const VAULT_PATH_PROXY = process.env.GROVE_VAULT ?? join(homedir(), "life");
 startStatsTimer(VAULT_PATH_PROXY);
 
 const keyCount = getDb().prepare("SELECT COUNT(*) as count FROM api_keys").get() as { count: number };
+
+// P8-A2: load the vault slug→port map on startup. SIGHUP below reloads it
+// so operators can provision new vaults without restarting the proxy.
+import("./vault-router.js")
+  .then((vr) => {
+    const n = vr.loadVaultMap();
+    console.log(`[grove] vault-router loaded ${n} vault(s)`);
+  })
+  .catch((err) => console.error(`[grove] vault-router load failed: ${(err as Error).message}`));
+
+// P8-A6: start the vault-usage flush timer (60s). Counts bump at request
+// time; this timer upserts the accumulated state into vault_usage_daily.
+import("./vault-usage.js")
+  .then((vu) => {
+    vu.startFlushTimer();
+    console.log(`[grove] vault-usage flush timer started (60s interval)`);
+  })
+  .catch((err) => console.error(`[grove] vault-usage start failed: ${(err as Error).message}`));
+
+process.on("SIGHUP", () => {
+  import("./vault-router.js")
+    .then((vr) => {
+      const n = vr.loadVaultMap();
+      console.log(`[grove] vault-router reloaded on SIGHUP (${n} vault(s))`);
+    })
+    .catch((err) => console.error(`[grove] SIGHUP reload failed: ${(err as Error).message}`));
+});
 
 server.listen(PROXY_PORT, "0.0.0.0", () => {
   console.log(`Grove proxy listening on http://0.0.0.0:${PROXY_PORT}`);

@@ -903,6 +903,13 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+// P8-A3: pinned vault id for this grove-server process. Set by PM2 from
+// the generated ecosystem.config.cjs. When unset, any X-Grove-Vault-Id
+// header is accepted (single-vault legacy mode); when set, the backend
+// refuses requests whose header doesn't match. Defense-in-depth alongside
+// the proxy's routing decision.
+const GROVE_VAULT_ID = process.env.GROVE_VAULT_ID ?? null;
+
 const httpServer = createServer(async (req, res) => {
   // Read audit: log every request with correlation ID from proxy
   const requestId = req.headers["x-request-id"] as string | undefined;
@@ -913,15 +920,39 @@ const httpServer = createServer(async (req, res) => {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id, x-request-id");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id, x-request-id, x-grove-vault-id");
   res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  // Health
+  // Health — unauthenticated, no vault_id enforcement (deploy workflow polls this)
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, server: "grove" }));
     return;
+  }
+
+  // P8-A3: backend self-authentication. Pm2 spawns one grove-server per
+  // vault, each with GROVE_VAULT_ID pinned. If the proxy routes a request
+  // here whose token is bound to a different vault, reject with 403. The
+  // single-vault legacy setup doesn't set GROVE_VAULT_ID, so the check
+  // no-ops there.
+  if (GROVE_VAULT_ID) {
+    const headerVaultId = req.headers["x-grove-vault-id"] as string | undefined;
+    // /internal/* is discovery trigger from git post-commit hooks — we trust
+    // localhost callers there (same process group). Everything else must carry
+    // the header.
+    if (!req.url?.startsWith("/internal/")) {
+      if (!headerVaultId) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "missing X-Grove-Vault-Id" }));
+        return;
+      }
+      if (headerVaultId !== GROVE_VAULT_ID) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "vault mismatch" }));
+        return;
+      }
+    }
   }
 
   // Discovery trigger — called by git post-commit hook
