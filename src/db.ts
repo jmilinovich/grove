@@ -225,6 +225,16 @@ CREATE TABLE IF NOT EXISTS handle_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_handle_history_user ON handle_history(user_id);
+
+CREATE TABLE IF NOT EXISTS write_provenance (
+  path TEXT PRIMARY KEY,
+  source_hash TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  actor TEXT,
+  written_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_write_provenance_written_at ON write_provenance(written_at);
 `;
 
 export function createSchema(): void {
@@ -858,4 +868,92 @@ function migrateOAuth(database: Database.Database): void {
     renameSync(OAUTH_CODES_PATH, OAUTH_CODES_PATH + ".migrated");
     console.log("[db] OAuth codes JSON file renamed to .migrated (short-lived, not migrated)");
   }
+}
+
+// ─── Write provenance (two-hash model for optimistic concurrency) ──────────
+//
+// The discovery worker mutates notes after write (wikilink wiring). That makes
+// the on-disk content_hash unstable for the caller: by the time they issue a
+// follow-up update with if_hash, the hash may have moved under them.
+//
+// write_provenance tracks the hash of what the CALLER last wrote ("source
+// hash"), independent of any downstream enrichment. if_hash is checked against
+// source_hash, so concurrent discovery work doesn't produce false conflicts.
+//
+// Discovery writes go through writeFileSync + gitCommit directly and do NOT
+// update this table — source_hash stays pinned to the caller's intent.
+
+/**
+ * Record a caller-initiated write. Upserts, so the most recent caller write
+ * wins. Called from handleWriteNote / handleMoveNote after a successful
+ * commit, never from the discovery worker.
+ */
+export function recordWrite(
+  path: string,
+  sourceHash: string,
+  commitSha: string,
+  actor?: string,
+): void {
+  const database = getDb();
+  database
+    .prepare(
+      `INSERT INTO write_provenance (path, source_hash, commit_sha, actor, written_at)
+       VALUES (?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(path) DO UPDATE SET
+         source_hash = excluded.source_hash,
+         commit_sha = excluded.commit_sha,
+         actor = excluded.actor,
+         written_at = excluded.written_at`,
+    )
+    .run(path, sourceHash, commitSha, actor ?? null);
+}
+
+/**
+ * Get the source hash for a path, or null if no caller write has ever been
+ * recorded (discovery-only notes, pre-provenance notes). Callers fall back
+ * to the on-disk content hash in that case.
+ */
+export function getSourceHash(path: string): string | null {
+  const database = getDb();
+  const row = database
+    .prepare("SELECT source_hash FROM write_provenance WHERE path = ?")
+    .get(path) as { source_hash: string } | undefined;
+  return row?.source_hash ?? null;
+}
+
+/**
+ * Full provenance row (for observability in vault_status mode=perf).
+ */
+export interface ProvenanceRow {
+  path: string;
+  source_hash: string;
+  commit_sha: string;
+  actor: string | null;
+  written_at: string;
+}
+
+export function getProvenance(path: string): ProvenanceRow | null {
+  const database = getDb();
+  const row = database
+    .prepare("SELECT path, source_hash, commit_sha, actor, written_at FROM write_provenance WHERE path = ?")
+    .get(path) as ProvenanceRow | undefined;
+  return row ?? null;
+}
+
+/**
+ * Remove provenance for a path. Call on hard_delete.
+ */
+export function deleteProvenance(path: string): void {
+  const database = getDb();
+  database.prepare("DELETE FROM write_provenance WHERE path = ?").run(path);
+}
+
+/**
+ * Rename provenance on move.
+ */
+export function renameProvenance(fromPath: string, toPath: string): void {
+  const database = getDb();
+  database
+    .prepare("UPDATE write_provenance SET path = ? WHERE path = ?")
+    .run(toPath, fromPath);
 }
