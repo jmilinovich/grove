@@ -1411,6 +1411,73 @@ async function cmdInvite(config: Config, email: string, flags: Record<string, st
   };
 }
 
+// ── Vault provisioning (P8-A4 — runs directly on the VPS) ───────
+
+async function cmdVaultCreate(
+  slug: string,
+  flags: Record<string, string | boolean>,
+): Promise<CmdResult> {
+  if (!slug) {
+    throw new CliError(
+      "bad_request",
+      "Usage: grove vault create <slug> --owner <email> [--dry-run]",
+      1,
+    );
+  }
+  const ownerEmail = typeof flags.owner === "string" ? flags.owner : "";
+  if (!ownerEmail) {
+    throw new CliError(
+      "bad_request",
+      "--owner <email> is required",
+      1,
+    );
+  }
+
+  const skipReload = flags["dry-run"] === true;
+  const displayName = typeof flags["display-name"] === "string" ? flags["display-name"] : undefined;
+  const { provisionVault, ProvisionError } = await import("./vault-provision.js");
+
+  try {
+    const result = await provisionVault(
+      { slug, ownerEmail, displayName },
+      { skipReload },
+    );
+    return {
+      ok: true,
+      vault_id: result.vaultId,
+      slug: result.slug,
+      git_path: result.gitPath,
+      server_port: result.serverPort,
+      discovery_port: result.discoveryPort,
+      owner_user_id: result.ownerUserId,
+      owner_api_token: result.ownerApiToken,
+      connector_url: result.connectorUrl,
+      ecosystem_path: result.ecosystemPath,
+      _fmt: () =>
+        `vault created: ${result.slug} (${result.vaultId})\n` +
+        `  git_path:        ${result.gitPath}\n` +
+        `  server_port:     ${result.serverPort}\n` +
+        `  discovery_port:  ${result.discoveryPort}\n` +
+        `  owner:           ${result.ownerUserId}\n` +
+        `  connector_url:   ${result.connectorUrl}\n\n` +
+        `Owner API token (shown once, save it now):\n\n  ${result.ownerApiToken}\n\n` +
+        `Invite email body (paste into Gmail/Mail):\n\n` +
+        `  Subject: You've been invited to ${result.slug} on Grove\n\n` +
+        `  Hi — ${result.slug} is a Grove knowledge vault. Add it to Claude.ai:\n` +
+        `    ${result.connectorUrl}\n` +
+        `  and paste this token when asked:\n    ${result.ownerApiToken}\n`,
+    };
+  } catch (err) {
+    if (err instanceof ProvisionError) {
+      const code = err.code === "slug_taken" ? "conflict"
+        : err.code === "invalid_slug" || err.code === "reserved_slug" ? "bad_request"
+        : "internal_error";
+      throw new CliError(code, err.message, code === "bad_request" ? 1 : code === "conflict" ? 2 : 3);
+    }
+    throw err;
+  }
+}
+
 // ── Vault encryption (remote, via /v1/admin/vault API) ─────────
 
 async function cmdVaultStatus(config: Config): Promise<CmdResult> {
@@ -2297,7 +2364,7 @@ async function main() {
       return;
     }
 
-    // Vault encryption lifecycle.
+    // Vault encryption + provisioning lifecycle.
     if (command === "vault") {
       const sub = positional || "status";
       switch (sub) {
@@ -2305,8 +2372,14 @@ async function main() {
         case "encrypt": result = await cmdVaultEncrypt(config); break;
         case "unlock":  result = await cmdVaultUnlock(config); break;
         case "lock":    result = await cmdVaultLock(config); break;
+        case "create": {
+          // positionals[0] = "create", positionals[1] = slug
+          const slugArg = positionals[1] ?? "";
+          result = await cmdVaultCreate(slugArg, flags);
+          break;
+        }
         default:
-          throw new CliError("bad_request", `Unknown vault subcommand: ${sub}\nUsage: grove vault [status|encrypt|unlock|lock]`, 1);
+          throw new CliError("bad_request", `Unknown vault subcommand: ${sub}\nUsage: grove vault [status|encrypt|unlock|lock|create]`, 1);
       }
       emitResult(result, flags);
       return;

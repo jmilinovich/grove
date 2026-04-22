@@ -425,7 +425,7 @@ Closes SSRF/localhost-bypass holes: even if the proxy is bypassed, the backend r
 - Backend rejects cross-vault tokens with 403 even when request bypasses the proxy
 - All MCP tool invocations and REST endpoints enforce the check uniformly
 
-#### P8-A4: Vault provisioning CLI (`src/cli.ts`, `src/vault-provision.ts`)
+#### P8-A4: Vault provisioning CLI (`src/cli.ts`, `src/vault-provision.ts`) ✅ COMPLETE 2026-04-22 (80633cd)
 
 `grove vault create <slug> --owner <email> [--git-path <path>]`:
 
