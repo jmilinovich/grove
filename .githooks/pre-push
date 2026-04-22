@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Runs the fast check before every push. Mirror of CI's fast gate —
+# catches typecheck/test regressions locally so you don't burn a CI
+# minute to find out.
+#
+# Opt in:  git config core.hooksPath .githooks
+# Opt out: git config --unset core.hooksPath
+# Bypass:  git push --no-verify
+#
+# Keep this fast. The vitest suite is large but mostly fast; if it
+# creeps past ~15s split slow checks into a separate `check:full`
+# and only run the fast half here.
+
+set -euo pipefail
+
+echo "[pre-push] running typecheck + tests…"
+npm run check
+
+echo "[pre-push] clean."

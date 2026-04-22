@@ -1,0 +1,47 @@
+version: 2
+updates:
+  # npm — grouped bumps for routine upkeep. Everything goes through the
+  # auto-merge workflow (.github/workflows/dependabot-auto-merge.yml);
+  # listed majors are ignored outright so they never reach the queue.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      # All dev-dep updates (minor, patch, and major) ship in one PR.
+      # Breakage there only affects tests/tooling; CI catches it.
+      dev-deps:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+          - "major"
+      # Production minor + patch grouped. Production majors come as
+      # individual PRs so they get their own CI run + release notes.
+      prod-minor-patch:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # The MCP SDK evolves its tool/prompt interfaces on majors;
+      # @anthropic-ai/sdk and better-sqlite3 change on majors in ways
+      # that need hand-driven migration (schema, compiled native deps,
+      # protocol shape). Let Dependabot propose minor/patch; keep
+      # majors out of the auto-merge queue.
+      - dependency-name: "@modelcontextprotocol/sdk"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "better-sqlite3"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions — one grouped monthly PR for every action pin bump.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns:
+          - "*"

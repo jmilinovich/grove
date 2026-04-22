@@ -1,0 +1,64 @@
+name: Dependabot auto-merge
+
+# Enables GitHub's native auto-merge on every Dependabot PR except
+# framework majors which still route to a human. Auto-merge is a queue:
+# GitHub holds the PR until all required status checks pass, then
+# merges it. We never bypass CI — the gate is the ruleset's
+# required-checks list.
+#
+# Why pull_request_target, and why AUTOMERGE_PAT:
+#   * pull_request_target runs with write permissions on the base repo,
+#     needed to enable auto-merge. It uses the workflow from main, not
+#     from the PR, so a compromised Dependabot branch can't tamper with
+#     this job.
+#   * Default GITHUB_TOKEN-driven commits don't retrigger other
+#     workflows (anti-loop safety). Using a PAT stored as AUTOMERGE_PAT
+#     means commits this workflow pushes (via `gh pr merge`) behave like
+#     human pushes and CI runs normally on the next PR in the queue.
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+
+      - name: Decide and enable auto-merge
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          DEPS: ${{ steps.meta.outputs.dependency-names }}
+          TYPE: ${{ steps.meta.outputs.update-type }}
+          DEP_TYPE: ${{ steps.meta.outputs.dependency-type }}
+          GH_TOKEN: ${{ secrets.AUTOMERGE_PAT }}
+        run: |
+          set -euo pipefail
+
+          echo "Update: $TYPE on $DEPS ($DEP_TYPE)"
+
+          # Defense-in-depth. dependabot.yml already ignores these
+          # majors, but if one ever slips through, stop here.
+          if [[ "$TYPE" == "version-update:semver-major" ]]; then
+            for name in "@modelcontextprotocol/sdk" "better-sqlite3"; do
+              if [[ ",$DEPS," == *",$name,"* ]]; then
+                echo "Framework major ($name) — routing to human."
+                gh pr comment "$PR_URL" --body \
+                  "Framework major bump for \`$name\`. Routing to human review — Dependabot shouldn't have opened this; check the ignore rules in \`.github/dependabot.yml\`."
+                exit 0
+              fi
+            done
+          fi
+
+          # Everything else: enable auto-merge. Ruleset's required
+          # status checks are the real gate.
+          gh pr merge --auto --squash --delete-branch "$PR_URL"
+          echo "Auto-merge enabled — will fire when CI is green."

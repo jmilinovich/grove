@@ -33,6 +33,8 @@
     "test:smoke": "bats test/smoke/*.bats",
     "test:eval": "tsx scripts/run-evals.ts",
     "iterate": "tsx scripts/iterate.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
     "check:plan": "tsx scripts/check-plan-drift.ts"
   },
   "devDependencies": {
