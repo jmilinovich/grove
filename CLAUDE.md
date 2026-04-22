@@ -26,7 +26,7 @@ Requires QMD running separately. The proxy does not start QMD — it expects it 
 
 ## Running on AWS
 
-Grove runs on AWS g4dn.xlarge (T4 GPU) at `api.grove.md`. PM2 manages four processes: `grove-server` (8190), `grove-proxy` (8420), `qmd-server` (8177), `embed-server` (8090). Nginx terminates TLS.
+Grove runs on AWS g4dn.xlarge (T4 GPU) at `api.grove.md`. PM2 manages five processes: `grove-server` (8190), `grove-proxy` (8420), `grove-discovery` (worker, no port), `qmd-server` (8177), `embed-server` (8090). Nginx terminates TLS.
 
 ```bash
 ssh -i ~/.ssh/grove-aws.pem ubuntu@52.37.76.231
@@ -81,17 +81,15 @@ Vault conventions (frontmatter, linking, folder structure) are defined in `~/lif
 
 ## Deploy process
 
-```bash
-# On your local machine:
-git push origin main
+Deploys run through GitHub Actions (`.github/workflows/ci.yml`, `deploy` job) via `workflow_dispatch` — health-gated with auto-rollback. Trigger from the Actions tab after `main` is green. Set `confirm_schema_change=true` when the deploy touches `src/db.ts` or `src/db-migration*.ts`.
 
-# On AWS:
+Manual fallback (only when Actions is down):
+
+```bash
 ssh -i ~/.ssh/grove-aws.pem ubuntu@52.37.76.231
 sudo bash -c 'cd /root/grove && git pull && npm install'
-sudo pm2 restart grove-server grove-proxy
+sudo pm2 restart grove-server grove-proxy grove-discovery
 ```
-
-No CI/CD yet. Deploy is manual, intentional, and fast.
 
 ## Values
 

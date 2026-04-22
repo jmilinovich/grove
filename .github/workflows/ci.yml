@@ -133,7 +133,7 @@ jobs:
             git pull --ff-only
             echo "$TARGET_SHA" > .deployed_sha
             npm ci --production
-            sudo pm2 restart grove-server grove-proxy
+            sudo pm2 restart grove-server grove-proxy grove-discovery
 
             # Health poll — 12 × 5s = 60s window.
             for i in $(seq 1 12); do
@@ -151,7 +151,7 @@ jobs:
             git reset --hard "$BEFORE_SHA"
             echo "$BEFORE_SHA" > .deployed_sha
             npm ci --production
-            sudo pm2 restart grove-server grove-proxy
+            sudo pm2 restart grove-server grove-proxy grove-discovery
 
             # Verify rollback health.
             for i in $(seq 1 6); do
