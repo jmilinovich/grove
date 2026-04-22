@@ -512,7 +512,7 @@ Test script that provisions a second vault and verifies isolation.
 
 #### Phase 8B — Collaboration (1 week, after 8A stabilizes)
 
-#### P8-B1: vault_members table + migration (`src/db.ts`, `src/migrations/`)
+#### P8-B1: vault_members table + migration (`src/db.ts`, `src/migrations/`) ✅ COMPLETE 2026-04-22 (6b78ddb)
 
 Create the table (declared in 8A but populated here):
 ```sql
@@ -537,7 +537,7 @@ Backfill: insert one row per existing user with their old `users.role` for the `
 - Role CHECK constraint rejects unknown values
 - Rollback restores `users.role` from backfill
 
-#### P8-B2: Invite flow for multi-vault (`src/invite.ts`, `src/cli.ts`, `src/email.ts`)
+#### P8-B2: Invite flow for multi-vault (`src/invite.ts`, `src/cli.ts`, `src/email.ts`) ✅ COMPLETE 2026-04-22 (6b78ddb)
 
 `grove invite <email> --vault <slug> [--role viewer|member]`:
 

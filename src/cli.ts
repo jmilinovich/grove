@@ -1392,15 +1392,52 @@ async function cmdShare(config: Config, notePath: string, flags: Record<string, 
 // ── Invite (remote, via /v1/admin/invite API) ──────────────────
 
 async function cmdInvite(config: Config, email: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
-  if (!email) throw new CliError("bad_request", "Usage: grove invite <email> --trail <trail-id> [--role viewer]\nRun `grove trails list` to see available trails.", 1);
-  const trailId = flags.trail as string;
-  if (!trailId) throw new CliError("bad_request", "Usage: grove invite <email> --trail <trail-id> [--role viewer]\nRun `grove trails list` to see available trails.", 1);
-  const role = (flags.role as string) ?? "viewer";
+  if (!email) {
+    throw new CliError(
+      "bad_request",
+      "Usage: grove invite <email> [--trail <trail-id>] [--vault <slug>] [--role owner|member|viewer]",
+      1,
+    );
+  }
+  const trailId = flags.trail as string | undefined;
+  const vaultSlug = flags.vault as string | undefined;
+  if (!trailId && !vaultSlug) {
+    throw new CliError(
+      "bad_request",
+      "Must pass either --trail <trail-id> or --vault <slug>.\n" +
+        "For vault invites: grove invite <email> --vault <slug> [--role member]",
+      1,
+    );
+  }
+  const role = (flags.role as string) ?? (vaultSlug ? "member" : "viewer");
+
+  const payload = vaultSlug
+    ? { email, vault: vaultSlug, role }
+    : { email, trail_id: trailId, role };
 
   const url = new URL("/v1/admin/invite", config.server);
-  const res = await httpDo("POST", url, { Authorization: `Bearer ${config.token}` }, JSON.stringify({ email, trail_id: trailId, role }));
+  const res = await httpDo("POST", url, { Authorization: `Bearer ${config.token}` }, JSON.stringify(payload));
   handleHttpStatus(res);
   const data = tryParseJson(res.body) ?? {};
+
+  if (vaultSlug) {
+    return {
+      ok: true,
+      ...data,
+      _fmt: () => {
+        const status = data.created ? "New user created" : "Existing user";
+        const memStatus = data.newMembership ? "new membership" : "existing membership";
+        return (
+          `\nInvited: ${data.email}\n` +
+          `User:    ${data.user_id} (${status})\n` +
+          `Vault:   ${data.vault_slug} (${memStatus}, role=${data.role})\n` +
+          `Key:     ${data.key_id}\n\n` +
+          `${data.created ? "A welcome email with a magic link has been sent." : "A vault-invite email with Open + Add-to-Claude.ai links has been sent."}\n`
+        );
+      },
+    };
+  }
+
   return {
     ok: true,
     ...data,

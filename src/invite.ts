@@ -5,11 +5,11 @@
  * a trail-scoped API key, creates the trail grant, and sends a welcome email.
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { getDb } from "./db.js";
 import { createKey } from "./keys.js";
 import { getUserByEmail, createUser, deriveHandleFromEmail } from "./users.js";
-import { sendMagicLinkEmail } from "./email.js";
+import { sendMagicLinkEmail, sendVaultInviteEmail } from "./email.js";
 
 export interface InviteResult {
   user_id: string;
@@ -17,6 +17,19 @@ export interface InviteResult {
   trail_id: string;
   key_id: string;
   created: boolean;   // true if new user was created
+}
+
+export type VaultRole = "owner" | "member" | "viewer";
+
+export interface VaultInviteResult {
+  user_id: string;
+  email: string;
+  vault_id: string;
+  vault_slug: string;
+  key_id: string;
+  role: VaultRole;
+  created: boolean;   // true if new user was created
+  newMembership: boolean;   // true if vault_members row was inserted this call
 }
 
 
@@ -125,5 +138,116 @@ export async function inviteUser(
     trail_id: trailId,
     key_id: keyId,
     created,
+  };
+}
+
+/**
+ * Invite a user to a specific vault (P8-B2). Idempotent on (email, vault):
+ * a second invite finds the existing `vault_members` row and returns the
+ * existing key instead of minting a new one.
+ *
+ * Separate from `inviteUser` (trail-scoped) because vaults and trails have
+ * independent access models. A user can be a `member` of vault A *and* a
+ * trail-grant holder on a vault-B trail.
+ */
+export async function inviteUserToVault(
+  email: string,
+  vaultSlug: string,
+  role: VaultRole,
+  baseUrl: string,
+): Promise<VaultInviteResult> {
+  const db = getDb();
+  const normalizedEmail = email.toLowerCase().trim();
+  if (role !== "owner" && role !== "member" && role !== "viewer") {
+    throw new Error(`invalid role: ${role}`);
+  }
+
+  const vault = db
+    .prepare("SELECT id, slug, display_name FROM vaults WHERE slug = ?")
+    .get(vaultSlug) as { id: string; slug: string; display_name: string } | undefined;
+  if (!vault) {
+    throw new Error(`vault not found: ${vaultSlug}`);
+  }
+
+  let user = getUserByEmail(normalizedEmail);
+  const created = !user;
+  if (!user) {
+    user = createUser(normalizedEmail, deriveHandleFromEmail(normalizedEmail));
+  }
+
+  const existingMembership = db
+    .prepare("SELECT role FROM vault_members WHERE user_id = ? AND vault_id = ?")
+    .get(user.id, vault.id) as { role: string } | undefined;
+
+  let newMembership = false;
+  if (!existingMembership) {
+    db.prepare(
+      "INSERT INTO vault_members (user_id, vault_id, role) VALUES (?, ?, ?)",
+    ).run(user.id, vault.id, role);
+    newMembership = true;
+  }
+
+  const existingKey = db
+    .prepare(
+      "SELECT id FROM api_keys WHERE user_id = ? AND vault_id = ? ORDER BY created_at ASC LIMIT 1",
+    )
+    .get(user.id, vault.id) as { id: string } | undefined;
+
+  let keyId: string;
+  if (existingKey) {
+    keyId = existingKey.id;
+  } else {
+    const scopes = role === "viewer" ? ["read"] : ["read", "write"];
+    const keyResult = createKey(`${vault.slug}-${role}`, scopes, vault.id, undefined, user.id);
+    keyId = keyResult.id;
+  }
+
+  // Magic link for first-time users; existing users just get the deep-link
+  // email. Both branches produce a working "Open <vault>" + "Add to Claude.ai"
+  // pair so the invitee never has to hunt for URLs.
+  const wwwBase = baseUrl.replace("api.grove.md", "grove.md");
+  const ownerHandle = user.username;
+  const vaultUrl = `${wwwBase}/@${ownerHandle}/${vault.slug}/dashboard`;
+  const connectorUrl = `${baseUrl}/v/${vault.slug}/mcp`;
+
+  if (created) {
+    const token = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const mlId = "ml_" + randomBytes(8).toString("hex");
+    db.prepare(
+      "INSERT INTO magic_links (id, email, token_hash, expires_at) VALUES (?, ?, ?, ?)",
+    ).run(
+      mlId,
+      normalizedEmail,
+      tokenHash,
+      new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    );
+    const redirect = `${wwwBase}/@${ownerHandle}/${vault.slug}/dashboard`;
+    const verifyUrl = `${baseUrl}/auth/verify?token=${token}&email=${encodeURIComponent(normalizedEmail)}&redirect=${encodeURIComponent(redirect)}`;
+    await sendVaultInviteEmail(normalizedEmail, verifyUrl, connectorUrl, {
+      vaultSlug: vault.slug,
+      vaultName: vault.display_name,
+      role,
+      magicLink: true,
+    });
+  } else {
+    // Existing user — no magic link; they already have a session via grove.md.
+    await sendVaultInviteEmail(normalizedEmail, vaultUrl, connectorUrl, {
+      vaultSlug: vault.slug,
+      vaultName: vault.display_name,
+      role,
+      magicLink: false,
+    });
+  }
+
+  return {
+    user_id: user.id,
+    email: normalizedEmail,
+    vault_id: vault.id,
+    vault_slug: vault.slug,
+    key_id: keyId,
+    role,
+    created,
+    newMembership,
   };
 }

@@ -29,7 +29,7 @@ function seed() {
   createSchema();
   const db = getDb();
   db.exec(
-    "DELETE FROM handle_history; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;",
+    "DELETE FROM vault_members; DELETE FROM handle_history; DELETE FROM vault_members; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;",
   );
   db.prepare("INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(
     "user_00000000", "admin-owner", "admin@grove.local", "owner",

@@ -23,7 +23,7 @@ describe("handleResidentProfile (P16-1)", () => {
     resetDb();
     createSchema();
     const db = getDb();
-    db.exec("DELETE FROM handle_history; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
+    db.exec("DELETE FROM vault_members; DELETE FROM handle_history; DELETE FROM vault_members; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
   });
 
   afterEach(() => {

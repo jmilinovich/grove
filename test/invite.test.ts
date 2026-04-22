@@ -13,6 +13,7 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS magic_links (id TEXT PRIMARY KEY, email TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, used_at TEXT);
   CREATE TABLE IF NOT EXISTS auth_codes (id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
   CREATE TABLE IF NOT EXISTS handle_history (handle TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), released_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS vault_members (user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL REFERENCES vaults(id), role TEXT NOT NULL CHECK(role IN ('owner', 'member', 'viewer')), joined_at TEXT NOT NULL DEFAULT (datetime('now')), last_active_at TEXT, PRIMARY KEY (user_id, vault_id));
 `;
 
 const TEST_DIR = mkdtempSync(join(tmpdir(), "grove-invite-suite-"));
@@ -29,6 +30,7 @@ function seedDb() {
   db.exec(SCHEMA);
 
   // Clear tables
+  db.exec("DELETE FROM vault_members");
   db.exec("DELETE FROM trail_grants");
   db.exec("DELETE FROM trails");
   db.exec("DELETE FROM magic_links");

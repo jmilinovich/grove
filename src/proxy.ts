@@ -72,7 +72,7 @@ import {
 import { VaultLockedError } from "./index-crypto.js";
 import { parseMultipart, parseBoundary } from "./multipart.js";
 import { startStatsTimer } from "./vault-stats.js";
-import { inviteUser } from "./invite.js";
+import { inviteUser, inviteUserToVault } from "./invite.js";
 import {
   createShareLink,
   resolveSharePublic,
@@ -1273,15 +1273,22 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const { email, trail_id, role } = parsed;
-      if (!email || !trail_id) {
-        sendJson(res, 400, { error: "email and trail_id are required" });
+      const { email, trail_id, vault, role } = parsed;
+      if (!email || (!trail_id && !vault)) {
+        sendJson(res, 400, { error: "email and either trail_id or vault are required" });
         return;
       }
 
       try {
-        const result = await inviteUser(email, trail_id, role ?? "viewer", GROVE_URL);
-        sendJson(res, 200, result);
+        if (vault) {
+          // P8-B2 vault invite path
+          const vaultRole = role === "owner" || role === "member" || role === "viewer" ? role : "member";
+          const result = await inviteUserToVault(email, vault, vaultRole, GROVE_URL);
+          sendJson(res, 200, result);
+        } else {
+          const result = await inviteUser(email, trail_id, role ?? "viewer", GROVE_URL);
+          sendJson(res, 200, result);
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes("not found")) {

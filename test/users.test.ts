@@ -162,7 +162,7 @@ describe("profile (P15-1)", () => {
     // Truncate state between tests — createSchema uses IF NOT EXISTS so rows persist
     // across test cases when the underlying SQLite file is reused.
     const db = getDb();
-    db.exec("DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
+    db.exec("DELETE FROM vault_members; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
     db.prepare("INSERT OR IGNORE INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(
       "user_00000000", "admin", "admin@grove.local", "owner",
     );
@@ -332,7 +332,7 @@ describe("isValidHandle (P16-1)", () => {
     resetDb();
     createSchema();
     const db = getDb();
-    db.exec("DELETE FROM handle_history; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
+    db.exec("DELETE FROM vault_members; DELETE FROM handle_history; DELETE FROM vault_members; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
     db.prepare("INSERT OR IGNORE INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(
       "user_00000000", "admin-owner", "admin@grove.local", "owner",
     );
@@ -405,7 +405,7 @@ describe("changeUserHandle + handle_history (P16-1)", () => {
     resetDb();
     createSchema();
     const db = getDb();
-    db.exec("DELETE FROM handle_history; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
+    db.exec("DELETE FROM vault_members; DELETE FROM handle_history; DELETE FROM vault_members; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
     db.prepare("INSERT OR IGNORE INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(
       "user_00000000", "admin-owner", "admin@grove.local", "owner",
     );
@@ -474,7 +474,7 @@ describe("deriveHandleFromEmail (P16-1)", () => {
     resetDb();
     createSchema();
     const db = getDb();
-    db.exec("DELETE FROM handle_history; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
+    db.exec("DELETE FROM vault_members; DELETE FROM handle_history; DELETE FROM vault_members; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
   });
 
   afterEach(() => {
@@ -503,7 +503,7 @@ describe("updateUserBio (P16-1)", () => {
     resetDb();
     createSchema();
     const db = getDb();
-    db.exec("DELETE FROM handle_history; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
+    db.exec("DELETE FROM vault_members; DELETE FROM handle_history; DELETE FROM vault_members; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
     db.prepare("INSERT OR IGNORE INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(
       "user_00000000", "admin-owner", "admin@grove.local", "owner",
     );

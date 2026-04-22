@@ -273,6 +273,50 @@ export function createSchema(): void {
   migrateUserBio(database);
   migrateSharedLinks(database);
   migrateMultiVault(database);
+  migrateVaultMembersBackfill(database);
+}
+
+/**
+ * P8-B1 — populate `vault_members` with one row per existing user for the
+ * default vault. Idempotent: skipped once the table already has rows.
+ *
+ * Role source is `users.role` (still present on the users table; a separate
+ * later release will drop it). Admin / owner → owner; everyone else → member.
+ */
+function migrateVaultMembersBackfill(database: Database.Database): void {
+  const tableExists = database
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='vault_members'")
+    .get();
+  if (!tableExists) return;
+
+  const existing = database
+    .prepare("SELECT COUNT(*) as c FROM vault_members")
+    .get() as { c: number };
+  if (existing.c > 0) return;
+
+  const userCols = database.prepare("PRAGMA table_info(users)").all() as { name: string }[];
+  const hasRole = userCols.some((c) => c.name === "role");
+  const defaultVault = database
+    .prepare("SELECT id FROM vaults WHERE slug = 'personal' OR slug = 'life' ORDER BY CASE slug WHEN 'personal' THEN 0 ELSE 1 END LIMIT 1")
+    .get() as { id: string } | undefined;
+  if (!defaultVault) return;
+
+  const users = database
+    .prepare(hasRole ? "SELECT id, role FROM users" : "SELECT id FROM users")
+    .all() as Array<{ id: string; role?: string }>;
+
+  const insert = database.prepare(
+    "INSERT OR IGNORE INTO vault_members (user_id, vault_id, role) VALUES (?, ?, ?)",
+  );
+  const tx = database.transaction(() => {
+    for (const u of users) {
+      const role = (u.role === "owner" || u.role === "admin") ? "owner"
+        : u.role === "viewer" ? "viewer"
+        : "member";
+      insert.run(u.id, defaultVault.id, role);
+    }
+  });
+  tx();
 }
 
 /**
