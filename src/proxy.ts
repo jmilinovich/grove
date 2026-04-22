@@ -96,6 +96,7 @@ import {
   getUnresolvedFlags,
   resolveFlag,
 } from "./graph-health.js";
+import { touchVaultMember } from "./vault-mru.js";
 
 installCrashHandlers("grove-proxy");
 
@@ -965,6 +966,19 @@ const server = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", GROVE_URL);
     sendJson(res, 200, { ...metrics.getMetrics(), search: searchMetrics.getSearchStats() });
     return;
+  }
+
+  // P8-B3 (decision #11) — MRU tracking. Any request with a valid bearer bumps
+  // `vault_members.last_active_at` so bare `/dashboard` can 301 to the user's
+  // most-recently-used vault. Throttled per (user, vault) to ≤1 write/min.
+  // /health, /metrics, /oauth/*, and OPTIONS already short-circuited above.
+  {
+    const mruAuth = req.headers.authorization;
+    const mruToken = mruAuth?.startsWith("Bearer ") ? mruAuth.slice(7) : null;
+    if (mruToken) {
+      const mruKey = validateToken(mruToken);
+      if (mruKey) touchVaultMember(mruKey.user_id, mruKey.vault_id);
+    }
   }
 
   // ── Admin login (POST /admin/login — creates persistent session cookie) ──
