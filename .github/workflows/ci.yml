@@ -81,8 +81,7 @@ jobs:
   #   4. Health-poll https://api.grove.md/health up to 12 × 5s = 60s.
   #      Success = HTTP 200 + JSON {ok: true, sha: TARGET_SHA}. The
   #      SHA match confirms we're seeing the new process, not a stale one.
-  #   5. On health success → exit 0. A follow-up step appends the
-  #      deploy to deploys.md via the GitHub API (DEPLOY_LOG_PAT).
+  #   5. On health success → exit 0. GitHub Actions is the deploy log.
   #   6. On health failure → reset --hard BEFORE_SHA, reinstall, restart,
   #      re-poll rollback health. If that works, exit 1 with a clear
   #      rollback log. If the rollback also fails, exit 2 —
@@ -178,32 +177,3 @@ jobs:
         env:
           CONFIRM_SCHEMA_CHANGE: ${{ github.event.inputs.confirm_schema_change || 'false' }}
           HEALTH_URL: https://api.grove.md/health
-
-      - name: Append deploy to deploys.md
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.DEPLOY_LOG_PAT }}
-          SHA: ${{ github.sha }}
-          ACTOR: ${{ github.actor }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          TODAY=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          LINE="$TODAY  $SHA  $ACTOR  $RUN_URL"
-
-          RESPONSE=$(gh api "repos/${{ github.repository }}/contents/deploys.md" 2>/dev/null || echo '{"content":"","sha":null}')
-          BLOB_SHA=$(echo "$RESPONSE" | jq -r '.sha // empty')
-
-          if [ -z "$BLOB_SHA" ]; then
-            NEW_CONTENT=$(printf '# Grove production deploys\n\nAppend-only log written by `.github/workflows/ci.yml`.\nFormat: `<utc-iso>  <commit>  <actor>  <workflow-run-url>`.\n\n%s\n' "$LINE" | base64 -w0)
-            gh api -X PUT "repos/${{ github.repository }}/contents/deploys.md" \
-              -f message="chore: log deploy $SHA" \
-              -f content="$NEW_CONTENT"
-          else
-            OLD_CONTENT=$(echo "$RESPONSE" | jq -r '.content' | base64 -d)
-            NEW_CONTENT=$(printf '%s\n%s' "$OLD_CONTENT" "$LINE" | base64 -w0)
-            gh api -X PUT "repos/${{ github.repository }}/contents/deploys.md" \
-              -f message="chore: log deploy $SHA" \
-              -f content="$NEW_CONTENT" \
-              -f sha="$BLOB_SHA"
-          fi
