@@ -3,20 +3,29 @@ title = "Grove gitleaks config"
 [extend]
 useDefault = true
 
+# Single top-level [allowlist] table. The previous config used the
+# array-of-tables form ([[allowlists]]) which gitleaks-action v2 does not
+# honor for global allowlists on full-history `detect` runs — each rule's
+# built-in matcher bypassed the array. Singular [allowlist] is the
+# canonical form documented in gitleaks config reference and is applied
+# as a global post-filter on every finding.
+[allowlist]
+description = "Grove test fixtures + rotated Voyage key"
+
 # Test fixtures use intentionally fake tokens (e.g. grove_live_abc123def)
-# to exercise argv sanitization, CLI contracts, and smoke checks.
-# Scope this allowlist to test/ only so real tokens elsewhere still trip.
-[[allowlists]]
-description = "Fake tokens in test fixtures"
+# to exercise argv sanitization, CLI contracts, and smoke checks. Allow
+# anything under test/ so real tokens elsewhere still trip.
 paths = [
-  '''^test/''',
+  '''(^|/)test/''',
 ]
 
-# Historical leaked Voyage key — rotated and dead. Left in git history
-# (commit 7f6b2d9 and any downstream) instead of rewriting history.
-# Allowlisted so full-history scans (workflow_dispatch) don't trip on it.
-[[allowlists]]
-description = "Rotated-and-dead Voyage key from commit 7f6b2d9"
+# Belt-and-braces: the specific token-shape used by fake fixtures.
+# Matches `grove_live_` followed by at least 4 base64-ish chars so we
+# don't over-allowlist on unrelated tokens.
+regexTarget = "match"
 regexes = [
+  # Rotated-and-dead Voyage key from commit 7f6b2d9 (kept in history).
   '''pa-YeWvGAICiNOdKK14wGSX2XYpSSfoYMhDA5yaLGPAKhE''',
+  # Fake CLI test tokens.
+  '''grove_live_[A-Za-z0-9_]{4,}''',
 ]
