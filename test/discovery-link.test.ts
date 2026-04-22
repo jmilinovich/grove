@@ -125,6 +125,33 @@ describe("insertWikilinks", () => {
     ]);
     expect(result).toBe(content);
   });
+
+  it("skips from_text that is itself a full wikilink (prevents nested brackets)", () => {
+    // Extraction sometimes returns an entire existing wikilink as from_text.
+    // Wrapping it would produce `[[path|[[Grove|alias]]]]` — invalid syntax
+    // that corrupts the note. The link must be left alone.
+    const content = "- [[Grove|the Grove project]]\n";
+    const result = insertWikilinks(content, [
+      { from_text: "[[Grove|the Grove project]]", to_path: "Resources/Projects/Grove.md" },
+    ]);
+    expect(result).toBe(content);
+  });
+
+  it("skips from_text that is a bracketed short-form wikilink", () => {
+    const content = "Discussing [[some concept]] today.";
+    const result = insertWikilinks(content, [
+      { from_text: "[[some concept]]", to_path: "Resources/Concepts/Some Concept.md" },
+    ]);
+    expect(result).toBe(content);
+  });
+
+  it("skips from_text containing stray brackets from partial extraction", () => {
+    const content = "This has [[broken syntax here.";
+    const result = insertWikilinks(content, [
+      { from_text: "[[broken", to_path: "Resources/X.md" },
+    ]);
+    expect(result).toBe(content);
+  });
 });
 
 // ── wireLinks (integration with filesystem) ──────────────────────────

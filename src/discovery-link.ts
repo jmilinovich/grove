@@ -88,6 +88,11 @@ export function insertWikilinks(
     const { from_text, to_path } = link;
     if (!from_text || !to_path) continue;
 
+    // Skip from_text that already contains wikilink syntax. Extraction
+    // occasionally returns whole `[[...]]` spans; wrapping those produces
+    // invalid nested brackets like `[[path|[[Grove|alias]]]]`.
+    if (from_text.includes("[[") || from_text.includes("]]")) continue;
+
     // Search for the first occurrence that isn't already inside a wikilink
     let searchFrom = 0;
     let linked = false;
