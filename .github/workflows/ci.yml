@@ -103,10 +103,14 @@ jobs:
         uses: appleboy/ssh-action@v1
         with:
           host: 52.37.76.231
-          username: deploy
+          username: ubuntu
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           envs: CONFIRM_SCHEMA_CHANGE,HEALTH_URL
+          # /root/grove is root-owned, so re-enter as root via sudo. Env
+          # vars passed by ssh-action must be preserved explicitly since
+          # sudo strips env by default.
           script: |
+            sudo --preserve-env=CONFIRM_SCHEMA_CHANGE,HEALTH_URL bash <<'DEPLOY_SCRIPT'
             set -eu
             cd /root/grove
 
@@ -170,6 +174,7 @@ jobs:
 
             echo "::error::ROLLBACK ALSO FAILED — api.grove.md is down; manual intervention required"
             exit 2
+            DEPLOY_SCRIPT
         env:
           CONFIRM_SCHEMA_CHANGE: ${{ github.event.inputs.confirm_schema_change || 'false' }}
           HEALTH_URL: https://api.grove.md/health
