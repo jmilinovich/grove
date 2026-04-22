@@ -38,10 +38,10 @@
     "check:plan": "tsx scripts/check-plan-drift.ts"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.6.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0",
-    "vitest": "^3.2.4"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
   },
   "engines": {
     "node": ">=22.0.0"
