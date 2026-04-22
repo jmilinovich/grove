@@ -163,6 +163,81 @@ export const BATCHES: Batch[] = [
       },
     ],
   },
+
+  // ── Phase 8B follow-up: route restructure (P8-B3) ────────────────
+  //
+  // Resolved via /grill-me on 2026-04-22 after the in-session P8-B3 deferral:
+  //
+  //   - Second-user onboarding is imminent (1–2 weeks); that user will
+  //     *own* their own vault AND *consume* John's → cross-user URL
+  //     sharing makes bare `/dashboard` ambiguous from day 1.
+  //   - B3 ships BEFORE onboarding so the new user never sees bare URLs.
+  //   - Bundle MRU plumbing (`vault_members.last_active_at` updates + the
+  //     bare-route 301 logic) into this batch so the feature lands complete.
+  //   - Scope: ALL authenticated routes move — dashboard (+ 9 subroutes),
+  //     profile, images, trails, settings. `/s/<share-id>`, `/login`,
+  //     `/callback`, `/home` stay bare (not vault-scoped).
+  //
+  // Requires grove-www PR flow (ship.ts pushes directly to grove-www/main,
+  // but a refactor this size should really go through a review cycle —
+  // the agent is pre-briefed to open a PR rather than push direct).
+  {
+    id: "p8b-3-routes",
+    title: "feat(P8-B3): grove-www route restructure → /@<handle>/<vault>/*",
+    requires: ["p8b-3"],
+    entries: [
+      {
+        branch: "p8b-3-mru-hook",
+        prompt:
+          "Read PLAN.md tasks P8-B3 and the 'Locked design decisions' table (decision #11: MRU landing). " +
+          "Goal: wire MRU plumbing so bare `/dashboard` can 301 to the user's most-recently-used vault. " +
+          "In src/proxy.ts, after successful bearer validation, throttled 1/min per (user_id, vault_id), " +
+          "run `UPDATE vault_members SET last_active_at = datetime('now') WHERE user_id = ? AND vault_id = ?`. " +
+          "The throttle is in-memory Map keyed by `${user_id}\\0${vault_id}` → last-update timestamp. " +
+          "Skip the update on /health, /metrics, and any unauthenticated path. " +
+          "Add test/vault-members-mru.test.ts covering: first request writes, second within 60s is debounced, " +
+          "second after 60s writes again, no-op when vault_members row missing. " +
+          "Run `npm test`. Commit as feat(P8-B3).",
+      },
+      {
+        branch: "p8b-3-routes-move",
+        prompt:
+          "Read PLAN.md task P8-B3 and /Users/jm/src/grove/CLAUDE.md cross-repo rules. " +
+          "This batch also works in /Users/jm/src/grove-www via PR (not direct push — the design-lint + " +
+          "playwright hooks are strict). Goal: move every authenticated grove-www route under " +
+          "/@<atHandle>/<vaultSlug>/*. Concretely:\n" +
+          "\n" +
+          "1. Create grove-www/src/app/(resident)/[atHandle]/[vaultSlug]/layout.tsx that resolves the " +
+          "   vault from vaultSlug + sets up the app shell (header + sidebar).\n" +
+          "2. Move dashboard/, profile/, images/, trails/, settings/ from src/app/ → " +
+          "   src/app/(resident)/[atHandle]/[vaultSlug]/. This includes dashboard's 10 subroutes.\n" +
+          "3. `src/components/dashboard-nav.tsx` and `src/components/breadcrumbs.tsx` — every internal " +
+          "   link currently like `/dashboard/keys` must become `/@${handle}/${slug}/dashboard/keys`. " +
+          "   Derive handle + slug from params via a useScopedLink() hook or similar — do NOT hardcode.\n" +
+          "4. Replace the old src/app/dashboard/, profile/, images/, trails/, settings/ entries with " +
+          "   redirect shims that 301 to `/@<handle>/<mru-or-earliest>/<same-path>`. Call the backend's " +
+          "   /v1/me to resolve MRU; fall back to earliest-joined by `vault_members.joined_at` ASC when " +
+          "   `last_active_at` is null. Preserve query string.\n" +
+          "5. `src/app/api/auth/callback/route.ts` — post-magic-link redirect currently goes to /dashboard. " +
+          "   Update to resolve MRU vault + redirect to /@<handle>/<mru>/dashboard.\n" +
+          "6. Mount the already-built `connected-vaults-list.tsx` (landed in grove-www PR #18) at " +
+          "   `/@<handle>/<vault>/settings/vaults/page.tsx`. Closes P8-B5's route-wiring follow-up.\n" +
+          "7. Wire the already-built `vault-switcher.tsx` (grove-www PR #17) into `src/components/header.tsx`. " +
+          "   Feed it `vaults` from /v1/me + currentSlug from params.\n" +
+          "\n" +
+          "Out of scope: /s/<share-id> (public, stays bare), /login, /callback, /home. Do NOT move these.\n" +
+          "\n" +
+          "Tests: update every Playwright spec that references bare /dashboard, /profile, /images, /trails, " +
+          "/settings (~37 lines across ~7 specs per the ship run on 2026-04-22). Add one new spec that " +
+          "verifies bare-route 301 preserves query string + lands at the MRU vault. Do not remove the " +
+          "existing legacy-redirects spec — extend it. " +
+          "\n" +
+          "Open a PR on grove-www (do NOT push direct to main — the design-lint pre-push hook + playwright " +
+          "mobile suite need review-loop gates for a change this size). Run `npm run test:mobile` locally " +
+          "before opening. Commit as feat(P8-B3).",
+      },
+    ],
+  },
 ];
 
 export function findBatch(id: string): Batch | undefined {
