@@ -64,8 +64,33 @@ CREATE TABLE IF NOT EXISTS vaults (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   storage_bytes INTEGER NOT NULL DEFAULT 0,
   storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600,
+  server_port INTEGER,
+  discovery_port INTEGER,
   UNIQUE(owner_id, slug)
 );
+
+CREATE TABLE IF NOT EXISTS vault_members (
+  user_id TEXT NOT NULL REFERENCES users(id),
+  vault_id TEXT NOT NULL REFERENCES vaults(id),
+  role TEXT NOT NULL CHECK(role IN ('owner', 'member', 'viewer')),
+  joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_active_at TEXT,
+  PRIMARY KEY (user_id, vault_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vault_members_user ON vault_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_vault_members_vault ON vault_members(vault_id);
+
+CREATE TABLE IF NOT EXISTS vault_usage_daily (
+  vault_id TEXT NOT NULL REFERENCES vaults(id),
+  date TEXT NOT NULL,
+  requests INTEGER NOT NULL DEFAULT 0,
+  writes INTEGER NOT NULL DEFAULT 0,
+  embed_tokens INTEGER NOT NULL DEFAULT 0,
+  search_queries INTEGER NOT NULL DEFAULT 0,
+  bytes_stored INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (vault_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_vault_usage_date ON vault_usage_daily(date);
 
 CREATE TABLE IF NOT EXISTS api_keys (
   id TEXT PRIMARY KEY,
@@ -247,6 +272,100 @@ export function createSchema(): void {
   migrateApiKeySessionId(database);
   migrateUserBio(database);
   migrateSharedLinks(database);
+  migrateMultiVault(database);
+}
+
+/**
+ * P8-A1 multi-vault migration. Idempotent.
+ *
+ * - vaults: add server_port + discovery_port (both UNIQUE via indexes)
+ * - vaults: backfill the existing row with server_port=8190, discovery_port=8091
+ *   and rename the default slug from "life" → "personal" so URLs match the
+ *   multi-vault convention documented in PLAN.md
+ * - vaults: add globally UNIQUE index on slug (replaces owner-scoped uniqueness)
+ * - discovery_queue / discovery_results / graph_health / graph_health_flags:
+ *   add vault_id (defaults to the personal vault)
+ * - vault_members: new table (populated in P8-B1)
+ * - vault_usage_daily: new table for per-vault observability counters
+ *
+ * SQLite doesn't enforce FKs declared via ALTER TABLE ADD COLUMN — that's
+ * a known engine limitation, not a bug in this migration. For safety we
+ * run PRAGMA foreign_key_check after the migration and throw on any dangling
+ * reference; the NOT NULL DEFAULT 'vault_00000000' keeps existing data aligned.
+ */
+function migrateMultiVault(database: Database.Database): void {
+  // Always idempotently ensure the unique indexes exist (works for both fresh
+  // installs where the columns exist in CREATE TABLE and existing DBs where
+  // we ALTER TABLE to add them below).
+  const tx = database.transaction(() => {
+    const vaultsCols = database.prepare("PRAGMA table_info(vaults)").all() as { name: string }[];
+    const hasServerPort = vaultsCols.some((c) => c.name === "server_port");
+    const hasDiscoveryPort = vaultsCols.some((c) => c.name === "discovery_port");
+    if (!hasServerPort) database.exec(`ALTER TABLE vaults ADD COLUMN server_port INTEGER`);
+    if (!hasDiscoveryPort) database.exec(`ALTER TABLE vaults ADD COLUMN discovery_port INTEGER`);
+
+    database.exec(
+      `UPDATE vaults
+         SET server_port = 8190, discovery_port = 8091
+       WHERE id = 'vault_00000000' AND server_port IS NULL`,
+    );
+    database.exec(
+      `UPDATE vaults SET slug = 'personal' WHERE id = 'vault_00000000' AND slug = 'life'`,
+    );
+
+    database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_vaults_slug ON vaults(slug)`);
+    database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_vaults_server_port ON vaults(server_port) WHERE server_port IS NOT NULL`);
+    database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_vaults_discovery_port ON vaults(discovery_port) WHERE discovery_port IS NOT NULL`);
+
+    for (const table of ["discovery_queue", "discovery_results", "graph_health", "graph_health_flags"]) {
+      const cols = database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!cols.some((c) => c.name === "vault_id")) {
+        // SQLite refuses ALTER TABLE ADD COLUMN with both REFERENCES and a
+        // non-NULL default, and it doesn't enforce FKs declared on ADD COLUMN
+        // anyway (only FKs declared in CREATE TABLE are enforced). Skip the
+        // REFERENCES clause — the NOT NULL + backfill default keeps data
+        // integrity via the application layer + fresh-install CREATE TABLE.
+        database.exec(
+          `ALTER TABLE ${table}
+             ADD COLUMN vault_id TEXT NOT NULL DEFAULT 'vault_00000000'`,
+        );
+      }
+      database.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_vault ON ${table}(vault_id)`);
+    }
+
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS vault_members (
+        user_id TEXT NOT NULL REFERENCES users(id),
+        vault_id TEXT NOT NULL REFERENCES vaults(id),
+        role TEXT NOT NULL CHECK(role IN ('owner', 'member', 'viewer')),
+        joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_active_at TEXT,
+        PRIMARY KEY (user_id, vault_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_vault_members_user ON vault_members(user_id);
+      CREATE INDEX IF NOT EXISTS idx_vault_members_vault ON vault_members(vault_id);
+    `);
+
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS vault_usage_daily (
+        vault_id TEXT NOT NULL REFERENCES vaults(id),
+        date TEXT NOT NULL,
+        requests INTEGER NOT NULL DEFAULT 0,
+        writes INTEGER NOT NULL DEFAULT 0,
+        embed_tokens INTEGER NOT NULL DEFAULT 0,
+        search_queries INTEGER NOT NULL DEFAULT 0,
+        bytes_stored INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (vault_id, date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_vault_usage_date ON vault_usage_daily(date);
+    `);
+  });
+  tx();
+
+  const fkCheck = database.prepare("PRAGMA foreign_key_check").all();
+  if (fkCheck.length > 0) {
+    throw new Error(`[db] multi-vault migration left dangling FKs: ${JSON.stringify(fkCheck)}`);
+  }
 }
 
 /**
@@ -397,7 +516,7 @@ export function runMigration(): void {
     ).run(adminId, "admin", "admin@grove.local", "owner");
     database.prepare(
       "INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)"
-    ).run("vault_00000000", adminId, "life", "Life", join(homedir(), "life"));
+    ).run("vault_00000000", adminId, "personal", "Personal", join(homedir(), "life"));
     return;
   }
 
@@ -412,7 +531,7 @@ export function runMigration(): void {
     // Create default vault
     database.prepare(
       "INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)"
-    ).run("vault_00000000", adminId, "life", "Life", join(homedir(), "life"));
+    ).run("vault_00000000", adminId, "personal", "Personal", join(homedir(), "life"));
 
     // Import keys
     if (hasKeys) {

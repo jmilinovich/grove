@@ -354,7 +354,7 @@ Active work only. Every phase before Phase 8 shipped, was deferred, or was remov
 
 Everything required to serve a second vault. No collaboration UX yet.
 
-##### P8-A1: Schema migration (`src/db.ts`, `src/migrations/`)
+#### P8-A1: Schema migration (`src/db.ts`, `src/migrations/`) ✅ COMPLETE 2026-04-22 (29d7347)
 
 Add multi-vault schema with up + down migrations. Transactional; entire migration in one `BEGIN ... COMMIT`.
 
@@ -379,7 +379,7 @@ Add multi-vault schema with up + down migrations. Transactional; entire migratio
 - After merge, the production deploy is blocked until `workflow_dispatch` is triggered with `confirm_schema_change=true` (Tier 2 schema-change guard). Rollback cannot safely undo a SQLite migration — the guard is intentional.
 - `scripts/check-plan-drift.ts` will still pass because the PostToolUse hook auto-marks the heading on commit.
 
-##### P8-A2: Vault router in grove-proxy (`src/proxy.ts`, `src/vault-router.ts`)
+#### P8-A2: Vault router in grove-proxy (`src/proxy.ts`, `src/vault-router.ts`)
 
 New routing middleware.
 
@@ -408,7 +408,7 @@ New routing middleware.
 - Backend down returns 503 with `Retry-After: 5`
 - No retry storms under load (1 retry max)
 
-##### P8-A3: Backend self-authentication (`src/server.ts`)
+#### P8-A3: Backend self-authentication (`src/server.ts`)
 
 Per security panel: `grove-server` must independently validate every token. Proxy routing is defense-in-depth, not the sole control.
 
@@ -425,7 +425,7 @@ Closes SSRF/localhost-bypass holes: even if the proxy is bypassed, the backend r
 - Backend rejects cross-vault tokens with 403 even when request bypasses the proxy
 - All MCP tool invocations and REST endpoints enforce the check uniformly
 
-##### P8-A4: Vault provisioning CLI (`src/cli.ts`, `src/vault-provision.ts`)
+#### P8-A4: Vault provisioning CLI (`src/cli.ts`, `src/vault-provision.ts`)
 
 `grove vault create <slug> --owner <email> [--git-path <path>]`:
 
@@ -451,7 +451,7 @@ Closes SSRF/localhost-bypass holes: even if the proxy is bypassed, the backend r
 - Generated config emits both `grove-server-<slug>` and `grove-discovery-<slug>` processes per vault
 - `grove vault create` runs directly on the AWS VPS (via SSH), NOT through the deploy workflow. It provisions new processes on a live machine, it doesn't ship a new version of grove itself. `deploys.md` is not touched by this command.
 
-##### P8-A5: Graceful shutdown + write queue drain (`src/server.ts`, `src/write-queue.ts`)
+#### P8-A5: Graceful shutdown + write queue drain (`src/server.ts`, `src/write-queue.ts`) ✅ COMPLETE 2026-04-22 (29d7347)
 
 Per panels: `pm2 reload` currently cuts in-flight writes.
 
@@ -469,7 +469,7 @@ Per panels: `pm2 reload` currently cuts in-flight writes.
 - `test/write-queue-stress.test.ts` continues passing (CLAUDE.md rule #3 — "all writes serialized, no concurrent git ops, ever")
 - Full shutdown-plus-startup completes in <60s, matching Tier 2's deploy health-poll window (12 × 5s = 60s)
 
-##### P8-A6: Per-vault observability (`src/logger.ts`, `src/proxy.ts`, `src/vault-usage.ts`, embed server)
+#### P8-A6: Per-vault observability (`src/logger.ts`, `src/proxy.ts`, `src/vault-usage.ts`, embed server)
 
 Measurement substrate for future rate limiting + billing.
 
@@ -491,7 +491,7 @@ Measurement substrate for future rate limiting + billing.
 - Embed server logs show vault_id in `X-Grove-Vault-Id` header
 - Flush overhead <1ms per minute per vault (measured)
 
-##### P8-A7: End-to-end isolation test (manual script + CI)
+#### P8-A7: End-to-end isolation test (manual script + CI)
 
 Test script that provisions a second vault and verifies isolation.
 
@@ -512,7 +512,7 @@ Test script that provisions a second vault and verifies isolation.
 
 #### Phase 8B — Collaboration (1 week, after 8A stabilizes)
 
-##### P8-B1: vault_members table + migration (`src/db.ts`, `src/migrations/`)
+#### P8-B1: vault_members table + migration (`src/db.ts`, `src/migrations/`)
 
 Create the table (declared in 8A but populated here):
 ```sql
@@ -537,7 +537,7 @@ Backfill: insert one row per existing user with their old `users.role` for the `
 - Role CHECK constraint rejects unknown values
 - Rollback restores `users.role` from backfill
 
-##### P8-B2: Invite flow for multi-vault (`src/invite.ts`, `src/cli.ts`, `src/email.ts`)
+#### P8-B2: Invite flow for multi-vault (`src/invite.ts`, `src/cli.ts`, `src/email.ts`)
 
 `grove invite <email> --vault <slug> [--role viewer|member]`:
 
@@ -555,7 +555,7 @@ Backfill: insert one row per existing user with their old `users.role` for the `
 - Inviting a new user creates account + membership + key atomically
 - Email deep-link into Claude.ai is a real working URL (tested against Claude.ai's connector-add flow)
 
-##### P8-B3: grove-www route restructure (`src/app/...`)
+#### P8-B3: grove-www route restructure (`src/app/...`)
 
 Move every authenticated grove-www route under `/@<handle>/<vault-slug>/`:
 
@@ -575,7 +575,7 @@ Bare `/dashboard`, `/profile`, etc. → 301 redirect to user's most-recently-use
 - Redirects from legacy bare routes preserve query params
 - `last_active_at` updates on navigation but not more than once per minute
 
-##### P8-B4: Vault switcher component (`grove-www/src/components/vault-switcher.tsx`)
+#### P8-B4: Vault switcher component (`grove-www/src/components/vault-switcher.tsx`)
 
 Header dropdown in `grove-www/src/components/header.tsx`:
 
@@ -593,7 +593,7 @@ Header dropdown in `grove-www/src/components/header.tsx`:
 - Scroll position preserved across switch
 - Screen readers announce the new vault context
 
-##### P8-B5: Connected-vaults settings page (`grove-www/src/app/...`)
+#### P8-B5: Connected-vaults settings page (`grove-www/src/app/...`)
 
 `/@<handle>/<vault>/settings/vaults`:
 

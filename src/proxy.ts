@@ -215,7 +215,11 @@ function validateToken(token: string): StoredKey | null {
 
 function isVaultOwner(userId: string): boolean {
   const db = getDb();
-  const vault = db.prepare("SELECT owner_id FROM vaults WHERE slug = ?").get("life") as { owner_id: string } | undefined;
+  // Default vault slug renamed to 'personal' in P8-A1. Keep accepting 'life'
+  // during the 90-day legacy window in case any callsite still seeds it.
+  const vault = db
+    .prepare("SELECT owner_id FROM vaults WHERE slug IN ('personal', 'life') ORDER BY CASE slug WHEN 'personal' THEN 0 ELSE 1 END LIMIT 1")
+    .get() as { owner_id: string } | undefined;
   return vault?.owner_id === userId;
 }
 

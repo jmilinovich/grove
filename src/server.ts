@@ -1036,15 +1036,60 @@ async function start() {
 
 start().catch(console.error);
 
-// ── Graceful shutdown ────────────────────────────────────────────
+// ── Graceful shutdown (P8-A5) ────────────────────────────────────
+//
+// Handle SIGTERM (pm2 stop), SIGUSR2 (pm2 reload), SIGINT (^C). Order:
+//   1. stop accepting new HTTP connections (existing requests continue)
+//   2. drain the write queue so no git mutation is left in flight
+//   3. verify git tree is clean post-drain
+//   4. exit 0 (or 1 on error / hard-timeout after 60s)
+//
+// 60s matches the deploy workflow's health-poll window (12 × 5s), which
+// is the longest the VPS is willing to wait before rolling back. If we
+// can't drain in that window something's stuck — exit 1 so pm2 fails
+// loudly rather than trapping the deploy.
 let shuttingDown = false;
-for (const signal of ["SIGTERM", "SIGINT"] as const) {
-  process.on(signal, async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log(`[grove] ${signal} received, flushing write queue...`);
+
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  const hardExit = setTimeout(() => {
+    console.error(`[grove] graceful shutdown exceeded 60s; forcing exit 1`);
+    process.exit(1);
+  }, 60_000);
+  hardExit.unref();
+
+  try {
+    console.log(`[grove] ${signal} received — draining`);
+    httpServer.close((err) => {
+      if (err) console.error(`[grove] httpServer.close: ${err.message}`);
+    });
     await flushWriteQueue();
-    httpServer.close(() => process.exit(0));
-    setTimeout(() => process.exit(1), 15_000);
-  });
+
+    try {
+      const { execSync } = await import("node:child_process");
+      const status = execSync(`git status --porcelain`, {
+        cwd: VAULT_PATH,
+        encoding: "utf8",
+      });
+      if (status.trim()) {
+        console.warn(`[grove] git not clean at shutdown:\n${status}`);
+      }
+    } catch (err) {
+      console.warn(`[grove] git status check failed: ${(err as Error).message}`);
+    }
+
+    clearTimeout(hardExit);
+    console.log(`[grove] shutdown complete`);
+    process.exit(0);
+  } catch (err) {
+    console.error(`[grove] shutdown error: ${(err as Error).message}`);
+    clearTimeout(hardExit);
+    process.exit(1);
+  }
+}
+
+for (const signal of ["SIGTERM", "SIGUSR2", "SIGINT"] as const) {
+  process.on(signal, () => void gracefulShutdown(signal));
 }
