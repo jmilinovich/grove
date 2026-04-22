@@ -374,6 +374,11 @@ Add multi-vault schema with up + down migrations. Transactional; entire migratio
 - Running migration twice is a no-op (schema version check)
 - Down-migration restores pre-migration schema + data
 
+**Ship + deploy constraints** (added 2026-04-22 after Tier 1/2 landed):
+- The PR triggers `AGENTS.md`'s "Ask before merging when PR touches `src/db.ts` schema" rule. `scripts/ship/batches.ts` marks this batch `noAutoMerge: true`, so `ship.ts` opens the PR and halts. Human reviews + merges.
+- After merge, the production deploy is blocked until `workflow_dispatch` is triggered with `confirm_schema_change=true` (Tier 2 schema-change guard). Rollback cannot safely undo a SQLite migration — the guard is intentional.
+- `scripts/check-plan-drift.ts` will still pass because the PostToolUse hook auto-marks the heading on commit.
+
 ##### P8-A2: Vault router in grove-proxy (`src/proxy.ts`, `src/vault-router.ts`)
 
 New routing middleware.
@@ -431,18 +436,20 @@ Closes SSRF/localhost-bypass holes: even if the proxy is bypassed, the backend r
 5. Create `/root/vaults/<slug>/` with `git init` + write default `.grove/config.yaml`
 6. Create `/root/qmd/<slug>/` with empty QMD index (call `qmd init` subprocess)
 7. `INSERT INTO vaults`; find-or-create `users` row by email; `INSERT INTO vault_members` (owner role); mint API key with `vault_id=<new-id>`
-8. **Regenerate `ecosystem.config.cjs` from `SELECT * FROM vaults`** (don't append — Caleb's point)
+8. **Regenerate `ecosystem.config.cjs` from `SELECT * FROM vaults`** (don't append — Caleb's point). Emit **two** entries per vault: `grove-server-<slug>` and `grove-discovery-<slug>`. The existing deploy workflow (and the manual fallback in `CLAUDE.md`) restarts `grove-server grove-proxy grove-discovery` — Tier 2's pattern must keep working when additional vaults exist, so the generator must produce per-vault discovery workers as well.
 9. `sudo pm2 reload ecosystem.config.cjs`
 10. Poll `http://127.0.0.1:<server_port>/health` until the response body parses as `{ok: true}` (timeout 60s). Note: since Tier 2 (commit `e7f55a9`) the handler returns `{ok, sha, started_at, uptime_sec, checks}` and emits HTTP 503 when any dependency is down — a 200 response no longer implies full readiness on its own, so check the body.
 11. Print: slug, ports, git_path, owner's API key (once), connector URL, sample invite email body
 
 **Files:** `src/vault-provision.ts` (new), `src/ecosystem-gen.ts` (new), `src/cli.ts` (new `vault create` subcommand), `docs/cli.md` (document)
-**Tests:** `test/vault-provision.test.ts` — slug validation, reserved-word rejection, duplicate-slug refusal, port allocation race-safe, ecosystem.config.cjs regenerated deterministically; `test/ecosystem-gen.test.ts` — output matches snapshot for known `vaults` table state
+**Tests:** `test/vault-provision.test.ts` — slug validation, reserved-word rejection, duplicate-slug refusal, port allocation race-safe, ecosystem.config.cjs regenerated deterministically; `test/ecosystem-gen.test.ts` — output matches snapshot for known `vaults` table state AND includes both `grove-server-<slug>` and `grove-discovery-<slug>` entries per vault
 **Acceptance:**
 - Creating a vault takes <60s and returns a working connector URL
 - Invalid slugs rejected with clear error
 - Ports never collide across concurrent invocations
 - `ecosystem.config.cjs` is fully regenerated, not appended — diffs stay small
+- Generated config emits both `grove-server-<slug>` and `grove-discovery-<slug>` processes per vault
+- `grove vault create` runs directly on the AWS VPS (via SSH), NOT through the deploy workflow. It provisions new processes on a live machine, it doesn't ship a new version of grove itself. `deploys.md` is not touched by this command.
 
 ##### P8-A5: Graceful shutdown + write queue drain (`src/server.ts`, `src/write-queue.ts`)
 
@@ -454,11 +461,13 @@ Per panels: `pm2 reload` currently cuts in-flight writes.
 3. In-flight MCP session: close gracefully with connection-closing message.
 
 **Files:** `src/server.ts` (signal handlers), `src/write-queue.ts` (drain method)
-**Tests:** `test/graceful-shutdown.test.ts` — SIGTERM mid-write drains queue; SIGUSR2 same; no data loss observed via post-shutdown git log
+**Tests:** `test/graceful-shutdown.test.ts` — SIGTERM mid-write drains queue; SIGUSR2 same; no data loss observed via post-shutdown git log. `test/write-queue-stress.test.ts` (shipped in Tier 3, `91f96ef`) — 100 concurrent enqueues must still pass after this change.
 **Acceptance:**
 - `pm2 reload` drains write queue cleanly; no orphaned writes
 - In-flight MCP clients reconnect and re-auth gracefully
 - Git repo is in a clean state post-shutdown (`git status` exits 0)
+- `test/write-queue-stress.test.ts` continues passing (CLAUDE.md rule #3 — "all writes serialized, no concurrent git ops, ever")
+- Full shutdown-plus-startup completes in <60s, matching Tier 2's deploy health-poll window (12 × 5s = 60s)
 
 ##### P8-A6: Per-vault observability (`src/logger.ts`, `src/proxy.ts`, `src/vault-usage.ts`, embed server)
 
@@ -608,16 +617,16 @@ Header dropdown in `grove-www/src/components/header.tsx`:
 - Deploy schema-migration code to canary; verify no existing traffic breaks
 
 ##### Day 1: schema migration
-- Take 30-second write-freeze (queue drains, pauses). Reads continue.
-- Run migration in single transaction (see P8-A1)
-- Resume writes
-- Verify: every row has non-null vault_id; every user has a vault_members row
+- Merge the `ship/p8a-1` PR manually (auto-merge is disabled — `noAutoMerge: true`).
+- Trigger the deploy workflow manually: `gh workflow run deploy.yml -f confirm_schema_change=true`. The Tier 2 schema-change guard blocks the deploy otherwise; it refuses to migrate without this flag because better-sqlite3 migrations can't roll back safely.
+- The deploy runs: write-queue drains (P8-A5), migration executes in a single transaction (P8-A1), new processes start, health-poll verifies `{ok: true, sha: TARGET_SHA}` within 60s, auto-rollback kicks in on health failure.
+- Verify: every row has non-null `vault_id`; `SELECT COUNT(*) FROM vault_members` matches `SELECT COUNT(*) FROM users`.
 
 ##### Day 2–5: router + Phase A end-to-end
-- Deploy grove-proxy with router code
-- Legacy `/mcp` and `/v1/*` requests fall through to personal (sunset header set)
-- Verify existing Claude.ai connector still works
-- Run `grove vault create test --owner test@example.com`; verify isolation (P8-A7)
+- Continue `npm run ship -- --from p8a-2` — remaining p8a batches auto-merge.
+- Legacy `/mcp` and `/v1/*` requests fall through to personal (sunset header set).
+- Verify existing Claude.ai connector still works.
+- Run `grove vault create test --owner test@example.com`; verify isolation (P8-A7).
 
 ##### Day 6: cutover announcement
 - Email existing Claude.ai connector users: "Your Grove URL is now `api.grove.md/v/personal/mcp`. Legacy URL works until <date+90d>."
@@ -647,9 +656,12 @@ Re-evaluate single-process-with-`vault_id`-keyed-Map refactor when any of:
 
 #### Phase 8 Execution Strategy
 
-**Batch p8a-1 (2 parallel agents, after Batch 0):**
+**Run with `npm run ship -- --from p8a-1`** (the orchestrator is `scripts/ship.ts`, batch registry is `scripts/ship/batches.ts`). Two batches are flagged `noAutoMerge: true` — `p8a-1` and `p8b-1` — because they touch `src/db.ts` schema and trip `AGENTS.md`'s "Ask before merging" rule. ship.ts opens those PRs and halts; the human merges, triggers `deploy` with `confirm_schema_change=true`, then resumes with `npm run ship -- --from <next-batch>`.
+
+**Batch p8a-1 (2 parallel agents, after Batch 0) — NOT auto-merged:**
 - Agent A: P8-A1 — schema migration + `vault_members` + `vault_usage_daily` (touches `src/db.ts`, migrations)
 - Agent B: P8-A5 — graceful shutdown (independent of A, touches `src/server.ts`, `src/write-queue.ts`)
+- **After ship.ts halts:** review PR → merge → `gh workflow run deploy.yml -f confirm_schema_change=true` → verify `/health` shows new SHA → `npm run ship -- --from p8a-2`.
 
 **Batch p8a-2 (3 parallel agents, after p8a-1):**
 - Agent C: P8-A2 — vault router in grove-proxy (depends on schema)
@@ -664,9 +676,10 @@ Re-evaluate single-process-with-`vault_id`-keyed-Map refactor when any of:
 
 **— Phase 8A exit: deploy to prod under legacy fallback. Verify 2nd vault works before proceeding. —**
 
-**Batch p8b-1 (2 parallel agents):**
-- Agent H: P8-B1 — vault_members table + backfill
+**Batch p8b-1 (2 parallel agents) — NOT auto-merged:**
+- Agent H: P8-B1 — vault_members table + backfill (schema change → `noAutoMerge: true`)
 - Agent I: P8-B2 — invite flow extensions (depends on H but works on different files)
+- **After ship.ts halts:** same flow as p8a-1 — merge + deploy with `confirm_schema_change=true` + resume.
 
 **Batch p8b-2 (2 parallel agents, after p8b-1):**
 - Agent J: P8-B3 — grove-www route restructure

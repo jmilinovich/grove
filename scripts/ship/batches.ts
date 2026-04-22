@@ -25,6 +25,16 @@ export interface Batch {
   /** Prerequisite batch IDs (merged before this one runs). */
   requires?: string[];
   entries: BatchEntry[];
+  /**
+   * If true, ship.ts opens the PR but does NOT enable `gh pr merge --auto`.
+   * Required for batches whose diff triggers AGENTS.md's "Ask before merging"
+   * rules — e.g. schema changes (src/db.ts, src/db-migration*.ts), where the
+   * deploy workflow's schema-change guard needs a human to enter
+   * `confirm_schema_change=true` before the landed code can ship to prod.
+   * ship.ts halts the run after opening the PR so the user can review + merge
+   * manually; resume with `ship --from <next-batch-id>`.
+   */
+  noAutoMerge?: boolean;
 }
 
 /**
@@ -40,6 +50,9 @@ export const BATCHES: Batch[] = [
   {
     id: "p8a-1",
     title: "feat(P8-A1, P8-A5): schema migration + graceful shutdown",
+    // Schema change — AGENTS.md requires human review before merge, and deploy
+    // needs confirm_schema_change=true. ship.ts opens the PR and stops.
+    noAutoMerge: true,
     entries: [
       {
         branch: "p8a-schema",
@@ -105,6 +118,9 @@ export const BATCHES: Batch[] = [
     id: "p8b-1",
     title: "feat(P8-B1, P8-B2): vault_members + invite flow",
     requires: ["p8a-4"],
+    // Schema change (creates vault_members table + drops users.role) — same
+    // reasoning as p8a-1. Human review + confirm_schema_change=true required.
+    noAutoMerge: true,
     entries: [
       {
         branch: "p8b-members",

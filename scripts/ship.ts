@@ -434,7 +434,8 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
   log("═════════════════════════════════════════════════════════");
 
   if (dryRun) {
-    log(`  DRY-RUN — would spawn ${batch.entries.length} agent(s), open PR, auto-merge`);
+    const mergeMode = batch.noAutoMerge ? "open PR, HALT (human review required)" : "open PR, auto-merge";
+    log(`  DRY-RUN — would spawn ${batch.entries.length} agent(s), ${mergeMode}`);
     for (const e of batch.entries) {
       log(`  └─ worktree-${e.branch}`);
     }
@@ -479,7 +480,27 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
 
   log("opening PR");
   const prNumber = await openPR(batch, shipBranch);
-  log(`  PR #${prNumber}: https://github.com/jmilinovich/grove/pull/${prNumber}`);
+  const prUrl = `https://github.com/jmilinovich/grove/pull/${prNumber}`;
+  log(`  PR #${prNumber}: ${prUrl}`);
+
+  // Schema-change batches (or anything else flagged) get opened but NOT
+  // auto-merged — AGENTS.md requires human review. ship.ts halts so the
+  // user can review, merge, deploy with confirm_schema_change=true, and
+  // resume with `ship --from <next-batch>`.
+  if (batch.noAutoMerge) {
+    appendProgress({
+      batch: batch.id,
+      status: "opened_pending_review",
+      pr: prNumber,
+      url: prUrl,
+    });
+    log("");
+    log("⏸ HALTED — batch requires human review (noAutoMerge).");
+    log(`  Review: ${prUrl}`);
+    log(`  After merge + deploy, resume with:`);
+    log(`    npm run ship -- --from <next-batch-id>`);
+    throw new Error(`batch ${batch.id} opened for manual review; not auto-merging`);
+  }
 
   log("waiting for checks + merge");
   const mergeSha = await enableAutoMergeAndWait(prNumber);
@@ -511,7 +532,8 @@ async function main(): Promise<void> {
     for (const b of BATCHES) {
       const status = done.has(b.id) ? "✓ merged" : "· pending";
       const prereq = b.requires?.length ? ` (requires: ${b.requires.join(", ")})` : "";
-      console.log(`  ${status}  ${b.id.padEnd(8)}  ${b.title}${prereq}`);
+      const manual = b.noAutoMerge ? " [manual merge]" : "";
+      console.log(`  ${status}  ${b.id.padEnd(8)}  ${b.title}${prereq}${manual}`);
     }
     return;
   }

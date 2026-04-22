@@ -87,6 +87,26 @@ status checks (`test`, `plan-drift`, `audit`, `secrets`). If CI turns
 red, the PR stays open; `ship.ts` times out after 30 minutes of
 no-merge and halts so a human can decide.
 
+### Schema-change gate (`noAutoMerge`)
+
+The "Ask before merging when PR touches `src/db.ts` schema" rule
+above is a human convention that GitHub's auto-merge doesn't know
+about. To prevent `ship.ts` from auto-merging schema changes,
+`scripts/ship/batches.ts` marks those batches `noAutoMerge: true`.
+The orchestrator then opens the PR, logs the URL, and halts the run.
+
+Flow for a `noAutoMerge` batch:
+1. ship.ts opens `ship/<batch-id>` PR and halts with a visible
+   "HALTED — batch requires human review" message.
+2. Human reviews the diff, merges via the normal `gh pr merge`.
+3. Human triggers `workflow_dispatch` on `deploy` with
+   `confirm_schema_change=true` input (the Tier 2 guard refuses
+   otherwise because SQLite migrations don't roll back safely).
+4. Resume with `npm run ship -- --from <next-batch-id>`.
+
+Phase 8's `p8a-1` and `p8b-1` are both flagged; `npm run ship -- --list`
+shows `[manual merge]` next to them.
+
 ### Cross-repo asymmetry
 
 - **grove** → `ship.ts` opens a PR against `origin/main`. Branch

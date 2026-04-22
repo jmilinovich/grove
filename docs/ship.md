@@ -33,6 +33,26 @@ The `--` is required; npm passes everything after it as script args.
 8. **Log progress** — append a JSON line to `.agents/progress.jsonl`.
 9. **Advance** — pull main, clean up worktrees, move to the next batch.
 
+## Manual-merge batches (`noAutoMerge`)
+
+Some batches touch `src/db.ts` schema and trip `AGENTS.md`'s "Ask before merging" rule. To honor that rule under autonomous shipping, those batch definitions in `scripts/ship/batches.ts` set `noAutoMerge: true`. `npm run ship -- --list` flags them with `[manual merge]`.
+
+When `ship.ts` reaches one of these:
+
+1. Spawns agents, merges their work, opens the `ship/<id>` PR.
+2. Logs "⏸ HALTED — batch requires human review" with the PR URL.
+3. Exits non-zero (the orchestrator refuses to continue; the failure message is explicit).
+
+You then:
+
+1. Review the PR diff.
+2. Merge: `gh pr merge <N> --squash --delete-branch`.
+3. Deploy with the schema-change flag: `gh workflow run deploy.yml -f confirm_schema_change=true`. This is required — the Tier 2 deploy guard refuses schema migrations without it, because SQLite migrations can't roll back safely.
+4. Verify the deploy went green (check `/health` shows the new SHA).
+5. Resume shipping: `npm run ship -- --from <next-batch-id>`.
+
+Phase 8's `p8a-1` (creates multi-vault schema) and `p8b-1` (creates vault_members, drops users.role) are both flagged. This is by design — schema changes deserve human eyes.
+
 ## Resume
 
 `ship.ts` resolves "what still needs to run" from three sources in priority order:
