@@ -35,7 +35,8 @@
     "iterate": "tsx scripts/iterate.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
-    "check:plan": "tsx scripts/check-plan-drift.ts"
+    "check:plan": "tsx scripts/check-plan-drift.ts",
+    "ship": "tsx scripts/ship.ts"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
@@ -47,6 +48,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.117",
     "@anthropic-ai/sdk": "^0.90.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/better-sqlite3": "^7.6.13",

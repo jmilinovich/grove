@@ -69,6 +69,41 @@ PRs that touch `.github/workflows/*`. If `gh pr merge` fails with
 "refusing to allow an OAuth App to create or update workflow", run
 `gh auth refresh -s workflow` once to grant the scope.
 
+## Autonomous batch shipping (`scripts/ship.ts`)
+
+`npm run ship` spawns parallel Claude Code agents in worktrees, merges
+their commits into a `ship/<batch-id>` branch, opens a PR, and lets
+GitHub's auto-merge land it. Replaces the bash orchestrators that used
+to live in `scripts/{run-batch,ship-*}.sh`. See `docs/ship.md` for
+full operator usage.
+
+### Authorization
+
+Shipping via `scripts/ship.ts` is authorized whenever **manual PR
+merges are authorized** (see above). The orchestrator uses the same
+`gh pr merge --auto --squash --delete-branch` command you'd type
+yourself — GitHub's auto-merge queue respects the same required
+status checks (`test`, `plan-drift`, `audit`, `secrets`). If CI turns
+red, the PR stays open; `ship.ts` times out after 30 minutes of
+no-merge and halts so a human can decide.
+
+### Cross-repo asymmetry
+
+- **grove** → `ship.ts` opens a PR against `origin/main`. Branch
+  protection enforces the 4 required checks. No direct push.
+- **grove-www** → `ship.ts` pushes directly to `origin/main`.
+  grove-www has no branch protection today. If that ever changes,
+  update `groveWwwSyncAfter()` in `scripts/ship.ts` to use the same
+  PR flow. Do not silently add protection to grove-www without
+  updating ship.ts first — agents will silently fail to push.
+
+### Batch registry
+
+New work gets added to `scripts/ship/batches.ts` as a `Batch` entry
+with 1-N `BatchEntry` agents. Commit discipline (message format,
+grove-www rules, exit behavior) comes from the project system prompt
+in `.claude/settings.json` — keep per-batch prompts spec-only.
+
 ## Claude Code hooks
 
 `.claude/settings.json` wires two hooks active for every agent session in this repo:
