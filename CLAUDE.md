@@ -26,7 +26,7 @@ Requires QMD running separately. The proxy does not start QMD — it expects it 
 
 ## Running on AWS
 
-Grove runs on AWS g4dn.xlarge (T4 GPU) at `api.grove.md`. PM2 manages five processes: `grove-server` (8190), `grove-proxy` (8420), `grove-discovery` (worker, no port), `qmd-server` (8177), `embed-server` (8090). Nginx terminates TLS.
+Grove runs on AWS g4dn.xlarge (T4 GPU) at `api.grove.md`. PM2 manages four processes: `grove-server` (8190), `grove-proxy` (8420), `grove-discovery` (worker, no port), `qmd-server` (8177). Nginx terminates TLS.
 
 ```bash
 ssh -i ~/.ssh/grove-aws.pem ubuntu@52.37.76.231
@@ -35,7 +35,7 @@ sudo pm2 restart grove-server # restart
 sudo pm2 logs grove-server   # tail logs
 ```
 
-Embedding uses sentence-transformers (not TEI — TEI FlashQwen3 CUDA kernel returns nulls).
+Embeddings go direct to Voyage AI (`voyage-4-large`, 1024-dim) from grove-server and grove-discovery — no local embedding service. The earlier self-hosted TEI / sentence-transformers setup was retired once Voyage's hosted API proved both faster and cheaper than running embeddings on the same box.
 Vault syncs every 5 min via cron. Keys live at `~/.grove/keys.json`.
 
 ## Code conventions

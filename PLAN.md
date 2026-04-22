@@ -733,8 +733,8 @@ Decisions made during planning. Reference these when implementing — don't re-l
 | Write concurrency | Serialized queue (mutex) | Git merge, CRDTs | Git merge corrupts YAML frontmatter. CRDTs are overkill for single-user. Mutex is simple and correct. |
 | Sync direction | Server writes, local pulls | Bidirectional | Prevents split brain. One source of truth for remote writes. |
 | Obsidian Sync | Disabled (git only) | Keep both | Two sync systems = conflicts. Git handles everything. |
-| Embeddings | Self-hosted TEI (bge-base-en-v1.5) | OpenAI API, local sentence-transformers | Privacy-first. Same model on Mac (embedding) and VPS (query). No data leaves our infra. |
-| Embed runtime | Node.js (embed-node.ts) | Python sentence-transformers | Python 3.14 + sqlite-vec vec0 = catastrophic GC (25-47GB). Node.js + better-sqlite3 works perfectly. |
+| Embeddings | Voyage AI (`voyage-4-large`, 1024-dim) | Self-hosted TEI (bge-base-en-v1.5), local sentence-transformers, OpenAI | Hosted Voyage proved both faster and cheaper than running embeddings on-box; the earlier self-hosted TEI path was retired. |
+| Embed runtime | Direct HTTPS to Voyage from grove-server / grove-discovery | Local embed-server, Node.js `embed-node.ts`, Python sentence-transformers | No local runtime — simpler deploy (one fewer PM2 process) and trivial scaling. The earlier Node.js runtime existed to dodge Python 3.14 + sqlite-vec GC pathology; that tradeoff evaporated once we stopped hosting embeddings at all. |
 | Search pipeline | BM25 + vector + RRF | + grep + reranker + query expansion | Over-engineered for <10K docs. Reranker/expansion add latency, not quality at this scale. |
 | Garden API design | Workflows compose 6 primitives | Dedicated endpoints per garden operation | Plant/harvest compose naturally. Tend/wander need server-side computation folded into `vault_status`. |
 | MCP server | Proper SDK-based server | Extend proxy interceptors | Expert panel unanimous: interceptors are tech debt. Proxy stays for auth, Grove server owns the tools. |
