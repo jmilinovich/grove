@@ -31,7 +31,7 @@
     "test:unit": "vitest run test/unit/",
     "test:int": "vitest run test/integration/",
     "test:smoke": "bats test/smoke/*.bats",
-    "test:eval": "tsx scripts/run-evals.ts",
+    "test:eval": "tsx scripts/eval-vector-search.ts",
     "iterate": "tsx scripts/iterate.ts",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",

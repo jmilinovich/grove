@@ -9,7 +9,7 @@ Grove is a hosted knowledge API that makes Obsidian vaults searchable and writab
 3. **All writes are serialized.** Single-threaded write queue. No concurrent git operations. Ever.
 4. **Every write creates a git commit** with the API key identity in the message.
 5. **Search index updates synchronously on write.** Agents have no memory between calls — eventual consistency means duplicates.
-6. **Keep tool count at 6.** AI tool selection degrades past ~10. Fold new operations into existing tools as parameters.
+6. **Keep tools distinct and composable.** Current count: 6. The original rule said "≤6 because selection degrades past ~10" — 2026 benchmarks showed that's not quite right. The real cliff is around 50 tools; Anthropic's Tool Search Tool (shipped Q1 2026) mostly eliminates count sensitivity by loading tool definitions on demand. The value of the rule was never the number 6 specifically; it was tool *overlap risk*. Before adding a new tool, check: does an existing tool with a new parameter serve? A 7th or 8th tool is fine if it earns its slot. A 20th isn't. If count climbs past 12, stop and reconsider the design.
 
 Read `PLAN.md` for the full spec. This file governs how you work — PLAN.md governs what you build.
 
@@ -51,7 +51,7 @@ Vault syncs every 5 min via cron. Keys live at `~/.grove/keys.json`.
 
 - Don't add web frameworks. Raw `node:http` is the choice and it's final.
 - Don't break the MCP protocol. Claude.ai connects as a custom connector — if the proxy changes response shape, it breaks every connected surface.
-- Don't add MCP tools beyond 6 without explicit approval. More tools = worse agent tool selection.
+- Don't sprawl MCP tools. 6 is the current count; 10–12 is fine on modern models; past that, tool-overlap hurts selection even if raw model performance holds. See architecture rule #6.
 - Don't write to the vault outside the write queue. Ever.
 - Don't store raw API tokens anywhere. Hash with SHA-256 first.
 - Don't over-engineer. This is a proxy today, growing into a server. Build what's needed now.
