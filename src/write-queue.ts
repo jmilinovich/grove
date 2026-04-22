@@ -11,6 +11,8 @@ export class WriteQueue {
   private pushTimer: ReturnType<typeof setTimeout> | null = null;
   private pushFn: (() => Promise<void>) | null = null;
   private pendingPush = false;
+  private pendingCount = 0;
+  private oldestQueuedAt: number | null = null;
 
   /**
    * Enqueue a write operation. Runs sequentially — each operation
@@ -18,6 +20,9 @@ export class WriteQueue {
    * Errors reject the returned promise but don't break the chain.
    */
   enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const enqueuedAt = Date.now();
+    this.pendingCount++;
+    if (this.oldestQueuedAt === null) this.oldestQueuedAt = enqueuedAt;
     return new Promise<T>((resolve, reject) => {
       this.chain = this.chain.then(async () => {
         try {
@@ -27,9 +32,29 @@ export class WriteQueue {
         } catch (err) {
           reject(err);
           this.schedulePushIfNeeded();
+        } finally {
+          this.pendingCount--;
+          if (this.pendingCount === 0) this.oldestQueuedAt = null;
         }
       });
     });
+  }
+
+  /**
+   * Number of operations currently queued (not yet settled). Zero when
+   * the queue is idle. Read by vault_status(mode: "perf").
+   */
+  depth(): number {
+    return this.pendingCount;
+  }
+
+  /**
+   * Milliseconds since the oldest still-pending op was enqueued. Zero
+   * when the queue is idle. Spikes here are a tail-latency signal.
+   */
+  oldestQueuedAgeMs(): number {
+    if (this.oldestQueuedAt === null) return 0;
+    return Date.now() - this.oldestQueuedAt;
   }
 
   /**

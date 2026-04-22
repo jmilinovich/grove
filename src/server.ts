@@ -30,7 +30,7 @@ function noteUrl(vaultPath: string): string {
 
 import { gitLog, startupRecovery, listNotes } from "./vault-ops.js";
 import { parseNote, contentHash, inferTags } from "./notes-validate.js";
-import { handleWriteNote, handleDeleteNote, handleMoveNote, flushWriteQueue } from "./rest.js";
+import { handleWriteNote, handleDeleteNote, handleMoveNote, handleStatusPerf, flushWriteQueue } from "./rest.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { getStats, startStatsTimer } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
@@ -587,9 +587,10 @@ Modes:
   diagnostics  — orphan notes, broken [[links]], missing frontmatter, stale Inbox items
   graph        — wikilink graph: most connected, bridges, clusters, orphans
   digest       — garden lifecycle: seeds, sprouts, growing, mature, dormant, withering
-  discovery    — recent extractions, new concepts, surprising connections, queue depth`,
+  discovery    — recent extractions, new concepts, surprising connections, queue depth
+  perf         — per-tool latency percentiles, write queue depth, discovery backlog`,
       inputSchema: {
-        mode: z.enum(["health", "history", "diagnostics", "graph", "digest", "discovery"]).describe("What to check"),
+        mode: z.enum(["health", "history", "diagnostics", "graph", "digest", "discovery", "perf"]).describe("What to check"),
         since: z.string().optional().describe("For history: date filter (e.g., '1 week ago', '2026-04-01')"),
         path_prefix: z.string().optional().describe("For history: path filter (e.g., 'Journal/')"),
       },
@@ -677,6 +678,11 @@ Modes:
           last_processed_at: getLastProcessedAt(),
         };
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      }
+
+      if (mode === "perf") {
+        const perf = await handleStatusPerf();
+        return { content: [{ type: "text" as const, text: JSON.stringify(perf, null, 2) }] };
       }
 
       return { content: [{ type: "text" as const, text: "Unknown mode" }] };

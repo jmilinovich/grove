@@ -38,6 +38,8 @@ import {
   getSourceHash,
   deleteProvenance,
   renameProvenance,
+  discoveryQueueDepth,
+  getLastProcessedAt,
 } from "./db.js";
 import { getImageStore, contentKey, extForContentType, type ImageStore } from "./image-store.js";
 import { autoTagImage, type ImageTagResult } from "./image-tag.js";
@@ -995,6 +997,34 @@ export async function handleStatusGraph(): Promise<Record<string, unknown>> {
  */
 export async function handleStatusDigest(): Promise<Record<string, unknown>> {
   return await computeDigest(VAULT_PATH) as unknown as Record<string, unknown>;
+}
+
+/**
+ * Perf: observability surface for latency regressions.
+ *
+ * Exposes in-process counters so agents and operators can notice tail
+ * latency, queue backpressure, and discovery lag without SSHing to read logs.
+ * Cheap to compute (no I/O except a count() on the discovery queue).
+ */
+export async function handleStatusPerf(): Promise<Record<string, unknown>> {
+  const toolMetrics = metrics.getMetrics();
+  return {
+    uptime_seconds: toolMetrics.uptime_seconds,
+    total_requests: toolMetrics.total_requests,
+    total_errors: toolMetrics.total_errors,
+    error_rate: toolMetrics.error_rate,
+    tools: toolMetrics.by_tool,
+    search: searchMetrics.getSearchStats(),
+    write_queue: {
+      depth: writeQueue.depth(),
+      oldest_queued_age_ms: writeQueue.oldestQueuedAgeMs(),
+    },
+    discovery: {
+      queue_depth: discoveryQueueDepth(),
+      last_processed_at: getLastProcessedAt(),
+    },
+    window_ms: 60_000 * 60,
+  };
 }
 
 // ── Write ──────────────────────────────────────────────────────────
