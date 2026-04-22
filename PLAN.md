@@ -491,7 +491,7 @@ Measurement substrate for future rate limiting + billing.
 - Embed server logs show vault_id in `X-Grove-Vault-Id` header
 - Flush overhead <1ms per minute per vault (measured)
 
-#### P8-A7: End-to-end isolation test (manual script + CI)
+#### P8-A7: End-to-end isolation test (manual script + CI) ✅ COMPLETE 2026-04-22 (e4cd677)
 
 Test script that provisions a second vault and verifies isolation.
 
