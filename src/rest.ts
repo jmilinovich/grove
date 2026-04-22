@@ -312,6 +312,13 @@ export interface NoteResponse {
   path: string;
   frontmatter: Record<string, unknown>;
   content: string;
+  /**
+   * Hash of what the caller last wrote. Use as `if_hash` for updates —
+   * stays stable across discovery-worker mutations. Equals content_hash
+   * for notes without provenance (legacy or discovery-created).
+   */
+  source_hash: string;
+  /** Hash of the current on-disk content. */
   content_hash: string;
   links: Record<string, { path: string | null; exists: boolean }>;
   backlinks: string[];
@@ -492,6 +499,7 @@ export async function handleGetNote(notePath: string, trail?: TrailConfig | null
     path: note.path,
     frontmatter: note.frontmatter,
     content: note.content,
+    source_hash: getSourceHash(note.path) ?? note.content_hash,
     content_hash: note.content_hash,
     links,
     backlinks,

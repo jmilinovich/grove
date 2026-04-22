@@ -51,6 +51,7 @@ import {
   getNewConceptsCreated,
   getSurprisingConnections,
   getLastProcessedAt,
+  getSourceHash,
 } from "./db.js";
 
 installCrashHandlers("grove-server");
@@ -462,7 +463,15 @@ Examples: "${entityPath(VAULT_CONFIG, "person")}*.md", "${VAULT_CONFIG.structure
           }
         }
         const url = noteUrl(entry.path);
-        results.push({ path: entry.path, url, frontmatter, content, content_hash: contentHash(raw) });
+        const diskHash = contentHash(raw);
+        results.push({
+          path: entry.path,
+          url,
+          frontmatter,
+          content,
+          source_hash: getSourceHash(entry.path) ?? diskHash,
+          content_hash: diskHash,
+        });
       }
       return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
     },
