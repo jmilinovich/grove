@@ -280,6 +280,13 @@ function runAgent(entry: BatchEntry, logDir: string): Promise<AgentResult> {
         "--worktree",
         entry.branch,
         "--print",
+        // stream-json + --verbose emits one JSON event per tool call / message
+        // fragment. Without this, --print buffers everything until the final
+        // answer, and the 5-min stall watchdog fires first on any non-trivial
+        // task. --include-partial-messages gets us streaming text too.
+        "--output-format", "stream-json",
+        "--verbose",
+        "--include-partial-messages",
         "--dangerously-skip-permissions",
         entry.prompt,
       ],
