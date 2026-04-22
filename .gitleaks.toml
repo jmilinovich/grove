@@ -1,0 +1,13 @@
+title = "Grove gitleaks config"
+
+[extend]
+useDefault = true
+
+# Test fixtures use intentionally fake tokens (e.g. grove_live_abc123def)
+# to exercise argv sanitization, CLI contracts, and smoke checks.
+# Scope this allowlist to test/ only so real tokens elsewhere still trip.
+[[allowlists]]
+description = "Fake tokens in test fixtures"
+paths = [
+  '''^test/''',
+]

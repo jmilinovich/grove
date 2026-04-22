@@ -87,9 +87,15 @@ jobs:
   #      re-poll rollback health. If that works, exit 1 with a clear
   #      rollback log. If the rollback also fails, exit 2 —
   #      api.grove.md is down and needs human attention.
+  # Auto-runs on push to main once tests/audit/secrets pass. No staging
+  # environment today, so green main == deployed. workflow_dispatch kept
+  # for schema-touching deploys (requires confirm_schema_change=true) and
+  # for manual re-runs.
   deploy:
     needs: [test, audit, secrets]
-    if: github.event_name == 'workflow_dispatch'
+    if: |
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

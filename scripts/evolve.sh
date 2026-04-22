@@ -14,5 +14,5 @@ git push origin main 2>&1 | tail -2
 
 ssh -i ~/.ssh/grove-aws.pem ubuntu@52.37.76.231 "sudo bash -c '\
 cd /root/grove && git pull -q && \
-export VOYAGE_API_KEY=pa-YeWvGAICiNOdKK14wGSX2XYpSSfoYMhDA5yaLGPAKhE && \
+set -a && source /root/grove/.env && set +a && \
 npx tsx scripts/eval-vector-search.ts 2>&1'" | grep -E "Summary:|BM25:|Vector:|Hybrid:|✗.*\|"
