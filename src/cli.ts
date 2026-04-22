@@ -2337,7 +2337,10 @@ async function main() {
       const deps: EditDeps = {
         getNote: async (p) => {
           const data = await restGet(config, `/v1/notes/${encodeURIComponent(p)}`);
-          return { content: data.content ?? "", content_hash: data.content_hash ?? "", frontmatter: data.frontmatter };
+          // Prefer source_hash (stable across discovery mutations); fall back
+          // to content_hash for servers predating the two-hash model.
+          const hash = (data.source_hash as string | undefined) ?? (data.content_hash as string | undefined) ?? "";
+          return { content: data.content ?? "", source_hash: hash, frontmatter: data.frontmatter };
         },
         putNote: async (p, content, ifHash) => {
           // Preserve existing frontmatter — grove edit doesn't restructure it.
@@ -2351,7 +2354,7 @@ async function main() {
         ok: true,
         action: outcome.status,
         path: outcome.path,
-        new_content_hash: outcome.new_content_hash,
+        new_source_hash: outcome.new_source_hash,
         ...(outcome.tempfile ? { tempfile: outcome.tempfile } : {}),
         _fmt: () => {
           switch (outcome.status) {

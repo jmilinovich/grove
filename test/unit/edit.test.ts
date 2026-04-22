@@ -50,7 +50,7 @@ describe("runEdit: headless refusal", () => {
     delete process.env.GROVE_FORCE_TTY;
 
     const deps: EditDeps = {
-      getNote: async () => ({ content: "a", content_hash: "h" }),
+      getNote: async () => ({ content: "a", source_hash: "h" }),
       putNote: async () => ({ status: 200, data: {} }),
     };
 
@@ -70,14 +70,14 @@ describe("runEdit: headless refusal", () => {
     Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 
     const deps: EditDeps = {
-      getNote: async () => ({ content: "original", content_hash: "h1" }),
-      putNote: async () => ({ status: 200, data: { content_hash: "h2" } }),
+      getNote: async () => ({ content: "original", source_hash: "h1" }),
+      putNote: async () => ({ status: 200, data: { source_hash: "h2" } }),
       simulatedEdit: (c) => c + "\n-- edited --",
     };
 
     const outcome = await runEdit("x.md", deps);
     expect(outcome.status).toBe("written");
-    expect(outcome.new_content_hash).toBe("h2");
+    expect(outcome.new_source_hash).toBe("h2");
   });
 
   it("GROVE_FORCE_TTY=1 bypasses headless check", async () => {
@@ -85,7 +85,7 @@ describe("runEdit: headless refusal", () => {
     process.env.GROVE_FORCE_TTY = "1";
 
     const deps: EditDeps = {
-      getNote: async () => ({ content: "a", content_hash: "h" }),
+      getNote: async () => ({ content: "a", source_hash: "h" }),
       putNote: async () => ({ status: 200, data: {} }),
       simulatedEdit: (c) => c + "!",
     };
@@ -109,7 +109,7 @@ describe("runEdit: conflict recovery", () => {
 
   it("returns unchanged when simulatedEdit is identity", async () => {
     const deps: EditDeps = {
-      getNote: async () => ({ content: "same", content_hash: "h" }),
+      getNote: async () => ({ content: "same", source_hash: "h" }),
       putNote: async () => ({ status: 200, data: {} }),
       simulatedEdit: (c) => c,
     };
@@ -123,13 +123,13 @@ describe("runEdit: conflict recovery", () => {
     const deps: EditDeps = {
       getNote: async () => ({
         content: putCalls === 0 ? "original" : serverContent,
-        content_hash: putCalls === 0 ? "h1" : "h2",
+        source_hash: putCalls === 0 ? "h1" : "h2",
       }),
       putNote: async (p, content, hash) => {
         putCalls++;
         if (putCalls === 1) return { status: 409, data: { error: "conflict" } };
         serverContent = content;
-        return { status: 200, data: { content_hash: "h3" } };
+        return { status: 200, data: { source_hash: "h3" } };
       },
       promptChar: async () => "r",
       simulatedEdit: (c) => c + "-edited",
@@ -137,17 +137,17 @@ describe("runEdit: conflict recovery", () => {
     const outcome = await runEdit("x.md", deps);
     expect(outcome.status).toBe("overwritten");
     expect(putCalls).toBe(2);
-    expect(outcome.new_content_hash).toBe("h3");
+    expect(outcome.new_source_hash).toBe("h3");
   });
 
   it("handles 409 → overwrite: uses latest hash and force-writes", async () => {
     let putCalls = 0;
     const deps: EditDeps = {
-      getNote: async () => ({ content: "server-latest", content_hash: putCalls === 0 ? "h1" : "h2" }),
+      getNote: async () => ({ content: "server-latest", source_hash: putCalls === 0 ? "h1" : "h2" }),
       putNote: async () => {
         putCalls++;
         if (putCalls === 1) return { status: 409, data: {} };
-        return { status: 200, data: { content_hash: "h3" } };
+        return { status: 200, data: { source_hash: "h3" } };
       },
       promptChar: async () => "o",
       simulatedEdit: (c) => c + "-edited",
@@ -159,7 +159,7 @@ describe("runEdit: conflict recovery", () => {
 
   it("handles 409 → abort: returns aborted with tempfile path", async () => {
     const deps: EditDeps = {
-      getNote: async () => ({ content: "x", content_hash: "h" }),
+      getNote: async () => ({ content: "x", source_hash: "h" }),
       putNote: async () => ({ status: 409, data: {} }),
       promptChar: async () => "a",
       simulatedEdit: (c) => c + "-edited",
@@ -174,7 +174,7 @@ describe("runEdit: conflict recovery", () => {
 
   it("non-409 failure throws SERVER_ERROR with tempfile detail", async () => {
     const deps: EditDeps = {
-      getNote: async () => ({ content: "x", content_hash: "h" }),
+      getNote: async () => ({ content: "x", source_hash: "h" }),
       putNote: async () => ({ status: 500, data: { error: "boom" } }),
       simulatedEdit: (c) => c + "-edited",
     };

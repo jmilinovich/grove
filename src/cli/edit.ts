@@ -2,14 +2,18 @@
  * `grove edit <path>` — TTY-only interactive editor with conflict recovery.
  *
  * Flow:
- *   1. GET the note (path + content_hash).
+ *   1. GET the note (path + source_hash).
  *   2. Write content to a tempfile, spawn $EDITOR.
- *   3. On editor save, read new content and PUT with If-Match: <hash>.
+ *   3. On editor save, read new content and PUT with If-Match: <source_hash>.
  *   4. On 409 conflict: GET latest, show three-way context
  *      (their edits, latest on server, merged preview) and prompt:
  *        [r]etry   — re-fetch latest, re-launch editor with latest content
  *        [o]verwrite — force-write with latest hash (discards server change)
  *        [a]bort   — exit 1, leave tempfile for recovery
+ *
+ * We use source_hash (not content_hash) for If-Match because the Grove
+ * discovery worker may mutate the file on disk (wikilink wiring). source_hash
+ * is pinned to what the caller last wrote, so it stays stable across that.
  *
  * Refuses headless (non-TTY) invocation — agents should use `grove patch`.
  */
@@ -22,7 +26,7 @@ import { createInterface } from "node:readline";
 import { GroveCliError } from "./lib/errors.js";
 
 export interface EditDeps {
-  getNote: (path: string) => Promise<{ content: string; content_hash: string; frontmatter?: Record<string, unknown> }>;
+  getNote: (path: string) => Promise<{ content: string; source_hash: string; frontmatter?: Record<string, unknown> }>;
   putNote: (path: string, content: string, ifHash: string) => Promise<{ status: number; data: Record<string, unknown> }>;
   /** Editor binary — defaults to $EDITOR, $VISUAL, then vi. */
   editor?: string;
@@ -77,7 +81,7 @@ async function defaultPromptChar(question: string): Promise<string> {
 export interface EditOutcome {
   status: "unchanged" | "written" | "overwritten" | "aborted";
   path: string;
-  new_content_hash?: string;
+  new_source_hash?: string;
   tempfile?: string; // present on abort, for recovery
 }
 
@@ -116,18 +120,21 @@ export async function runEdit(path: string, deps: EditDeps): Promise<EditOutcome
   // Read back edited content.
   const edited = readFileSync(tempPath, "utf8");
   if (edited === original.content) {
-    return { status: "unchanged", path, new_content_hash: original.content_hash };
+    return { status: "unchanged", path, new_source_hash: original.source_hash };
   }
 
-  // Try the PUT with If-Match.
-  let baseHash = original.content_hash;
+  // Try the PUT with If-Match (using source_hash — stable across discovery mutations).
+  let baseHash = original.source_hash;
   let contentToPut = edited;
 
   for (let attempt = 0; attempt < 10; attempt++) {
     const res = await deps.putNote(path, contentToPut, baseHash);
     if (res.status < 400) {
-      const newHash = (res.data as { content_hash?: string }).content_hash;
-      return { status: attempt === 0 ? "written" : "overwritten", path, new_content_hash: newHash };
+      // Prefer source_hash from response; fall back to content_hash for
+      // servers that haven't been upgraded yet (pre-2026-04 builds).
+      const data = res.data as { source_hash?: string; content_hash?: string };
+      const newHash = data.source_hash ?? data.content_hash;
+      return { status: attempt === 0 ? "written" : "overwritten", path, new_source_hash: newHash };
     }
     if (res.status !== 409) {
       throw new GroveCliError("SERVER_ERROR", `PUT failed with status ${res.status}: ${JSON.stringify(res.data)}`, {
@@ -155,11 +162,11 @@ export async function runEdit(path: string, deps: EditDeps): Promise<EditOutcome
         await spawnEditor(editor, tempPath);
       }
       contentToPut = readFileSync(tempPath, "utf8");
-      baseHash = latest.content_hash;
+      baseHash = latest.source_hash;
       continue;
     } else if (answer === "o" || answer === "overwrite") {
       // Force-write using the latest hash (intentional clobber of server change).
-      baseHash = latest.content_hash;
+      baseHash = latest.source_hash;
       continue;
     } else {
       // Abort. Tempfile left in place for user recovery.

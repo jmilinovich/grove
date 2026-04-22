@@ -142,17 +142,64 @@ This is the part I spent the most time getting right. Agents are eager writers a
    - Frontmatter: type in whitelist, required fields present, tags include type
    - Path/type consistency (Resources/Concepts/* must be type:concept)
    - File size < 100KB
-   - Optimistic concurrency: if_hash must match current content
+   - Optimistic concurrency: if_hash must match the recorded source_hash
 3. Write queue (mutex):
    - Write file to disk
    - git add → git commit (with API key identity)
-   - Synchronous QMD reindex
-   - Fire-and-forget: embed new content
-4. Return content_hash + commit SHA
+   - Record provenance (path → source_hash + commit_sha)
+   - Fire-and-forget: QMD reindex, embed new content
+4. Return source_hash + content_hash + commit SHA
 5. Batched git push every 30 seconds
 ```
 
 Server is the sole writer to git. Local machines pull. One direction. No split-brain.
+
+### The two-hash model
+
+The discovery worker mutates notes after they land (it auto-wires wikilinks
+based on concept extraction). That makes the on-disk content hash unstable:
+a caller that writes content X and receives hash H may find that two seconds
+later the file on disk has a different hash, because the worker rewrote links.
+
+Grove solves this with **two hashes** in every write/get response:
+
+- **`source_hash`** — hash of what the caller wrote, pinned to caller intent.
+  Stays stable across discovery mutations. **Use this as `if_hash` and
+  `If-Match`** for subsequent updates.
+- **`content_hash`** — hash of the on-disk content at return time. Equal to
+  source_hash immediately after write; may diverge once discovery runs.
+  Useful if you specifically care about the current file bytes.
+
+The server validates `if_hash` against the recorded `source_hash` first, and
+falls back to the disk hash for files that have no provenance entry yet
+(pre-migration notes, or notes created directly by the discovery worker).
+The REST API returns `source_hash` as the HTTP `ETag`, so standard
+`If-Match` round-trips work correctly.
+
+### Batch writes
+
+For multi-note workflows (creating a cluster of related notes, or chaining
+create + update), `write_note` accepts an `operations: []` array executed in
+a single mutex acquisition:
+
+```
+write_note({
+  operations: [
+    { path: "a.md", frontmatter: ..., content: "..." },
+    { path: "b.md", frontmatter: ..., content: "..." },
+    { path: "a.md", frontmatter: ..., content: "...", if_hash_from_op: 0 }
+  ],
+  atomic: true
+})
+```
+
+- `if_hash_from_op` chains an op's `if_hash` to an earlier op's `source_hash`
+  — no round-trip needed for the intermediate hash.
+- `atomic: true` rolls the entire batch back on any failure (git reset +
+  provenance restore). `atomic: false` (default) leaves earlier successes
+  committed when a later op fails.
+- Pre-flight validation runs before the mutex — invalid ops fail fast, no
+  partial state.
 
 ## Architecture
 
