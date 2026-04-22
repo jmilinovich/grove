@@ -47,15 +47,20 @@ let tempVault: string;
 beforeEach(() => {
   tempVault = mkdtempSync(join(tmpdir(), "grove-lifecycle-"));
   process.env.GROVE_VAULT = tempVault;
+  process.env.GROVE_DB_PATH = join(tempVault, "grove.db");
 });
 
 afterEach(() => {
   vi.clearAllMocks();
   delete process.env.GROVE_VAULT;
+  delete process.env.GROVE_DB_PATH;
 });
 
 async function loadRest() {
   vi.resetModules();
+  const db = await import("../src/db.js");
+  db.resetDb();
+  db.createSchema();
   return import("../src/rest.js");
 }
 

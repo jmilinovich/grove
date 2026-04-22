@@ -31,7 +31,14 @@ import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { searchMetrics, metrics } from "./metrics.js";
 import { WriteQueue } from "./write-queue.js";
 import { embedFile } from "./embed-single.js";
-import { enqueueDiscovery, getDb } from "./db.js";
+import {
+  enqueueDiscovery,
+  getDb,
+  recordWrite,
+  getSourceHash,
+  deleteProvenance,
+  renameProvenance,
+} from "./db.js";
 import { getImageStore, contentKey, extForContentType, type ImageStore } from "./image-store.js";
 import { autoTagImage, type ImageTagResult } from "./image-tag.js";
 
@@ -984,9 +991,47 @@ export async function handleStatusDigest(): Promise<Record<string, unknown>> {
 
 // ── Write ──────────────────────────────────────────────────────────
 
+/**
+ * Optimistic-concurrency check shared by write / move / delete.
+ * Prefers provenance.source_hash (stable across discovery-worker mutations);
+ * falls back to the on-disk hash for paths with no provenance entry yet.
+ * Throws a CONFLICT error on mismatch. No-op if the file doesn't exist
+ * and provenance is absent (treated as a fresh create).
+ */
+function assertIfHashMatches(relPath: string, absPath: string, ifHash: string): void {
+  const recordedSource = getSourceHash(relPath);
+  if (recordedSource !== null) {
+    if (recordedSource !== ifHash) {
+      throw Object.assign(new Error("Conflict: note was modified"), {
+        code: "CONFLICT",
+        currentHash: recordedSource,
+      });
+    }
+    return;
+  }
+  if (!existsSync(absPath)) return;
+  const currentHash = contentHash(readNoteFile(absPath));
+  if (currentHash !== ifHash) {
+    throw Object.assign(new Error("Conflict: note was modified"), {
+      code: "CONFLICT",
+      currentHash,
+    });
+  }
+}
+
 export interface WriteNoteResult {
   path: string;
   action: string;
+  /**
+   * Hash of what the caller wrote (pre-discovery). Use this as `if_hash`
+   * in subsequent updates — it stays stable across discovery-worker mutations.
+   */
+  source_hash: string;
+  /**
+   * Hash of the on-disk content at return time. Equal to source_hash
+   * immediately after write, but may diverge once the discovery worker
+   * runs. Retained for backward compatibility; prefer source_hash.
+   */
   content_hash: string;
   commit: string;
   url: string;
@@ -1027,14 +1072,8 @@ export async function handleWriteNote(
     throw Object.assign(new Error(`Validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}`), { code: "VALIDATION", errors });
   }
 
-  // Optimistic concurrency check (hash is over plaintext, not ciphertext)
-  if (options.ifHash && existsSync(absPath)) {
-    const currentRaw = readNoteFile(absPath);
-    const currentHash = contentHash(currentRaw);
-    if (currentHash !== options.ifHash) {
-      throw Object.assign(new Error("Conflict: note was modified"), { code: "CONFLICT", currentHash });
-    }
-  }
+  // Optimistic concurrency check (prefers provenance, falls back to disk).
+  if (options.ifHash) assertIfHashMatches(relPath, absPath, options.ifHash);
 
   // Enqueue the write
   const result = await writeQueue.enqueue(async () => {
@@ -1050,6 +1089,12 @@ export async function handleWriteNote(
     const commitMsg = `${who}: ${action} ${relPath}`;
     const sha = await gitCommit(VAULT_PATH, relPath, commitMsg);
 
+    // source_hash is the hash of what the CALLER wrote, before any
+    // discovery-worker mutation. content_hash is equal at this point but
+    // may drift once discovery runs; source_hash stays pinned.
+    const sourceHash = contentHash(serialized);
+    recordWrite(relPath, sourceHash, sha, options.keyName ?? "api");
+
     // qmd reindex is full-vault and takes ~10s on a large vault.
     // Fire-and-forget: the dedup+coalesce in qmdReindex() ensures at most
     // one in-flight run + one queued tail run, so search catches up within
@@ -1062,7 +1107,8 @@ export async function handleWriteNote(
     return {
       path: relPath,
       action,
-      content_hash: contentHash(serialized),
+      source_hash: sourceHash,
+      content_hash: sourceHash,
       commit: sha,
       url: noteUrl(relPath, options.handle ?? getVaultOwnerHandle()),
     };
@@ -1138,14 +1184,8 @@ export async function handleDeleteNote(
     }
   }
 
-  // Optimistic concurrency check
-  if (options.ifHash) {
-    const currentRaw = readNoteFile(srcAbs);
-    const currentHash = contentHash(currentRaw);
-    if (currentHash !== options.ifHash) {
-      throw Object.assign(new Error("Conflict: note was modified"), { code: "CONFLICT", currentHash });
-    }
-  }
+  // Optimistic concurrency check (prefers provenance, falls back to disk).
+  if (options.ifHash) assertIfHashMatches(srcRel, srcAbs, options.ifHash);
 
   const who = options.keyName ? `grove (${options.keyName})` : "grove (api)";
 
@@ -1159,6 +1199,7 @@ export async function handleDeleteNote(
       invalidateFrontmatterCache(srcAbs);
       const commitSha = await gitCommitPaths(VAULT_PATH, [srcRel], `${who}: delete ${srcRel}`);
       qmdReindex(srcRel).catch(() => {});
+      deleteProvenance(srcRel);
     // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
       return commitSha;
     });
@@ -1214,6 +1255,10 @@ export async function handleDeleteNote(
       `${who}: archive ${srcRel}`,
     );
     qmdReindex(srcRel).catch(() => {});
+    // Archive path has new content (added archived_from/archived_at to frontmatter),
+    // so we record a fresh source_hash rather than renaming the old provenance.
+    deleteProvenance(srcRel);
+    recordWrite(archiveRel, contentHash(serialized), commitSha, options.keyName ?? "api");
     // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
     return commitSha;
   });
@@ -1229,6 +1274,11 @@ export interface MoveNoteResult {
   to: string;
   links_updated: number;
   commit: string;
+  /**
+   * Hash of caller-written content (stable across discovery mutations).
+   * Use as `if_hash` in subsequent updates.
+   */
+  source_hash: string;
   content_hash: string;
   url: string;
 }
@@ -1282,14 +1332,8 @@ export async function handleMoveNote(
     }
   }
 
-  // Optimistic concurrency check (against source)
-  if (options.ifHash) {
-    const currentRaw = readNoteFile(srcAbs);
-    const currentHash = contentHash(currentRaw);
-    if (currentHash !== options.ifHash) {
-      throw Object.assign(new Error("Conflict: note was modified"), { code: "CONFLICT", currentHash });
-    }
-  }
+  // Optimistic concurrency check (prefers provenance, falls back to disk).
+  if (options.ifHash) assertIfHashMatches(srcRel, srcAbs, options.ifHash);
 
   // Read aliases for wikilink rewriting
   let aliases: string[] = [];
@@ -1325,11 +1369,23 @@ export async function handleMoveNote(
     qmdReindex(dstRel).catch(() => {});
     // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
 
+    // The moved file's own content is unchanged by the move (only its path),
+    // so rename its provenance to preserve the caller's source_hash. Other
+    // files whose wikilinks were rewritten are treated like discovery
+    // mutations — no provenance update, source_hash stays pinned to caller
+    // intent for those files.
+    renameProvenance(srcRel, dstRel);
+
     const finalRaw = readNoteFile(dstAbs);
+    const diskHash = contentHash(finalRaw);
     return {
       commit: commitSha,
       links_updated: modified.length,
-      content_hash: contentHash(finalRaw),
+      // Prefer the preserved source_hash from provenance (survived the
+      // rename); fall back to disk hash for files that had no provenance
+      // (pre-migration, or never written through the API).
+      source_hash: getSourceHash(dstRel) ?? diskHash,
+      content_hash: diskHash,
     };
   });
 
@@ -1352,6 +1408,7 @@ export async function handleMoveNote(
     to: dstRel,
     links_updated: result.links_updated,
     commit: result.commit,
+    source_hash: result.source_hash,
     content_hash: result.content_hash,
     url: noteUrl(dstRel, options.handle ?? getVaultOwnerHandle()),
   };
