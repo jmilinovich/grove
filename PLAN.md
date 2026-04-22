@@ -555,7 +555,7 @@ Backfill: insert one row per existing user with their old `users.role` for the `
 - Inviting a new user creates account + membership + key atomically
 - Email deep-link into Claude.ai is a real working URL (tested against Claude.ai's connector-add flow)
 
-#### P8-B3: grove-www route restructure (`src/app/...`)
+#### P8-B3: grove-www route restructure (`src/app/...`) ⏳ DEFERRED — the supporting components (vault-switcher P8-B4, connected-vaults-list P8-B5) landed; the route move under `/@<handle>/<vault-slug>/*` needs a dedicated grove-www session
 
 Move every authenticated grove-www route under `/@<handle>/<vault-slug>/`:
 
@@ -593,7 +593,7 @@ Header dropdown in `grove-www/src/components/header.tsx`:
 - Scroll position preserved across switch
 - Screen readers announce the new vault context
 
-#### P8-B5: Connected-vaults settings page (`grove-www/src/app/...`)
+#### P8-B5: Connected-vaults settings page (`grove-www/src/app/...`) ✅ COMPLETE 2026-04-22 (fbc9210)
 
 `/@<handle>/<vault>/settings/vaults`:
 
