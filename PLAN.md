@@ -14,7 +14,7 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Depends on:** `@tobilu/qmd` (search engine), `@modelcontextprotocol/sdk` (MCP transport)
 **Deploys to:** AWS t3.medium at `api.grove.md` (52.37.76.231), frontend on Vercel at `grove.md`
 **Live:** Phases 0-5 complete, security hardened, observable, magic link auth, persistent sessions, S3 backups, cross-domain auth with grove.md
-**Next:** Agent infrastructure (CI/CD, proxy extraction, graceful shutdown) → Ops dashboard (Phase 4b) → Multi-user (Phase 9a) → Discovery (Phase 7) → Knowledge views (P4-10+)
+**Next:** Phase 20 (dashboard IA: Home + Access, supersedes Phase 4b visuals + Phase 4d) → Multi-user (Phase 9a) → Discovery (Phase 7)
 
 ---
 
@@ -257,17 +257,16 @@ tail -f .agents/p4b-1_*.log
          ▼                   ▼                   ▼
   ┌────────────┐     ┌────────────┐      ┌────────────┐
   │  CLI-A     │     │ Phase 4b   │      │ Phase 7a   │
-  │  Foundation│     │ Batch 1    │      │ Discovery  │
-  │  --json,   │     │ (4 backend │      │ P7-1..P7-6 │
-  │  exit codes│     │  agents)   │      │            │
+  │  Foundation│     │ Backend    │      │ Discovery  │
+  │  --json,   │     │ APIs only  │      │ P7-1..P7-6 │
+  │  exit codes│     │ (4 agents) │      │            │
   └──────┬─────┘     └─────┬──────┘      └──────┬─────┘
          │                 │                     │
-         │          ┌──────▼──────┐       ┌──────▼─────┐
-         │          │ Phase 4b    │       │ Phase 7b   │
-         │          │ Batch 2+3   │       │ Bulk       │
-         │          │ (FE agents) │       │ onboarding │
-         │          └──────┬──────┘       └────────────┘
-         │                 │
+         │                 │              ┌──────▼─────┐
+         │                 │              │ Phase 7b   │
+         │                 │              │ Bulk       │
+         │                 │              │ onboarding │
+         │                 │              └────────────┘
          ▼                 │
   ┌────────────┐           │
   │  CLI-B     │◄──────────┘ (needs P4-API-1 for trail HTTP)
@@ -276,17 +275,29 @@ tail -f .agents/p4b-1_*.log
   │  trails HTTP│
   └──────┬─────┘
          │
-         ▼
-  ┌────────────┐     ┌────────────┐
-  │ Phase 9a   │     │ Phase 4d   │
-  │ User mgmt  │     │ Knowledge  │
-  │ + CLI-D    │     │ views      │
-  │ users cmd  │     └────────────┘
+         │  ┌─────────────┐
+         │  │  Phase 8    │ (multi-vault: shipped; P8-B6 open)
+         │  └──────┬──────┘
+         │         │
+         │         ▼
+         │  ┌─────────────┐
+         │  │  Phase 20   │ (dashboard IA: Home + Access)
+         │  │  supersedes │
+         │  │  Phase 4b FE│
+         │  │  + Phase 4d │
+         │  └──────┬──────┘
+         │         │
+         ▼         ▼
+  ┌────────────┐
+  │ Phase 9a   │
+  │ User mgmt  │
+  │ + CLI-D    │
+  │ users cmd  │
   └──────┬─────┘
          │
   ┌──────▼─────┐
   │ Phase 9b   │
-  │ Trail UX   │
+  │ Trail UX   │  (extends Phase 20's Access/Trails tab)
   │ + CLI-D    │
   │ share cmd  │
   └────────────┘
@@ -295,10 +306,13 @@ tail -f .agents/p4b-1_*.log
 **Key dependency rules:**
 - P4-PREREQ must complete before any other phase launches
 - CLI-A can start immediately after P4-PREREQ — no server feature dependencies
-- Phase 4b Batch 1 can run in parallel with CLI-A
+- Phase 4b backend APIs run parallel with CLI-A; Phase 4b frontend is superseded by Phase 20
 - CLI-B needs CLI-A merged + P4-API-1 (trail HTTP endpoints) merged
 - Phase 9a can start after CLI-B (needs `--json` for agent use + trail HTTP)
 - Phase 7 has no dependency on CLI work — can run in parallel
+- **Phase 20 requires P8-B6 merged** (PR #29, grove-www) for `userScopedPath()` helper
+- Phase 9b extends Phase 20's Access/Trails tab — needs Phase 20A shipped
+- ~~Phase 4d (graph explorer, lifecycle dashboard)~~ removed — Graph deleted; Lifecycle folds into Phase 20B Home
 - CLI-D commands land alongside their server phases (users with 9a, share with 9b, discovery with 7a)
 
 ---
@@ -715,6 +729,298 @@ Re-evaluate single-process-with-`vault_id`-keyed-Map refactor when any of:
 
 ---
 
+### Phase 20: Dashboard IA — collapse to Home + Access
+
+**Goal:** Retire the 8-tab dashboard in favor of 2 rail items (Home, Access) + an avatar menu. Fix the overlap between Keys / Trails / Shares / Users (they're all principals — cluster them). Delete the Graph page (demo-grade, unused, ~415 LOC). Reach Profile from any dashboard page via the avatar menu.
+
+**Prerequisites:** P8-B6 (grove-www PR #29) merged. It hoists `/profile` to `/@<h>/profile` and adds `userScopedPath()` + `userLink()` helpers in `src/hooks/use-scoped-link.ts` + `src/lib/vault-context.ts`, which the avatar menu depends on.
+
+**Status:** Spec'd 2026-04-23 via `/mili:spec` with 3-panel expert review (SPEC.md, commit `ccb6f61`). Phased: Phase A (Access consolidation + Graph delete, 1 batch) ships first. Phase B (Home rebuild) is a stub below — **do not expand until Phase A's feedback shows Usage/Health/Lifecycle fragmentation is still felt.**
+
+**Supersedes:** Phase 4b (frontend dashboard work) and Phase 4d (graph explorer P4-10, lifecycle dashboard P4-11). Phase 4b backend APIs stay valid; visual work is replaced by Phase 20.
+
+**Scope boundary:**
+- IN (Phase A): `access/` route with 4 tabs (keys/trails/shares/members), 6 legacy 308 redirects, DashboardNav rewrite to 2 items, avatar menu, delete graph + lifecycle folders, drop `d3` dependency, remove `/v1/status/graph` proxy dispatch AND delete `handleStatusGraph` function body in the same PR.
+- OUT: viewer/role gating for Access tabs (owner-only today via `dashboard/layout.tsx:22`), `/@<h>/<v>/settings` redesign, backend `analyzeGraph()` removal (still used by stats/server), first-time onboarding copy, gravatar lookups.
+
+#### Locked design decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | **Rail shape:** 2 items — Home, Access | Solo-owner dashboard. Every principal lives under Access. |
+| 2 | **Principals cluster under Access** with 4 tabs | Keys/Trails/Shares/Members are all "things that can access my vault." Tabs make this explicit. |
+| 3 | **Trails UI label = "Scoped Keys"**; API/DB term stays `trails` | Panel review: tooltip doesn't save discoverability; grouping under Access plus a clearer label does. API stability preserved. |
+| 4 | **Redirects use `next.config.ts` `redirects()`**, not `middleware.ts` | Static, edge-cached, preserves query strings natively. P8-B6's `middleware.ts` handles dynamic path rewriting (user-vault resolution) — ours is pure static mapping. Keep them separate. |
+| 5 | **Profile in avatar menu top-right**, not left rail | Lands on canonical `/@<h>/profile` from P8-B6. Frees rail space. |
+| 6 | **Delete Graph page AND `handleStatusGraph` function in Phase A** (no 30-day window) | Code grep verified exactly 2 consumers (both ours). Admin-only route by construction — no external callers possible. Ritual wait costs momentum for zero safety. |
+| 7 | **`analyzeGraph()` in `src/vault-graph.ts` stays** | Still called by `src/vault-stats.ts` and `src/server.ts`. Only the HTTP dispatch + `handleStatusGraph` wrapper are retired. |
+| 8 | **A11y: `aria-current="page"` + Esc-closes-menu only** | Solo-owner product; roving tabindex / focus traps / portals deferred unless real users report pain. |
+| 9 | **No first-time hint component on Access tabs** | Owner already knows what the tabs mean. Adding localStorage-backed dismissal for one user is over-engineering. |
+| 10 | **Phase B stays a stub** until Phase A feedback exists | Rebuilding Home is a product bet the owner did not ask for. Ship A; measure; re-spec B only if fragmentation pain persists. |
+
+#### Phase 20A — Access consolidation (one batch, cross-repo)
+
+Solves all four stated pains: Graph gone, principals clustered, Profile reachable, Usage/Health still at current URLs (no functional regression). Two-way door for grove-www; grove's proxy change is reversible via git revert.
+
+#### P20-A1: Access route layout + move 4 principal pages (grove-www)
+
+Create the new `access/` sub-route that houses all 4 principal tabs. Move existing page **content** (not files) so the moved pages re-use existing table components unchanged. Delete the old dashboard-level folders after moving content to avoid route collision with P20-A2 redirects (Next.js file routes win over `redirects()`).
+
+**Behavior:**
+1. `dashboard/access/layout.tsx` (server component) renders a `<AccessTabs>` strip above `{children}`
+2. `dashboard/access/page.tsx` calls `permanentRedirect(scopedPath('/dashboard/access/keys'))`. The **absolute scoped path** is required — relative `./keys` resolves against the page's URL, which is `/dashboard/access`, giving `/dashboard/keys` (wrong folder). Use the existing `scopedPath()` helper from P8-B6's `src/lib/vault-context.ts`.
+3. Move page-component logic (not the folder files) from `dashboard/{keys,trails,shares,users}/page.tsx` → `dashboard/access/{keys,trails,shares,members}/page.tsx`. Same data-fetching, same component imports (`KeyTable`, `TrailList`, `SharesTable`, renamed `MemberTable`).
+4. `users` → `members`: rename folder and rename `src/components/user-table.tsx` → `src/components/member-table.tsx`. Update the exported component name to `MemberTable`. Grep confirms only the single page imports it.
+5. Members page reads `useSearchParams().get("member")`; if present, renders the `<MemberDrawer>` with that member's details. Clicking a row calls `router.replace(?member=<id>)`. The drawer fetches from the **existing** `/v1/admin/users` endpoint — no new API. Esc closes by clearing the param.
+6. **Delete** `dashboard/keys/`, `dashboard/trails/`, `dashboard/shares/`, `dashboard/users/` folders after the move.
+
+**UI labels:**
+- Tab strip: `Keys` · `Scoped Keys` · `Shares` · `Members` (trust-radius order: narrowest → widest)
+- `aria-current="page"` on the active tab; active means `usePathname().startsWith('/dashboard/access/<tab>')` (so `.../access/keys/new` still highlights Keys)
+
+**Component boundaries:**
+- `access-tabs.tsx`: client component (uses `usePathname`)
+- `member-drawer.tsx`: client component (uses `useSearchParams` + `useRouter`)
+- All `access/*/page.tsx`: server components, matching existing patterns
+
+**Files:**
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/layout.tsx` (new, server)
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/page.tsx` (new, redirects to `/dashboard/access/keys`)
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/keys/page.tsx` (content moved from `dashboard/keys/page.tsx`)
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/trails/page.tsx`
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/shares/page.tsx`
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/members/page.tsx` (+ member drawer)
+- `src/components/access-tabs.tsx` (new, client)
+- `src/components/member-drawer.tsx` (new, client)
+- `src/components/member-table.tsx` (renamed from `user-table.tsx`; export `MemberTable`)
+- **Delete:** `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/{keys,trails,shares,users}/` (entire folders, after move)
+
+**Tests:** `test/access-tabs.spec.ts` (new):
+- Tab strip renders 4 tabs in trust-radius order (Keys, Scoped Keys, Shares, Members)
+- `aria-current="page"` present on active tab only, based on `usePathname()` prefix match
+- Active tab switches when path changes (mock `usePathname` per case)
+- Members page with `?member=abc` renders the drawer; clearing the param closes it (mock `useSearchParams` + `useRouter.replace`)
+
+**Acceptance:**
+- `/dashboard/access/keys` renders the moved KeyTable with same behavior as the old `/dashboard/keys`
+- `/dashboard/access/trails` / `/shares` / `/members` likewise unchanged in behavior
+- `/dashboard/access` 308-redirects to `/dashboard/access/keys` via `permanentRedirect`
+- Tab labels in order: Keys, Scoped Keys, Shares, Members
+- `aria-current="page"` correctly reflects the current sub-tab
+- `?member=<id>` opens a drawer; Esc or explicit close clears the param
+- Old `dashboard/{keys,trails,shares,users}/` folders deleted — no route collision with P20-A2 redirects
+- `npm test` green; `npx tsc --noEmit` clean
+
+#### P20-A2: Legacy redirects + tests (grove-www)
+
+Add `redirects()` to `next.config.ts` for 6 legacy dashboard paths. `redirects()` is static (compiled into the Next config, served at the edge), preserves query strings by default, and runs before App Router.
+
+**Redirect table (all `permanent: true`, which Next emits as 308):**
+
+```ts
+{
+  source: '/@:atHandle/:vaultSlug/dashboard/keys',
+  destination: '/@:atHandle/:vaultSlug/dashboard/access/keys',
+  permanent: true,
+},
+// same pattern for: trails, shares
+{
+  source: '/@:atHandle/:vaultSlug/dashboard/users',
+  destination: '/@:atHandle/:vaultSlug/dashboard/access/members',
+  permanent: true,
+},
+{
+  source: '/@:atHandle/:vaultSlug/dashboard/graph',
+  destination: '/@:atHandle/:vaultSlug/dashboard',
+  permanent: true,
+},
+{
+  source: '/@:atHandle/:vaultSlug/dashboard/lifecycle',
+  destination: '/@:atHandle/:vaultSlug/dashboard',
+  permanent: true,
+},
+```
+
+**Files:**
+- `next.config.ts` — add `async redirects()` returning the 6 entries above
+- `test/legacy-redirects.spec.ts` — extend (do NOT create new file)
+
+**Tests:** extend `test/legacy-redirects.spec.ts`:
+- Import `nextConfig` directly from `../next.config.ts` and call `await nextConfig.redirects()` — static assertion, no HTTP spin-up needed
+- For each of the 6 new entries: assert `source` parameter placeholders, `destination`, `permanent: true`
+- Assert no `source` value also appears as a `destination` value elsewhere in the table (no 308→308 chains)
+- Assert existing P8-B3 redirects (the 22 tests already in this file) continue to pass
+
+Query-string preservation is built into `redirects()` — no test needed (testing the framework). Fragment preservation is browser-side only — also no test needed.
+
+**Acceptance:**
+- All 6 new entries present in the redirects table with `permanent: true`
+- No redirect source appears as another redirect's destination
+- Existing P8-B3 redirect tests still pass
+- `npm test` green
+- Live smoke: `curl -I https://grove.md/@jm/personal/dashboard/keys` returns 308 with `Location: /@jm/personal/dashboard/access/keys`
+
+#### P20-A3: DashboardNav rewrite to 2 items (grove-www)
+
+Replace the 8-tab DashboardNav with 2 rail items (Home, Access).
+
+**Behavior:**
+1. Rail renders exactly 2 `<Link>` items: **Home** → `scopedPath('/dashboard')`, **Access** → `scopedPath('/dashboard/access')`
+2. Active state: Home active on exact `pathname === '/@<h>/<v>/dashboard'`; Access active on `pathname.startsWith('/@<h>/<v>/dashboard/access')`
+3. Use the existing `useScopedLink()` hook from P8-B6's `src/hooks/use-scoped-link.ts`
+4. `aria-current="page"` on the active rail link
+5. No other changes — layout wrapper, auth gate, etc. remain exactly as today
+
+**Files:**
+- `src/components/dashboard-nav.tsx` — rewrite
+- `test/dashboard-nav.spec.ts` (new)
+
+**Tests:**
+- Renders exactly 2 rail links with labels "Home" and "Access"
+- Active-state behavior: mock `usePathname` with each of `/dashboard`, `/dashboard/access`, `/dashboard/access/keys` — assert correct `aria-current` per case
+- Neither link is active for paths outside `/dashboard/*`
+
+**Acceptance:**
+- Rail shows exactly 2 items (Home, Access) — no Overview/Keys/Trails/Shares/Users/Usage/Graph/Health/Lifecycle peers
+- Access stays visually active on all 4 sub-tabs
+- Owner-only redirect in `dashboard/layout.tsx` unchanged
+
+#### P20-A4: Avatar menu in header (grove-www, depends on PR #29)
+
+Add an avatar dropdown to the top bar with links to Profile and Account settings.
+
+**Behavior:**
+1. Avatar button (circle with user's initials, no gravatar) top-right of `<Header>`, to the right of the existing vault switcher
+2. On click, dropdown menu renders:
+   - "Signed in as `<email>`" (non-interactive header)
+   - Divider
+   - `Profile` → `userScopedPath('/profile')` (from P8-B6's `src/lib/vault-context.ts`)
+   - `Account settings` → `userScopedPath('/settings/vaults')`
+   - Divider
+   - `Sign out` — reuses the existing sign-out handler (grep `signOut` in grove-www/src/)
+3. Menu closes on: outside-click, Esc, link-click
+4. No portal needed — render inline. No focus trap needed.
+
+**A11y:**
+- Button: `aria-haspopup="menu"`, `aria-expanded` reflects state, `aria-label="Account menu"`
+- Menu: `role="menu"`, items `role="menuitem"`
+- Esc returns focus to the button
+
+**Fallback:**
+- If unauthenticated (no session cookie): avatar button does not render (parent `<Header>` already handles the auth check)
+- If `email` is missing from `/v1/me` response: show initials from handle instead; still show the menu
+
+**Files:**
+- `src/components/avatar-menu.tsx` (new, client component)
+- `src/components/header.tsx` — integrate `<AvatarMenu>` to the right of the vault switcher
+- `test/avatar-menu.spec.ts` (new)
+
+**Tests:**
+- Menu closed by default; click opens; outside-click closes
+- Esc closes and returns focus to button
+- Profile link href matches `userScopedPath('/profile')` → `/@<handle>/profile` (user-scoped, no vault segment)
+- Account settings href → `/@<handle>/settings/vaults`
+- Unauthenticated state: avatar menu does not render
+
+**Acceptance:**
+- Avatar menu is visible on every dashboard page
+- Profile link lands on `/@<h>/profile` (canonical from P8-B6)
+- Keyboard navigation works: Tab reaches button, Enter opens, Esc closes
+- Zero clicks beyond the one dropdown to reach Profile from any dashboard page
+
+#### P20-A5: Delete Graph + Lifecycle (grove-www) + remove `handleStatusGraph` (grove)
+
+Final cleanup of Phase A.
+
+**Deletions (grove-www):**
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/graph/` (entire folder; ~415 LOC)
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/lifecycle/` (entire folder)
+- `package.json`: remove `d3` and `@types/d3` from dependencies. Verify via `grep -rn "from \"d3\"\|from 'd3'" src/` — expect zero matches after deletion. `mermaid` is separate and stays.
+- Regenerate `package-lock.json` via `npm install`
+
+**Deletions (grove):**
+- `src/proxy.ts`: remove the `handleStatusGraph` import and the dispatch block that calls it. Use grep tokens (`handleStatusGraph`) not line numbers to locate — the file drifts.
+- `src/proxy.ts`: also delete the `handleStatusGraph()` function body and any helpers called only by it. Panel review: admin-only route with 2 verified consumers (both ours), no external callers possible → same-PR deletion is safe.
+- **DO NOT TOUCH** `src/vault-graph.ts`. `analyzeGraph()` is still called by `src/vault-stats.ts` and `src/server.ts`.
+
+**Files:**
+- grove-www: delete `dashboard/graph/`, `dashboard/lifecycle/`, edit `package.json`, regenerate `package-lock.json`
+- grove: `src/proxy.ts`
+
+**Tests:**
+- grove: existing `src/vault-graph.ts` tests continue passing (function stays)
+- grove: if `test/proxy.test.ts` exists and has a graph-endpoint case, remove that case; otherwise no new test required
+- grove-www: no new tests (P20-A2's redirect tests cover the deleted routes)
+
+**Acceptance:**
+- `GET /@<h>/<v>/dashboard/graph` 308 → `/dashboard` (via P20-A2)
+- `GET /@<h>/<v>/dashboard/lifecycle` 308 → `/dashboard`
+- `curl https://api.grove.md/v/personal/v1/status/graph` returns 404 post-deploy
+- `d3` absent from `grove-www/package.json`
+- `grep -rn "from \"d3\"\|from 'd3'" grove-www/src/` returns zero matches
+- `grep -rn "handleStatusGraph" grove/src/` returns zero matches
+- `grep -rn "analyzeGraph" grove/src/` still shows `vault-stats.ts` and `server.ts` consumers
+- Bundle size drop measured post-deploy (report, no hard threshold)
+
+#### Phase 20A execution strategy
+
+**One batch `p20a-1`, two parallel entries (cross-repo via `ship.ts`):**
+
+| Entry | Repo | Branch | Scope |
+|-------|------|--------|-------|
+| `p20a-grove-www` | grove-www (via PR sync) | `agent/p20a-grove-www` | P20-A1 (access route + drawer), P20-A2 (redirects), P20-A3 (nav), P20-A4 (avatar menu), P20-A5 grove-www portion (delete graph/lifecycle/d3) |
+| `p20a-grove` | grove | `agent/p20a-grove` | P20-A5 grove portion (remove `handleStatusGraph` import + dispatch + function body) |
+
+The two entries are independent: grove's proxy change can land before the grove-www UI ships (endpoint 404s but no live consumer since graph page is being deleted). `ship.ts` handles grove-www via `groveWwwSyncBefore/After` + `groveWwwMergeViaPr` (see `p8b-3-routes` for precedent).
+
+Both entries share the `requires: ["p8-b6"]` gate — must not launch until PR #29 is merged so the avatar menu can import `userScopedPath()` from `src/lib/vault-context.ts`.
+
+**Pre-merge checklist** (mirrors P8-B6):
+1. Grep OAuth redirect allowlists (grove-www infra configs) for `/dashboard/{users,keys,shares,trails,graph,lifecycle}` — expect zero
+2. Grep email templates (P8-B2 invite flow) for same legacy paths — expect zero
+3. Confirm PR #29 is merged and `/@<h>/profile` returns 200
+4. Smoke test: each of 6 legacy URLs 308s to new canonical; Graph 404s; Avatar menu opens and Profile link resolves to `/@<h>/profile`
+
+#### Phase 20A success criteria
+
+- Left rail shows exactly 2 items (Home, Access)
+- All 6 legacy dashboard URLs 308 redirect with ≤1 hop and query preservation
+- Graph page returns 404 (re-adding requires new code)
+- `d3` dependency removed from grove-www bundle
+- `handleStatusGraph` removed from grove source; `analyzeGraph()` unchanged
+- Profile reachable in ≤1 click from any dashboard page via avatar menu
+- `test/legacy-redirects.spec.ts` + `test/access-tabs.spec.ts` + `test/dashboard-nav.spec.ts` + `test/avatar-menu.spec.ts` green
+- `npm run check:plan` passes
+- Existing table behaviors (Keys, Trails, Shares, Members) regression-free
+
+**Gate decision after Phase 20A ships:** use the dashboard daily for ≥1 week. If the original pain is resolved, **stop**. Phase 20B is not required.
+
+#### Phase 20B — Home rebuild (stub)
+
+**Do not expand this spec until Phase A has shipped and been in use ≥1 week.**
+
+If after Phase A the dashboard still feels fragmented across Usage / Health / Lifecycle (separate URLs each, not a pulse-first view), re-spec Phase 20B at that point with fresh telemetry. Expected scope when/if re-spec'd:
+
+- Home page composes 5 cards: Health · Usage · Activity · Vault · Lifecycle (top-to-bottom order)
+- Each card suspends independently with its own p95 budget
+- Delete `dashboard/{usage,health}/` folders + add 2 more redirects to `next.config.ts`
+- Reuse `/metrics` + existing health/digest endpoints before adding any new admin API; only add `/v1/admin/activity` if the `/metrics` scrape proves ugly in practice
+- One shared `<CardError>` + `<CardEmpty>` — no per-card state matrix
+
+Revisit after Phase A feedback. Rewriting Overview without validated pain is a product bet.
+
+#### What's explicitly NOT in Phase 20
+
+- **Viewer/role gating for Access tabs** — current state is owner-only per `dashboard/layout.tsx`. When viewer roles land (post-Phase 9), re-spec per-tab visibility.
+- **`/@<h>/<v>/settings` empty-state redesign** — stays as P8-B6 shipped.
+- **Backend `analyzeGraph()` function removal** — still used by stats/server.
+- **New admin endpoints** — none in Phase A. `/v1/admin/activity` deferred behind Phase B gate.
+- **First-time onboarding hints** — solo-owner product, owner already knows the surface.
+- **Cross-vault activity feed** — scope is per-vault.
+- **Mobile redesign of Access tabs on narrow viewports** — table overflow scroll acceptable for now; revisit if pain surfaces.
+
+---
+
 ## Design Decisions Log
 
 Decisions made during planning. Reference these when implementing — don't re-litigate settled questions.
@@ -902,10 +1208,10 @@ Decisions made during planning. Reference these when implementing — don't re-l
 1. Agent A: --json + exit codes + structured errors (core refactor)
 2. Agent B: --content, init, graph/digest promotion, health/metrics, help (new features)
 
-**Phase 4b — Ops Dashboard (parallel with CLI-A):**
-1. Backend APIs: Agents A-D in parallel (trail CRUD, user list, keys/metrics fixes, git stats)
-2. Frontend: Agents F-H in parallel (key mgmt, trail mgmt, vault health + usage pages)
-3. Consumer: Agent I (trail onboarding page)
+**Phase 4b — Ops Dashboard (re-scoped 2026-04-23):**
+1. Backend APIs: Agents A-D in parallel (trail CRUD, user list, keys/metrics fixes, git stats) — still valid
+2. ~~Frontend: key mgmt, trail mgmt, vault health + usage pages~~ — **SUPERSEDED by Phase 20** (Access route + Home page)
+3. ~~Consumer: trail onboarding page~~ — **moved into Phase 9b's trail sharing UX**
 
 **CLI-B — Consistency (after CLI-A + P4-API-1 merged):**
 - Trails to HTTP, --paths, --if-hash, whoami (single agent, sequential)
@@ -921,18 +1227,18 @@ Decisions made during planning. Reference these when implementing — don't re-l
 
 **Phase 9a — User Management (after CLI-B):**
 1. Agents A-C in parallel (user roles, invite flow, user-scoped keys)
-2. Agents D-E in parallel (user mgmt UI, trail sharing UX) — needs Phase 4b dashboard layout
+2. Agents D-E in parallel (user mgmt UI, trail sharing UX) — lands inside Phase 20's Access/Members tab once Phase 20A ships
 - CLI-D: `grove users list|invite` lands with P9-2
 
-**Phase 9b — Trail Sharing UX (after Phase 9a + Phase 4b):**
-- Shareable trail links, trail-scoped grove.md, share-a-note
+**Phase 9b — Trail Sharing UX (after Phase 9a + Phase 20A):**
+- Shareable trail links, trail-scoped grove.md, share-a-note — extends Phase 20's Access/Trails tab
 - CLI-D: `grove share` lands with P9-7
 
 **CLI-C — Module Extraction (when cli.ts exceeds ~1200 LOC):**
 - Split into src/cli/ directory structure. Triggered by size, not schedule.
 
-**Phase 4d — Knowledge Views (after Phase 4b):**
-- P4-10 (graph explorer), P4-11 (lifecycle dashboard) — deferred, spec when dashboard proves useful
+**~~Phase 4d — Knowledge Views~~** — REMOVED FROM SCOPE 2026-04-23
+- P4-10 (graph explorer) and P4-11 (lifecycle dashboard) are **superseded by Phase 20** — graph page is deleted entirely; lifecycle digest folds into Home (Phase 20B, if pursued)
 
 **~~Phase 6~~** — LLM judge: REMOVED FROM SCOPE
 **~~Phase 9c~~** — Annotations: REMOVED FROM SCOPE
@@ -947,6 +1253,12 @@ Decisions made during planning. Reference these when implementing — don't re-l
   - p8b-1: vault_members + invite flow (2 agents parallel)
   - p8b-2: route restructure + switcher component (2 agents parallel)
   - p8b-3: connected-vaults settings page (solo)
+  - p8-b6: hoist profile + settings/vaults out of `[vaultSlug]` (PR #29 open; grove-www only)
+
+**Phase 20 — Dashboard IA** ⏳ (spec'd 2026-04-23, after P8-B6 merges):
+- Phase 20A (Access consolidation, 1 batch, cross-repo):
+  - p20a-1: 2 parallel entries — `p20a-grove-www` (access route + drawer + redirects + nav + avatar menu + delete graph/lifecycle/d3) ‖ `p20a-grove` (remove `handleStatusGraph`)
+- Phase 20B (Home rebuild): **stub only** — do not expand until Phase A feedback exists
 
 **Phase 10** ✅ — Vault-agnostic structure: config, auto-detect, notes-validate, stats, CLI (2026-04-20) + discovery/server/rest/cli decoupling (2026-04-21)
 **Phase 11** ✅ — Note lifecycle: DELETE (soft+hard), PATCH move with wikilink update, MCP write_note actions, CLI (2026-04-20)

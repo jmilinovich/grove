@@ -238,6 +238,101 @@ export const BATCHES: Batch[] = [
       },
     ],
   },
+
+  // ── Phase 20A: Dashboard IA — collapse to Home + Access ─────────────
+  //
+  // Spec: /Users/jm/src/grove/PLAN.md § Phase 20 (committed 2026-04-23).
+  // Pre-req: grove-www PR #29 (P8-B6 profile hoist) must be merged first —
+  // the avatar menu imports `userScopedPath()` + `userLink()` from
+  // grove-www/src/lib/vault-context.ts + src/hooks/use-scoped-link.ts which
+  // land in that PR.
+  //
+  // Cross-repo batch:
+  //   - `p20a-grove`      → grove/src/proxy.ts (remove handleStatusGraph)
+  //   - `p20a-grove-www`  → everything else, opens PR in grove-www
+  // The two entries are independent: grove's endpoint can 404 before the UI
+  // ships (the graph page is being deleted anyway). Follow p8b-3-routes
+  // precedent for grove-www PR flow — the design-lint pre-push + playwright
+  // gates are strict, so the agent must open a PR not push direct.
+  {
+    id: "p20a-1",
+    title: "feat(P20-A): dashboard IA — Home + Access, delete Graph",
+    requires: ["p8-b6"],
+    entries: [
+      {
+        branch: "p20a-grove",
+        prompt:
+          "Read PLAN.md task P20-A5 (grove portion only). " +
+          "In /Users/jm/src/grove/src/proxy.ts: remove the `handleStatusGraph` " +
+          "import, the dispatch block that calls `handleStatusGraph()`, AND " +
+          "the function body itself (plus any helpers called only by it). " +
+          "Locate by grep token `handleStatusGraph` — do NOT rely on line numbers. " +
+          "DO NOT TOUCH src/vault-graph.ts — `analyzeGraph()` is still called " +
+          "by src/vault-stats.ts and src/server.ts. " +
+          "Verify: `grep -rn 'handleStatusGraph' src/` returns zero matches; " +
+          "`grep -rn 'analyzeGraph' src/` still shows vault-stats.ts + server.ts. " +
+          "Run `npm test` and `npx tsc --noEmit`. Commit as feat(P20-A5).",
+      },
+      {
+        branch: "p20a-grove-www",
+        prompt:
+          "Read PLAN.md tasks P20-A1 through P20-A5 (grove-www portions). This batch " +
+          "works in /Users/jm/src/grove-www via PR (not direct push — design-lint + " +
+          "playwright hooks are strict). Pre-req: grove-www PR #29 (P8-B6) merged.\n" +
+          "\n" +
+          "P20-A1 (Access route + move principals):\n" +
+          "1. Create src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/layout.tsx " +
+          "   (server component) rendering <AccessTabs> above {children}.\n" +
+          "2. Create dashboard/access/page.tsx calling " +
+          "   `permanentRedirect(scopedPath('/dashboard/access/keys'))` using scopedPath() " +
+          "   from src/lib/vault-context.ts (DO NOT use relative './keys' — resolves wrong).\n" +
+          "3. Move page content (not files) from dashboard/{keys,trails,shares,users}/page.tsx " +
+          "   to dashboard/access/{keys,trails,shares,members}/page.tsx. Same data-fetching, " +
+          "   same component imports.\n" +
+          "4. Rename src/components/user-table.tsx → member-table.tsx; rename component " +
+          "   export UserTable → MemberTable. Grep confirms only one importer.\n" +
+          "5. Members page: read useSearchParams().get('member'); if present render " +
+          "   <MemberDrawer> fetching from existing /v1/admin/users (NO new API). " +
+          "   Clicks call router.replace(?member=<id>). Esc clears param.\n" +
+          "6. DELETE dashboard/{keys,trails,shares,users}/ folders after move (route " +
+          "   collision with the P20-A2 redirects otherwise — file routes win).\n" +
+          "\n" +
+          "Tab labels (trust-radius order): Keys · Scoped Keys · Shares · Members.\n" +
+          "aria-current='page' on active tab based on usePathname().startsWith('/dashboard/access/<tab>').\n" +
+          "access-tabs.tsx and member-drawer.tsx are client components.\n" +
+          "\n" +
+          "P20-A2 (next.config.ts redirects): add async redirects() returning 6 entries for " +
+          "/dashboard/{keys→access/keys, trails→access/trails, shares→access/shares, users→access/members, " +
+          "graph→dashboard, lifecycle→dashboard} — all permanent: true. Parameters " +
+          "'/@:atHandle/:vaultSlug/...'. Extend test/legacy-redirects.spec.ts: import " +
+          "nextConfig directly, call `await nextConfig.redirects()`, assert each new entry. " +
+          "Assert no redirect source equals another redirect's destination (no chains). " +
+          "Don't test query preservation (framework does it); don't test fragments " +
+          "(browser-side only).\n" +
+          "\n" +
+          "P20-A3 (DashboardNav rewrite): src/components/dashboard-nav.tsx — exactly 2 rail " +
+          "links: Home (scopedPath('/dashboard')) and Access (scopedPath('/dashboard/access')). " +
+          "Home active on exact pathname match; Access active on pathname.startsWith('/dashboard/access'). " +
+          "aria-current='page' on active. Use useScopedLink() from src/hooks/use-scoped-link.ts. " +
+          "Add test/dashboard-nav.spec.ts mocking usePathname per case.\n" +
+          "\n" +
+          "P20-A4 (Avatar menu): new src/components/avatar-menu.tsx (client) showing initials " +
+          "button (no gravatar). Dropdown: 'Signed in as <email>' | Profile (userScopedPath('/profile')) " +
+          "| Account settings (userScopedPath('/settings/vaults')) | Sign out (reuse existing handler; " +
+          "grep signOut). Closes on outside-click, Esc, link-click. No portal; no focus trap. " +
+          "aria-haspopup='menu', aria-expanded, aria-label='Account menu'; menu role='menu'. " +
+          "Fallback: if email missing from /v1/me, use handle initials. Wire into header.tsx " +
+          "right of vault switcher. Add test/avatar-menu.spec.ts.\n" +
+          "\n" +
+          "P20-A5 (grove-www deletions): delete dashboard/graph/ and dashboard/lifecycle/ folders " +
+          "entirely. Edit package.json to remove d3 + @types/d3 (keep mermaid). Regenerate " +
+          "package-lock.json via npm install. Verify `grep -rn \"from ['\\\"]d3['\\\"]\" src/` returns zero.\n" +
+          "\n" +
+          "Open a PR on grove-www. Run `npm run test` + `npx tsc --noEmit` + `npm run test:mobile` " +
+          "locally before opening. Commit as feat(P20-A).",
+      },
+    ],
+  },
 ];
 
 export function findBatch(id: string): Batch | undefined {
