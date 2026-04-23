@@ -32,6 +32,31 @@ the token — it can't be recovered. PM2 reloads with the regenerated
 `ecosystem.config.cjs`; the health check polls for 60s before
 returning.
 
+## Multi-vault git sync cron
+
+Every five minutes, `scripts/sync-all-vaults.sh` pulls every
+`vaults.git_repo_path` from the DB and forwards changed notes to the
+matching vault's `grove-server-<slug>` on its own port. Replaces the
+older single-vault entry that was hardcoded to `/root/life` + port
+8190.
+
+```cron
+*/5 * * * * /root/grove/scripts/sync-all-vaults.sh >> /var/log/grove-discovery.log 2>&1
+```
+
+After `grove vault create`, confirm the next tick picks up the new
+vault:
+
+```bash
+sudo tail -f /var/log/grove-discovery.log
+# expect `[sync-all-vaults] <slug> (<path>, port=<port>)`
+```
+
+If you're migrating from the legacy entry, edit `sudo crontab -e`
+(root's crontab) and replace the old line with the one above — the
+script auto-discovers new vaults from the DB, so no further crontab
+edits are needed when you provision more.
+
 ## Multi-vault smoke test (P8-A7)
 
 `test/smoke/08-multi-vault.smoke.sh` provisions a throwaway probe

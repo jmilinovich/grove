@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # Called after vault git sync (cron pull) to enqueue changed notes for discovery.
-# Usage: post-sync-discover.sh <vault-path> [since-ref]
+# Usage: post-sync-discover.sh <vault-path> [since-ref] [server-port]
 #
-# Finds .md files changed since last sync and POSTs each to the discovery trigger.
+# Finds .md files changed since last sync and POSTs each to the discovery
+# trigger of the per-vault grove-server. The server_port argument lets
+# multi-vault deployments target the right backend — each vault's
+# grove-server-<slug> listens on its own port, so a single hardcoded 8190
+# would miss every non-personal vault.
 
 set -euo pipefail
 
-VAULT="${1:?Usage: post-sync-discover.sh <vault-path> [since-ref]}"
+VAULT="${1:?Usage: post-sync-discover.sh <vault-path> [since-ref] [server-port]}"
 SINCE="${2:-HEAD~1}"
-SERVER="http://127.0.0.1:8190"
+PORT="${3:-8190}"
+SERVER="http://127.0.0.1:${PORT}"
 
 cd "$VAULT"
 
@@ -26,4 +31,4 @@ while IFS= read -r path; do
   count=$((count + 1))
 done <<< "$changed"
 
-echo "[post-sync] enqueued $count note(s) for discovery"
+echo "[post-sync] enqueued $count note(s) for discovery (port=${PORT})"
