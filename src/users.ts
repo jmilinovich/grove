@@ -254,19 +254,26 @@ export function deleteUser(userId: string): boolean {
   if (!user) return false;
   if (user.role === "owner") throw new Error("Cannot delete the owner user");
 
-  // Delete trail grants linked to this user's keys
-  db.prepare(
-    "DELETE FROM trail_grants WHERE grantee_type = 'token' AND grantee_id IN (SELECT id FROM api_keys WHERE user_id = ?)"
-  ).run(userId);
-
-  // Delete all API keys
-  db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(userId);
-
-  // Delete all sessions
-  db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
-
-  // Delete the user
-  db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+  // Must wrap in a transaction so partial state doesn't survive a FK
+  // failure — before P8, vault_members didn't exist and each DELETE
+  // could stand alone; now any missing cleanup on the vault_members
+  // side throws on `DELETE FROM users` with `FOREIGN KEY constraint
+  // failed`, leaving the user with no keys/sessions but still visible
+  // in the users table. Observed in prod after P8-B1 landed.
+  const tx = db.transaction((id: string) => {
+    // Trail grants tied to this user's keys
+    db.prepare(
+      "DELETE FROM trail_grants WHERE grantee_type = 'token' AND grantee_id IN (SELECT id FROM api_keys WHERE user_id = ?)",
+    ).run(id);
+    // Vault memberships — FK(vault_members.user_id → users.id) has no
+    // ON DELETE CASCADE, so we clean explicitly. This also revokes
+    // vault access as part of the same txn.
+    db.prepare("DELETE FROM vault_members WHERE user_id = ?").run(id);
+    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(id);
+    db.prepare("DELETE FROM sessions WHERE user_id = ?").run(id);
+    db.prepare("DELETE FROM users WHERE id = ?").run(id);
+  });
+  tx(userId);
 
   return true;
 }
