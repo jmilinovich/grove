@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { defaultVaultContext } from "../src/rest.js";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -37,7 +38,7 @@ describe("handleResidentProfile (P16-1)", () => {
     db.prepare("UPDATE users SET display_name = ? WHERE id = ?").run("John M", u.id);
     updateUserBio(u.id, "Builds calm systems.");
 
-    const profile = handleResidentProfile("jm");
+    const profile = handleResidentProfile(defaultVaultContext(), "jm");
     expect(profile).not.toBeNull();
     expect(profile!.handle).toBe("jm");
     expect(profile!.display_name).toBe("John M");
@@ -54,15 +55,15 @@ describe("handleResidentProfile (P16-1)", () => {
   });
 
   it("returns null for a non-existent handle", () => {
-    expect(handleResidentProfile("nobody")).toBeNull();
-    expect(handleResidentProfile("")).toBeNull();
+    expect(handleResidentProfile(defaultVaultContext(), "nobody")).toBeNull();
+    expect(handleResidentProfile(defaultVaultContext(), "")).toBeNull();
   });
 
   it("resolves the new handle after a handle change (old handle 404s)", () => {
     const u = createUser("oldname@example.com", "oldname");
     changeUserHandle(u.id, "newname");
 
-    expect(handleResidentProfile("newname")).not.toBeNull();
-    expect(handleResidentProfile("oldname")).toBeNull();
+    expect(handleResidentProfile(defaultVaultContext(), "newname")).not.toBeNull();
+    expect(handleResidentProfile(defaultVaultContext(), "oldname")).toBeNull();
   });
 });

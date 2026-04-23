@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { defaultVaultContext } from "../src/rest.js";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -75,7 +76,7 @@ describe("handleDeleteNote — soft delete (archive)", () => {
     const { handleDeleteNote } = await loadRest();
     seedNote("Inbox/old-idea.md", "---\ntype: concept\ntags:\n  - test\n---\nSome body");
 
-    const result = await handleDeleteNote("Inbox/old-idea.md", { keyName: "test-key" });
+    const result = await handleDeleteNote(defaultVaultContext(), "Inbox/old-idea.md", { keyName: "test-key" });
 
     expect(result.action).toBe("archived");
     expect(result.original_path).toBe("Inbox/old-idea.md");
@@ -94,7 +95,7 @@ describe("handleDeleteNote — soft delete (archive)", () => {
   it("returns 404 when note doesn't exist", async () => {
     const { handleDeleteNote } = await loadRest();
     try {
-      await handleDeleteNote("Inbox/missing.md", {});
+      await handleDeleteNote(defaultVaultContext(), "Inbox/missing.md", {});
       expect.unreachable("should have thrown");
     } catch (err: any) {
       expect(err.code).toBe("NOT_FOUND");
@@ -106,7 +107,7 @@ describe("handleDeleteNote — soft delete (archive)", () => {
     seedNote("Inbox/locked.md", "---\ntype: concept\ntags:\n  - test\n---\nbody");
 
     try {
-      await handleDeleteNote("Inbox/locked.md", { ifHash: "wrong" });
+      await handleDeleteNote(defaultVaultContext(), "Inbox/locked.md", { ifHash: "wrong" });
       expect.unreachable("should have thrown");
     } catch (err: any) {
       expect(err.code).toBe("CONFLICT");
@@ -127,7 +128,7 @@ describe("handleDeleteNote — soft delete (archive)", () => {
     };
 
     try {
-      await handleDeleteNote("Journal/2026/2026-04-13.md", { trail });
+      await handleDeleteNote(defaultVaultContext(), "Journal/2026/2026-04-13.md", { trail });
       expect.unreachable("should have thrown");
     } catch (err: any) {
       expect(err.code).toBe("TRAIL_DENIED");
@@ -147,7 +148,7 @@ describe("handleDeleteNote — soft delete (archive)", () => {
     };
 
     try {
-      await handleDeleteNote("Resources/Concepts/x.md", { trail });
+      await handleDeleteNote(defaultVaultContext(), "Resources/Concepts/x.md", { trail });
       expect.unreachable("should have thrown");
     } catch (err: any) {
       expect(err.code).toBe("TRAIL_DENIED");
@@ -160,7 +161,7 @@ describe("handleDeleteNote — hard delete", () => {
     const { handleDeleteNote } = await loadRest();
     seedNote("Inbox/gone.md", "---\ntype: concept\ntags:\n  - test\n---\nbye");
 
-    const result = await handleDeleteNote("Inbox/gone.md", { hard: true, keyName: "test-key" });
+    const result = await handleDeleteNote(defaultVaultContext(), "Inbox/gone.md", { hard: true, keyName: "test-key" });
 
     expect(result.action).toBe("deleted");
     expect(result.original_path).toBe("Inbox/gone.md");
@@ -190,7 +191,7 @@ describe("handleMoveNote", () => {
       "---\ntype: concept\ntags:\n  - test\n---\nNo links here.",
     );
 
-    const result = await handleMoveNote(
+    const result = await handleMoveNote(defaultVaultContext(), 
       "Inbox/taste-graph.md",
       "Resources/Concepts/taste-graph.md",
       { keyName: "test-key" },
@@ -226,7 +227,7 @@ describe("handleMoveNote", () => {
       "---\ntype: concept\ntags:\n  - test\n---\nRefs [[Taste Graph]].",
     );
 
-    const result = await handleMoveNote(
+    const result = await handleMoveNote(defaultVaultContext(), 
       "Inbox/old-name.md",
       "Resources/Concepts/new-name.md",
       {},
@@ -243,7 +244,7 @@ describe("handleMoveNote", () => {
     seedNote("Resources/Concepts/dst.md", "---\ntype: concept\ntags:\n  - test\n---\nexisting");
 
     try {
-      await handleMoveNote("Inbox/src.md", "Resources/Concepts/dst.md", {});
+      await handleMoveNote(defaultVaultContext(), "Inbox/src.md", "Resources/Concepts/dst.md", {});
       expect.unreachable("should have thrown");
     } catch (err: any) {
       expect(err.code).toBe("CONFLICT");
@@ -253,7 +254,7 @@ describe("handleMoveNote", () => {
   it("returns 404 when source doesn't exist", async () => {
     const { handleMoveNote } = await loadRest();
     try {
-      await handleMoveNote("Inbox/missing.md", "Resources/Concepts/x.md", {});
+      await handleMoveNote(defaultVaultContext(), "Inbox/missing.md", "Resources/Concepts/x.md", {});
       expect.unreachable("should have thrown");
     } catch (err: any) {
       expect(err.code).toBe("NOT_FOUND");
@@ -273,7 +274,7 @@ describe("handleMoveNote", () => {
     };
 
     try {
-      await handleMoveNote("Resources/Concepts/a.md", "Inbox/a.md", { trail });
+      await handleMoveNote(defaultVaultContext(), "Resources/Concepts/a.md", "Inbox/a.md", { trail });
       expect.unreachable("should have thrown");
     } catch (err: any) {
       expect(err.code).toBe("TRAIL_DENIED");
@@ -284,7 +285,7 @@ describe("handleMoveNote", () => {
     const { handleMoveNote } = await loadRest();
     seedNote("Inbox/same.md", "---\ntype: concept\ntags:\n  - test\n---\nbody");
     try {
-      await handleMoveNote("Inbox/same.md", "Inbox/same.md", {});
+      await handleMoveNote(defaultVaultContext(), "Inbox/same.md", "Inbox/same.md", {});
       expect.unreachable("should have thrown");
     } catch (err: any) {
       expect(err.code).toBe("VALIDATION");
@@ -295,7 +296,7 @@ describe("handleMoveNote", () => {
     const { handleMoveNote } = await loadRest();
     seedNote("Inbox/locked.md", "---\ntype: concept\ntags:\n  - test\n---\nbody");
     try {
-      await handleMoveNote("Inbox/locked.md", "Resources/Concepts/locked.md", { ifHash: "nope" });
+      await handleMoveNote(defaultVaultContext(), "Inbox/locked.md", "Resources/Concepts/locked.md", { ifHash: "nope" });
       expect.unreachable("should have thrown");
     } catch (err: any) {
       expect(err.code).toBe("CONFLICT");

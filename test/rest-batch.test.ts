@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { defaultVaultContext } from "../src/rest.js";
 import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -67,7 +68,7 @@ describe("handleWriteBatch — basics", () => {
   it("writes multiple notes in one call and returns a result per op", async () => {
     const { handleWriteBatch } = await loadRest();
 
-    const result = await handleWriteBatch(
+    const result = await handleWriteBatch(defaultVaultContext(), 
       [
         { path: "Inbox/a.md", frontmatter: { type: "concept", tags: ["t"] }, content: "A" },
         { path: "Inbox/b.md", frontmatter: { type: "concept", tags: ["t"] }, content: "B" },
@@ -87,7 +88,7 @@ describe("handleWriteBatch — basics", () => {
 
   it("returns source_hash and content_hash (equal at write time) per op", async () => {
     const { handleWriteBatch } = await loadRest();
-    const { results } = await handleWriteBatch(
+    const { results } = await handleWriteBatch(defaultVaultContext(), 
       [
         { path: "Inbox/x.md", frontmatter: { type: "concept", tags: ["t"] }, content: "body" },
       ],
@@ -101,14 +102,14 @@ describe("handleWriteBatch — basics", () => {
 
   it("rejects an empty operations array", async () => {
     const { handleWriteBatch } = await loadRest();
-    await expect(handleWriteBatch([], {})).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(handleWriteBatch(defaultVaultContext(), [], {})).rejects.toMatchObject({ code: "VALIDATION" });
   });
 
   it("pre-flight validation rejects a bad op before any mutex work", async () => {
     const { handleWriteBatch } = await loadRest();
 
     await expect(
-      handleWriteBatch(
+      handleWriteBatch(defaultVaultContext(), 
         [
           { path: "Inbox/good.md", frontmatter: { type: "concept", tags: ["t"] }, content: "A" },
           // Second op has no `type` — rejected up front
@@ -129,7 +130,7 @@ describe("handleWriteBatch — chained if_hash_from_op", () => {
     const { handleWriteBatch, handleWriteNote } = await loadRest();
 
     // Seed: a note already exists via handleWriteNote so we know its source_hash.
-    const seeded = await handleWriteNote(
+    const seeded = await handleWriteNote(defaultVaultContext(), 
       "Inbox/seed.md",
       { type: "concept", tags: ["t"] },
       "v1",
@@ -138,7 +139,7 @@ describe("handleWriteBatch — chained if_hash_from_op", () => {
 
     // Now a batch: op 0 updates the seed, op 1 updates it again using op 0's
     // resulting source_hash via if_hash_from_op.
-    const { results } = await handleWriteBatch(
+    const { results } = await handleWriteBatch(defaultVaultContext(), 
       [
         {
           path: "Inbox/seed.md",
@@ -164,7 +165,7 @@ describe("handleWriteBatch — chained if_hash_from_op", () => {
   it("rejects if_hash_from_op referencing a later op", async () => {
     const { handleWriteBatch } = await loadRest();
     await expect(
-      handleWriteBatch(
+      handleWriteBatch(defaultVaultContext(), 
         [
           { path: "Inbox/a.md", frontmatter: { type: "concept", tags: ["t"] }, content: "A", if_hash_from_op: 1 },
           { path: "Inbox/b.md", frontmatter: { type: "concept", tags: ["t"] }, content: "B" },
@@ -187,7 +188,7 @@ describe("handleWriteBatch — atomic rollback", () => {
     writeFileSync(join(tempVault, "Inbox/existing.md"), "---\ntype: concept\ntags:\n  - t\n---\nseed");
 
     await expect(
-      handleWriteBatch(
+      handleWriteBatch(defaultVaultContext(), 
         [
           { path: "Inbox/new-a.md", frontmatter: { type: "concept", tags: ["t"] }, content: "A" },
           {
@@ -215,7 +216,7 @@ describe("handleWriteBatch — atomic rollback", () => {
     writeFileSync(join(tempVault, "Inbox/existing.md"), "---\ntype: concept\ntags:\n  - t\n---\nseed");
 
     await expect(
-      handleWriteBatch(
+      handleWriteBatch(defaultVaultContext(), 
         [
           { path: "Inbox/a.md", frontmatter: { type: "concept", tags: ["t"] }, content: "A" },
           {
@@ -239,7 +240,7 @@ describe("handleWriteBatch — atomic rollback", () => {
     const { handleWriteBatch } = await loadRest();
     const vaultOps = await import("../src/vault-ops.js");
 
-    const { results } = await handleWriteBatch(
+    const { results } = await handleWriteBatch(defaultVaultContext(), 
       [
         { path: "Inbox/a.md", frontmatter: { type: "concept", tags: ["t"] }, content: "A" },
         { path: "Inbox/b.md", frontmatter: { type: "concept", tags: ["t"] }, content: "B" },
