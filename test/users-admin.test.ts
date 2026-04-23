@@ -106,6 +106,31 @@ describe("deleteUser", () => {
   it("returns false for non-existent user", () => {
     expect(deleteUser("user_nonexistent")).toBe(false);
   });
+
+  it("removes vault_members rows so DELETE FROM users doesn't hit the FK", () => {
+    // Regression for P8-B3 — `vault_members.user_id` has no ON DELETE CASCADE,
+    // so a delete that skips the membership row throws with
+    // `FOREIGN KEY constraint failed`. Before the fix, the earlier DELETEs
+    // (keys, sessions) had already committed, leaving the user half-deleted.
+    const user = createUser("eve@example.com", "eve", "viewer");
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO vault_members (user_id, vault_id, role) VALUES (?, ?, ?)",
+    ).run(user.id, "vault_00000000", "viewer");
+    expect(
+      db.prepare("SELECT COUNT(*) as c FROM vault_members WHERE user_id = ?").get(user.id),
+    ).toEqual({ c: 1 });
+
+    const deleted = deleteUser(user.id);
+    expect(deleted).toBe(true);
+    expect(
+      db.prepare("SELECT COUNT(*) as c FROM vault_members WHERE user_id = ?").get(user.id),
+    ).toEqual({ c: 0 });
+    expect(
+      db.prepare("SELECT COUNT(*) as c FROM users WHERE id = ?").get(user.id),
+    ).toEqual({ c: 0 });
+  });
+
 });
 
 describe("listUsersWithMeta", () => {

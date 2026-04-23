@@ -192,6 +192,27 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
     if (existsSync(matchAbs)) return readNote(matchAbs, kebabMatch.path, file);
   }
 
+  // 6c. Codepoint-slug basename match — QMD's indexer encodes non-ASCII
+  // characters (emoji, etc.) as their lowercase Unicode codepoint
+  // hex wrapped in hyphens. Grove's `toKebab` drops those codepoints
+  // entirely, so slugs like `...have-fun-1faf6-system` (🫶) never
+  // match. Strip sequences of 4-6 hex chars (requiring at least one
+  // a-f letter so year dates like `-2026-` don't get clobbered) from
+  // the incoming query and retry the kebab comparison.
+  const searchKebabCollapsed = searchKebab
+    .replace(/-[0-9a-f]*[a-f][0-9a-f]*-/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  if (searchKebabCollapsed !== searchKebab) {
+    const collapsedMatch = allNotes.find(
+      (n) => toKebab(n.name) === searchKebabCollapsed,
+    );
+    if (collapsedMatch) {
+      const matchAbs = join(VAULT_PATH, collapsedMatch.path);
+      if (existsSync(matchAbs)) return readNote(matchAbs, collapsedMatch.path, file);
+    }
+  }
+
   // 7. Alias search
   const aliasNotes = listNotes(VAULT_PATH, "*", { includeAliases: true });
   const aliasMatch = aliasNotes.find(
