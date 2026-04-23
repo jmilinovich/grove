@@ -555,25 +555,18 @@ Backfill: insert one row per existing user with their old `users.role` for the `
 - Inviting a new user creates account + membership + key atomically
 - Email deep-link into Claude.ai is a real working URL (tested against Claude.ai's connector-add flow)
 
-#### P8-B3: grove-www route restructure (`src/app/...`) ⏳ DEFERRED — the supporting components (vault-switcher P8-B4, connected-vaults-list P8-B5) landed; the route move under `/@<handle>/<vault-slug>/*` needs a dedicated grove-www session
+#### P8-B3: grove-www route restructure (`src/app/...`) ✅ COMPLETE 2026-04-22
 
-Move every authenticated grove-www route under `/@<handle>/<vault-slug>/`:
+Landed across multiple grove-www PRs: #19 (route move), #20 (visual baselines), #22 (settings 404 + Claude.ai URL), #23 (scopedPath tolerates leading @), #24 (handle normalization + mobile switcher + /api/me dedupe), #26 (/home owner skips shim hop). MRU hook + backfill landed in grove main as PRs #33 + #35.
 
-- `/dashboard` → `/@<handle>/<vault>/dashboard`
-- `/profile` → `/@<handle>/<vault>/profile`
-- `/images` → `/@<handle>/<vault>/images`
-- Existing `/@<handle>/<vault>/<path>` content routes unchanged
+- Authenticated routes live under `/@[atHandle]/[vaultSlug]/{dashboard,profile,images,settings}/*`
+- Bare `/dashboard`, `/profile`, `/images`, `/settings` are 308 redirect shims that call `resolveScopedRedirect()` → MRU vault (falls back to earliest-joined, then `vaults[0]`)
+- Query strings preserved across redirect
+- `last_active_at` bumped on every authed request via grove MRU hook (throttled)
+- Vault-switcher builds scoped paths dynamically — no hardcoded bare routes
+- Coverage: `grove-www/test/legacy-redirects.spec.ts` (22 tests) + `test/vault-context.spec.ts` (MRU resolution, handle normalization)
 
-Bare `/dashboard`, `/profile`, etc. → 301 redirect to user's most-recently-used vault. First-time users land on their earliest-joined vault.
-
-`last_active_at` updates: on every authenticated request, `UPDATE vault_members SET last_active_at = now() WHERE user_id = ? AND vault_id = ?` (throttled to once per minute via in-memory debounce).
-
-**Files:** `grove-www/src/app/@[atHandle]/[vaultSlug]/dashboard/page.tsx` (new — moved), `grove-www/src/app/@[atHandle]/[vaultSlug]/profile/page.tsx` (moved), etc.; `grove-www/src/app/dashboard/page.tsx` (redirect shim); `grove-www/src/app/api/me/route.ts` (return `vaults: [...]`); `grove-www/test/route-structure.spec.ts`
-**Tests:** `grove-www/test/route-structure.spec.ts` — signed-in redirect to most-recently-used; first-timer to earliest-joined; deep-link to specific vault overrides stickiness; bare-route redirects preserve query string
-**Acceptance:**
-- Every dashboard/profile/images page has vault in the URL
-- Redirects from legacy bare routes preserve query params
-- `last_active_at` updates on navigation but not more than once per minute
+Design decision: used 308 (permanent, method-preserving) instead of the spec's 301 — Next.js `permanentRedirect()` emits 308, which is the modern equivalent.
 
 #### P8-B4: Vault switcher component (`grove-www/src/components/vault-switcher.tsx`) ✅ COMPLETE 2026-04-22 (d0e1451)
 
