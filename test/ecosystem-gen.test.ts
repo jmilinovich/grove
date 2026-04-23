@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import {
   generateEcosystemConfig,
   type VaultRow,
@@ -44,6 +48,74 @@ describe("ecosystem-gen (P8-A4)", () => {
     expect(out).toMatch(/"GROVE_VAULT_ID": "vault_team"[\s\S]*?"GROVE_SERVER_PORT": "8191"/);
   });
 
+  it("default qmd binary is /usr/bin/qmd, not node_modules", () => {
+    // /usr/bin/qmd is the APT-installed system binary — the previous default
+    // pointed at node_modules, which doesn't exist in prod and silently
+    // killed the shared qmd-server the first time pm2 reloaded.
+    const out = generateEcosystemConfig(vaults);
+    expect(out).toContain(`"script": "/usr/bin/qmd"`);
+    expect(out).not.toContain("node_modules/.bin/qmd");
+  });
+
+  it("custom qmdBin override threads through", () => {
+    const out = generateEcosystemConfig(vaults, { qmdBin: "/opt/custom/qmd" });
+    expect(out).toContain(`"script": "/opt/custom/qmd"`);
+  });
+
+  it("spreads .env under each process's static env at PM2 load time", () => {
+    // Write a temp .env + ecosystem and require() the generated module the
+    // same way PM2 does. Secrets from .env must land in every process's
+    // `env` (so VOYAGE_API_KEY, R2_*, etc. reach grove-server-*), and
+    // static overrides (GROVE_VAULT_ID, GROVE_SERVER_PORT) must win over
+    // anything the user accidentally sets in .env.
+    const tmp = mkdtempSync(join(tmpdir(), "grove-eco-"));
+    try {
+      writeFileSync(join(tmp, ".env"), [
+        "VOYAGE_API_KEY=vk_test_123",
+        "R2_BUCKET_NAME=grove-images-test",
+        // .env attempts to override a pinned var — must be ignored
+        "GROVE_SERVER_PORT=9999",
+      ].join("\n"));
+      const out = generateEcosystemConfig(vaults, { repoRoot: tmp });
+      writeFileSync(join(tmp, "ecosystem.config.cjs"), out);
+      const req = createRequire(join(tmp, "ecosystem.config.cjs"));
+      const mod = req(join(tmp, "ecosystem.config.cjs")) as {
+        apps: Array<{ name: string; env: Record<string, string> }>;
+      };
+      const personal = mod.apps.find((a) => a.name === "grove-server-personal")!;
+      expect(personal.env.VOYAGE_API_KEY).toBe("vk_test_123");
+      expect(personal.env.R2_BUCKET_NAME).toBe("grove-images-test");
+      // Static override wins over .env's 9999
+      expect(personal.env.GROVE_SERVER_PORT).toBe("8190");
+      expect(personal.env.GROVE_VAULT_ID).toBe("vault_00000000");
+      // Same for proxy — .env secrets reach it too
+      const proxy = mod.apps.find((a) => a.name === "grove-proxy")!;
+      expect(proxy.env.VOYAGE_API_KEY).toBe("vk_test_123");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("tolerates missing .env (test harness or first deploy)", () => {
+    // Without a .env file, the generated config must still load — the
+    // loader swallows ENOENT and passes an empty dotenv map through.
+    const tmp = mkdtempSync(join(tmpdir(), "grove-eco-"));
+    try {
+      const out = generateEcosystemConfig(vaults, { repoRoot: tmp });
+      writeFileSync(join(tmp, "ecosystem.config.cjs"), out);
+      const req = createRequire(join(tmp, "ecosystem.config.cjs"));
+      const mod = req(join(tmp, "ecosystem.config.cjs")) as {
+        apps: Array<{ name: string; env: Record<string, string> }>;
+      };
+      const personal = mod.apps.find((a) => a.name === "grove-server-personal")!;
+      // Static overrides still land even without .env
+      expect(personal.env.GROVE_VAULT_ID).toBe("vault_00000000");
+      expect(personal.env.NODE_ENV).toBe("production");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("is deterministic — two calls with same input produce identical output", () => {
     const a = generateEcosystemConfig(vaults);
     const b = generateEcosystemConfig(vaults);
@@ -51,23 +123,30 @@ describe("ecosystem-gen (P8-A4)", () => {
   });
 
   it("emits a valid CommonJS module that parses back as { apps: [...] }", () => {
-    const out = generateEcosystemConfig(vaults);
-    // Evaluate the generated module in a fresh context
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    const mod: { exports: unknown } = { exports: {} };
-    new Function("module", out)(mod);
-    const parsed = mod.exports as { apps: Array<{ name: string }> };
-    expect(Array.isArray(parsed.apps)).toBe(true);
-    // proxy + qmd + 2 per vault = 2 + 4 = 6
-    expect(parsed.apps).toHaveLength(6);
-    expect(parsed.apps.map((a) => a.name).sort()).toEqual([
-      "grove-discovery-personal",
-      "grove-discovery-team",
-      "grove-proxy",
-      "grove-server-personal",
-      "grove-server-team",
-      "qmd-server",
-    ]);
+    // The generated config uses require("node:fs") to load .env at PM2
+    // boot, so we need a real module scope (require + __dirname).
+    const tmp = mkdtempSync(join(tmpdir(), "grove-eco-"));
+    try {
+      const out = generateEcosystemConfig(vaults, { repoRoot: tmp });
+      writeFileSync(join(tmp, "ecosystem.config.cjs"), out);
+      const req = createRequire(join(tmp, "ecosystem.config.cjs"));
+      const parsed = req(join(tmp, "ecosystem.config.cjs")) as {
+        apps: Array<{ name: string }>;
+      };
+      expect(Array.isArray(parsed.apps)).toBe(true);
+      // proxy + qmd + 2 per vault = 2 + 4 = 6
+      expect(parsed.apps).toHaveLength(6);
+      expect(parsed.apps.map((a) => a.name).sort()).toEqual([
+        "grove-discovery-personal",
+        "grove-discovery-team",
+        "grove-proxy",
+        "grove-server-personal",
+        "grove-server-team",
+        "qmd-server",
+      ]);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it("respects custom repoRoot / proxy / qmd ports", () => {

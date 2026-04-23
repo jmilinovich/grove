@@ -97,6 +97,13 @@ import {
   resolveFlag,
 } from "./graph-health.js";
 import { touchVaultMember } from "./vault-mru.js";
+import {
+  loadVaultMap,
+  parseVaultPath,
+  decideRoute,
+  sunsetDate,
+  lookupById as lookupVaultById,
+} from "./vault-router.js";
 
 installCrashHandlers("grove-proxy");
 
@@ -957,6 +964,45 @@ const server = createServer(async (req, res) => {
       checks,
     });
     return;
+  }
+
+  // P8-A2: vault-scoped health (/v/<slug>/health). Lets the deploy workflow
+  // and the multi-vault smoke test hit each vault's grove-server directly
+  // without an auth token. Unknown slugs return 404 (health is a public
+  // probe — no slug-enumeration leak concern, unlike MCP/REST).
+  {
+    const healthMatch = /^\/v\/([^/?#]+)\/health$/.exec(url.pathname);
+    if (healthMatch) {
+      const slug = healthMatch[1]!;
+      const v = (await import("./vault-router.js")).lookupBySlug(slug);
+      if (!v) {
+        sendJson(res, 404, { ok: false, error: "unknown vault" });
+        return;
+      }
+      const checkServer = (hostname: string, port: number, path: string) =>
+        new Promise<{ ok: boolean; body: string }>((resolve) => {
+          const r = httpRequest({ hostname, port, path, method: "GET", timeout: 3000 }, (proxyRes) => {
+            let body = "";
+            proxyRes.on("data", (c) => body += c);
+            proxyRes.on("end", () => resolve({ ok: (proxyRes.statusCode ?? 500) < 400, body }));
+          });
+          r.on("error", () => resolve({ ok: false, body: "" }));
+          r.on("timeout", () => { r.destroy(); resolve({ ok: false, body: "" }); });
+          r.end();
+        });
+      const result = await checkServer("127.0.0.1", v.server_port, "/health");
+      // Passthrough the backend's structured body so SHA / checks are visible.
+      let parsed: Record<string, unknown> = {};
+      try { parsed = JSON.parse(result.body); } catch { /* backend may be down or not JSON */ }
+      sendJson(res, result.ok ? 200 : 503, {
+        ok: result.ok,
+        vault: slug,
+        vault_id: v.id,
+        backend_port: v.server_port,
+        ...parsed,
+      });
+      return;
+    }
   }
 
   // Metrics endpoint — request counts, latency percentiles, error rates
@@ -2532,8 +2578,69 @@ const server = createServer(async (req, res) => {
   // Trail resolution — look up if this key is associated with a trail
   const trail = resolveTrail(key.id);
 
+  // P8-A2: vault routing. Parse the URL into (slug, rest, isLegacy) and
+  // decide which backend to forward to. `/v/<slug>/mcp` routes to the
+  // matching vault's server_port; legacy `/mcp` and `/v1/*` route to the
+  // token's bound vault with a Sunset header. Unknown slugs or token/slug
+  // mismatches both return 403 (never 404 — 404 would leak which vault
+  // slugs exist).
+  const vaultParsed = parseVaultPath(url.pathname);
+  const routeDecision = decideRoute(vaultParsed, key.vault_id);
+
+  // Vault-scoped URLs (/v/<slug>/*) MUST decide to "route" — anything else
+  // is a 403. For legacy paths (no /v/<slug>/) the decision comes back as
+  // "legacy" and we add a Sunset header on the way out.
+  if (vaultParsed.slug !== null && routeDecision.kind !== "route") {
+    structuredLog("warn", "vault.route_denied", rid, {
+      key_id: key.id,
+      key_name: key.name,
+      url_slug: vaultParsed.slug,
+      token_vault_id: key.vault_id,
+      reason: routeDecision.reason,
+      status: 403,
+    });
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "forbidden" }));
+    return;
+  }
+
+  // Pick the backend port for this request:
+  // - /v/<slug>/mcp → decision.vault.server_port (vault-scoped)
+  // - /mcp legacy → decision.vault.server_port (the token's vault)
+  // - fallback (decision.vault missing somehow) → GROVE_SERVER_PORT env default
+  const routedVault =
+    routeDecision.kind === "route" || routeDecision.kind === "legacy"
+      ? routeDecision.vault ?? null
+      : null;
+  const backendPort = routedVault?.server_port ?? GROVE_SERVER_PORT;
+  const backendPath = vaultParsed.rest; // strips /v/<slug>/ prefix
+  const isLegacyVaultPath = routeDecision.kind === "legacy";
+  const vaultSunsetHeader = isLegacyVaultPath ? sunsetDate() : null;
+
+  // Vault-scoped URLs (/v/<slug>/*) only support /mcp today. REST handlers
+  // in this proxy read a single VAULT_PATH at module load — they aren't
+  // request-scoped yet. Reject /v/<slug>/v1/* etc. so callers don't hit a
+  // confusing QMD fallback; 404 is honest about "not implemented for this
+  // scope". Legacy (non-slug) paths fall through to the existing handlers
+  // unchanged.
+  if (vaultParsed.slug !== null && backendPath !== "/mcp") {
+    structuredLog("info", "vault.scoped_rest_not_supported", rid, {
+      key_id: key.id,
+      key_name: key.name,
+      url_slug: vaultParsed.slug,
+      rest_path: backendPath,
+      status: 404,
+    });
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      error: "not found",
+      detail: "vault-scoped REST paths are not yet supported; use /v1/* with a vault-bound token",
+    }));
+    return;
+  }
+
   // Forward ALL MCP requests to the Grove server (which owns all 6 tools)
-  if (url.pathname === "/mcp") {
+  if (backendPath === "/mcp") {
     let body = "";
     if (req.method === "POST") {
       try { body = await readBody(req); } catch (err: unknown) {
@@ -2656,7 +2763,7 @@ const server = createServer(async (req, res) => {
     // Proxy to Grove server, piping response headers and body through
     // If Grove returns 400 (invalid/stale session), retry without session ID to create a new one
     const groveReq = httpRequest(
-      { hostname: "127.0.0.1", port: GROVE_SERVER_PORT, path: "/mcp", method: req.method, headers: groveHeaders() },
+      { hostname: "127.0.0.1", port: backendPort, path: "/mcp", method: req.method, headers: groveHeaders() },
       (groveRes) => {
         // If stale session → initialize a new session, then replay the request
         if (groveRes.statusCode === 400 && sessionStr && req.method === "POST") {
@@ -2670,7 +2777,7 @@ const server = createServer(async (req, res) => {
             params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "grove-proxy", version: "1" } },
           });
           const initReq = httpRequest(
-            { hostname: "127.0.0.1", port: GROVE_SERVER_PORT, path: "/mcp", method: "POST",
+            { hostname: "127.0.0.1", port: backendPort, path: "/mcp", method: "POST",
               headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Content-Length": String(Buffer.byteLength(initBody)) } },
             (initRes) => {
               let initData = "";
@@ -2687,7 +2794,7 @@ const server = createServer(async (req, res) => {
                 const replayHeaders = groveHeaders(true);
                 replayHeaders["mcp-session-id"] = newSession;
                 const retryReq = httpRequest(
-                  { hostname: "127.0.0.1", port: GROVE_SERVER_PORT, path: "/mcp", method: "POST", headers: replayHeaders },
+                  { hostname: "127.0.0.1", port: backendPort, path: "/mcp", method: "POST", headers: replayHeaders },
                   (retryRes) => pipeGroveResponse(retryRes),
                 );
                 retryReq.on("error", () => { if (!res.headersSent) sendJson(res, 502, { error: "Grove server unreachable" }); });
@@ -2712,6 +2819,13 @@ const server = createServer(async (req, res) => {
       resHeaders["access-control-allow-methods"] = "GET, POST, DELETE, OPTIONS";
       resHeaders["access-control-allow-headers"] = "Content-Type, Authorization, mcp-session-id";
       resHeaders["access-control-expose-headers"] = "mcp-session-id";
+      // P8-A2: legacy `/mcp` callers get a Sunset header (RFC 8594, 90 days
+      // out) so they know to migrate to `/v/<slug>/mcp`. Non-legacy paths
+      // get no Sunset header.
+      if (vaultSunsetHeader) {
+        resHeaders["Sunset"] = vaultSunsetHeader;
+        resHeaders["Deprecation"] = "true";
+      }
       res.writeHead(groveRes.statusCode ?? 200, resHeaders);
 
       if (parsed?.method === "tools/call" && toolName) {
@@ -2741,9 +2855,18 @@ const server = createServer(async (req, res) => {
       }
     }
 
-    groveReq.on("error", (err) => {
+    groveReq.on("error", (err: NodeJS.ErrnoException) => {
       console.error("[proxy] Grove server error:", err.message);
-      if (!res.headersSent) sendJson(res, 502, { error: "Grove server unreachable" });
+      if (res.headersSent) return;
+      // P8-A2: backend unreachable gets 503 + Retry-After: 5 so clients
+      // don't hammer us during a grove-server restart. Other errors (e.g.
+      // connection reset mid-stream) fall through to 502.
+      if (err.code === "ECONNREFUSED" || err.code === "ECONNRESET" || err.code === "EHOSTUNREACH") {
+        res.writeHead(503, { "Content-Type": "application/json", "Retry-After": "5" });
+        res.end(JSON.stringify({ error: "vault backend unavailable", retry_after_s: 5 }));
+        return;
+      }
+      sendJson(res, 502, { error: "Grove server unreachable" });
     });
     if (body) groveReq.write(body);
     groveReq.end();
@@ -2765,12 +2888,15 @@ const keyCount = getDb().prepare("SELECT COUNT(*) as count FROM api_keys").get()
 
 // P8-A2: load the vault slug→port map on startup. SIGHUP below reloads it
 // so operators can provision new vaults without restarting the proxy.
-import("./vault-router.js")
-  .then((vr) => {
-    const n = vr.loadVaultMap();
-    console.log(`[grove] vault-router loaded ${n} vault(s)`);
-  })
-  .catch((err) => console.error(`[grove] vault-router load failed: ${(err as Error).message}`));
+// Loaded synchronously so the very first request can route correctly — a
+// dynamic import leaves the map empty during the async window, and any
+// request that lands then would get a 403 from decideRoute.
+try {
+  const n = loadVaultMap();
+  console.log(`[grove] vault-router loaded ${n} vault(s)`);
+} catch (err) {
+  console.error(`[grove] vault-router load failed: ${(err as Error).message}`);
+}
 
 // P8-A6: start the vault-usage flush timer (60s). Counts bump at request
 // time; this timer upserts the accumulated state into vault_usage_daily.
@@ -2782,12 +2908,12 @@ import("./vault-usage.js")
   .catch((err) => console.error(`[grove] vault-usage start failed: ${(err as Error).message}`));
 
 process.on("SIGHUP", () => {
-  import("./vault-router.js")
-    .then((vr) => {
-      const n = vr.loadVaultMap();
-      console.log(`[grove] vault-router reloaded on SIGHUP (${n} vault(s))`);
-    })
-    .catch((err) => console.error(`[grove] SIGHUP reload failed: ${(err as Error).message}`));
+  try {
+    const n = loadVaultMap();
+    console.log(`[grove] vault-router reloaded on SIGHUP (${n} vault(s))`);
+  } catch (err) {
+    console.error(`[grove] SIGHUP reload failed: ${(err as Error).message}`);
+  }
 });
 
 server.listen(PROXY_PORT, "0.0.0.0", () => {

@@ -35,6 +35,16 @@ function getVaultPath(): string {
   return process.env.GROVE_VAULT ?? join(homedir(), "life");
 }
 
+/**
+ * Each discovery worker is pinned to exactly one vault via PM2's per-vault
+ * `GROVE_VAULT_ID`. We require the env var in the worker path because a
+ * missing ID would cause the loop to drain another vault's queue — a
+ * cross-vault data leak. Test harnesses can set the env var explicitly.
+ */
+function getVaultId(): string {
+  return process.env.GROVE_VAULT_ID ?? "vault_00000000";
+}
+
 /** Default processor — extracts entities and wires wikilinks. */
 const defaultProcessor: Processor = async (entry) => {
   const vaultPath = getVaultPath();
@@ -102,15 +112,17 @@ let timer: ReturnType<typeof setTimeout> | null = null;
  *
  * @param processor  Function called for each dequeued entry (default: log-only)
  * @param pollMs     Polling interval in ms (default: 2000)
+ * @param vaultId    Vault id to scope dequeues to (default: $GROVE_VAULT_ID)
  */
 export function startDiscoveryLoop(
   processor: Processor = defaultProcessor,
   pollMs: number = DEFAULT_POLL_MS,
+  vaultId: string = getVaultId(),
 ): void {
   if (running) return;
   running = true;
-  console.log(`[discovery] loop started (poll every ${pollMs}ms)`);
-  scheduleTick(processor, pollMs);
+  console.log(`[discovery] loop started (poll every ${pollMs}ms, vault_id=${vaultId})`);
+  scheduleTick(processor, pollMs, vaultId);
 }
 
 /** Stop the discovery loop. */
@@ -124,8 +136,11 @@ export function stopDiscoveryLoop(): void {
 }
 
 /** Exposed for testing — process a single queue tick synchronously. */
-export async function tick(processor: Processor = defaultProcessor): Promise<boolean> {
-  const entry = dequeueDiscovery();
+export async function tick(
+  processor: Processor = defaultProcessor,
+  vaultId: string = getVaultId(),
+): Promise<boolean> {
+  const entry = dequeueDiscovery(vaultId);
   if (!entry) return false;
 
   try {
@@ -140,18 +155,18 @@ export async function tick(processor: Processor = defaultProcessor): Promise<boo
   return true;
 }
 
-function scheduleTick(processor: Processor, pollMs: number): void {
+function scheduleTick(processor: Processor, pollMs: number, vaultId: string): void {
   if (!running) return;
   timer = setTimeout(async () => {
     try {
       // Drain all pending entries in this tick before sleeping
       while (running) {
-        const processed = await tick(processor);
+        const processed = await tick(processor, vaultId);
         if (!processed) break;
       }
     } catch (err) {
       console.error("[discovery] unexpected loop error:", err);
     }
-    scheduleTick(processor, pollMs);
+    scheduleTick(processor, pollMs, vaultId);
   }, pollMs);
 }

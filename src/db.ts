@@ -766,21 +766,42 @@ export interface DiscoveryQueueEntry {
   error_message: string | null;
 }
 
-/** Enqueue a path for discovery processing. */
+/** Resolve the vault_id that discovery rows should be written under. */
+function resolveVaultIdFromEnv(): string {
+  return process.env.GROVE_VAULT_ID ?? "vault_00000000";
+}
+
+/**
+ * Enqueue a path for discovery processing.
+ *
+ * `vaultId` defaults to `$GROVE_VAULT_ID` (set by PM2 for per-vault
+ * discovery workers and grove-server instances) and falls back to the
+ * personal vault's id for code paths that don't know any better — notably
+ * the shared proxy, which still services only the personal vault for
+ * REST writes until vault-scoped REST lands.
+ */
 export function enqueueDiscovery(
   path: string,
   trigger: DiscoveryTrigger,
+  vaultId: string = resolveVaultIdFromEnv(),
 ): void {
   const database = getDb();
   database
     .prepare(
-      "INSERT INTO discovery_queue (path, trigger) VALUES (?, ?)",
+      "INSERT INTO discovery_queue (path, trigger, vault_id) VALUES (?, ?, ?)",
     )
-    .run(path, trigger);
+    .run(path, trigger, vaultId);
 }
 
-/** Claim the next pending entry for processing (atomic status flip). */
-export function dequeueDiscovery(): DiscoveryQueueEntry | null {
+/**
+ * Claim the next pending entry for processing (atomic status flip).
+ *
+ * `vaultId` scopes the dequeue so per-vault discovery workers don't race
+ * on one another's queue entries. Defaults to `$GROVE_VAULT_ID` (or the
+ * personal vault id) when callers — like in-process tests — don't know
+ * better. Production workers always pass their pinned vault_id.
+ */
+export function dequeueDiscovery(vaultId: string = resolveVaultIdFromEnv()): DiscoveryQueueEntry | null {
   const database = getDb();
   const row = database
     .prepare(
@@ -788,13 +809,13 @@ export function dequeueDiscovery(): DiscoveryQueueEntry | null {
          SET status = 'processing', attempts = attempts + 1
        WHERE id = (
          SELECT id FROM discovery_queue
-         WHERE status = 'pending'
+         WHERE status = 'pending' AND vault_id = ?
          ORDER BY queued_at ASC
          LIMIT 1
        )
        RETURNING *`,
     )
-    .get() as DiscoveryQueueEntry | undefined;
+    .get(vaultId) as DiscoveryQueueEntry | undefined;
   return row ?? null;
 }
 

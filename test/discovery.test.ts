@@ -94,6 +94,51 @@ describe("discovery queue (db helpers)", () => {
     expect(discoveryQueueDepth()).toBe(2);
   });
 
+  it("dequeue is scoped by vault_id — workers never see other vaults' work", () => {
+    // Two vaults enqueue concurrently; each vault's worker must only
+    // dequeue its own entries. Prior to P8-A2 wire-up, the shared queue
+    // let any worker drain any vault's work — a silent cross-vault leak.
+    enqueueDiscovery("life/notes/a.md", "write", "vault_00000000");
+    enqueueDiscovery("team/notes/x.md", "write", "vault_team");
+    enqueueDiscovery("life/notes/b.md", "write", "vault_00000000");
+    enqueueDiscovery("team/notes/y.md", "commit", "vault_team");
+
+    const personalFirst = dequeueDiscovery("vault_00000000")!;
+    const personalSecond = dequeueDiscovery("vault_00000000")!;
+    const personalThird = dequeueDiscovery("vault_00000000");
+
+    expect([personalFirst.path, personalSecond.path].sort()).toEqual([
+      "life/notes/a.md",
+      "life/notes/b.md",
+    ]);
+    expect(personalThird).toBeNull(); // nothing else for personal
+
+    const teamFirst = dequeueDiscovery("vault_team")!;
+    const teamSecond = dequeueDiscovery("vault_team")!;
+    const teamThird = dequeueDiscovery("vault_team");
+
+    expect([teamFirst.path, teamSecond.path].sort()).toEqual([
+      "team/notes/x.md",
+      "team/notes/y.md",
+    ]);
+    expect(teamThird).toBeNull();
+  });
+
+  it("enqueueDiscovery picks up vault_id from GROVE_VAULT_ID env by default", () => {
+    // Simulates the grove-server code path: PM2 pins GROVE_VAULT_ID per
+    // process; enqueue without an explicit argument tags rows with that id.
+    process.env.GROVE_VAULT_ID = "vault_scoped_env";
+    try {
+      enqueueDiscovery("note.md", "write"); // no explicit vault_id
+      const row = getDb().prepare(
+        "SELECT vault_id FROM discovery_queue WHERE path = ?",
+      ).get("note.md") as { vault_id: string };
+      expect(row.vault_id).toBe("vault_scoped_env");
+    } finally {
+      delete process.env.GROVE_VAULT_ID;
+    }
+  });
+
   it("accepts the embed_retry trigger for re-embed workflow", () => {
     enqueueDiscovery("x.md", "embed_retry");
     const entry = dequeueDiscovery();
