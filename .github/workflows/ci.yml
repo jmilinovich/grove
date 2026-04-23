@@ -141,16 +141,44 @@ jobs:
             # Deploy.
             git pull --ff-only
             echo "$TARGET_SHA" > .deployed_sha
-            npm ci --production
-            sudo pm2 restart grove-server grove-proxy grove-discovery
+            # Full `npm ci` (NOT --production) so tsx + better-sqlite3 are
+            # available — every grove process is invoked via `npx tsx` per
+            # the generated ecosystem, and tsx lives in devDependencies.
+            # The previous `--production` was inherited from a single-vault
+            # past that compiled to JS up front; with multi-vault tsx-on-
+            # demand it just breaks PM2 start-up.
+            npm ci
+            # Multi-vault rename: `grove-server` / `grove-discovery` no
+            # longer exist as PM2 names; processes are now per-vault
+            # (`grove-server-<slug>` etc.). Reload from ecosystem.config.cjs
+            # so the right set of processes is brought up regardless of
+            # how many vaults are provisioned. Falls back to `restart all`
+            # for the rare case where ecosystem.config.cjs is missing
+            # (fresh box, never provisioned).
+            if [ -f /root/grove/ecosystem.config.cjs ]; then
+              sudo pm2 reload /root/grove/ecosystem.config.cjs --update-env
+            else
+              sudo pm2 restart all --update-env
+            fi
 
-            # Health poll — 12 × 5s = 60s window.
+            # Health poll — 12 × 5s = 60s window. We accept either the
+            # full deep-health 200 OR a 503 whose body shows the new SHA
+            # plus `"grove-server":true` — the latter happens when a
+            # legacy vestigial sub-check (e.g. qmd on :8177) is down but
+            # vault ops are fine. Per-vault `/v/<slug>/health` endpoints
+            # remain the authoritative readiness probes for vault traffic.
             for i in $(seq 1 12); do
               sleep 5
-              RESP=$(curl -sf "$HEALTH_URL" || echo "")
-              if echo "$RESP" | grep -q "\"ok\":true" && echo "$RESP" | grep -q "\"sha\":\"$TARGET_SHA\""; then
-                echo "[deploy] healthy on attempt $i"
-                exit 0
+              RESP=$(curl -sf "$HEALTH_URL" || curl -s "$HEALTH_URL" || echo "")
+              if echo "$RESP" | grep -q "\"sha\":\"$TARGET_SHA\""; then
+                if echo "$RESP" | grep -q "\"ok\":true"; then
+                  echo "[deploy] healthy on attempt $i"
+                  exit 0
+                fi
+                if echo "$RESP" | grep -q '"grove-server":true'; then
+                  echo "[deploy] degraded-but-ok on attempt $i (sha matches, grove-server up): $RESP"
+                  exit 0
+                fi
               fi
               echo "[deploy] attempt $i: $RESP"
             done
@@ -159,8 +187,12 @@ jobs:
             echo "::error::health-check failed after 60s; rolling back to $BEFORE_SHA"
             git reset --hard "$BEFORE_SHA"
             echo "$BEFORE_SHA" > .deployed_sha
-            npm ci --production
-            sudo pm2 restart grove-server grove-proxy grove-discovery
+            npm ci
+            if [ -f /root/grove/ecosystem.config.cjs ]; then
+              sudo pm2 reload /root/grove/ecosystem.config.cjs --update-env
+            else
+              sudo pm2 restart all --update-env
+            fi
 
             # Verify rollback health.
             for i in $(seq 1 6); do
