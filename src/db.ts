@@ -274,6 +274,70 @@ export function createSchema(): void {
   migrateSharedLinks(database);
   migrateMultiVault(database);
   migrateVaultMembersBackfill(database);
+  migrateApiKeyVaultId(database);
+}
+
+/**
+ * P8-B3 follow-up — backfill `api_keys.vault_id`.
+ *
+ * Historically `api_keys.vault_id` stored the legacy slug string (e.g.
+ * `"life"`), and the P8-A1 multi-vault migration renamed that slug to
+ * `"personal"` without updating api_keys. The column was meant to carry
+ * the canonical `vaults.id` UUID (that's what `vault_members.vault_id`,
+ * `vault_keys.vault_id`, and `resolveAdminVaultId` all expect) — once
+ * MRU tracking landed (17f1ede), the mismatch surfaced as
+ * `UPDATE vault_members WHERE vault_id = 'life'` matching zero rows and
+ * `last_active_at` staying NULL forever.
+ *
+ * Idempotent:
+ *   1. If any api_keys row has a vault_id that does NOT appear in
+ *      `vaults.id`, try to resolve it via `vaults.slug` (covers both
+ *      the legacy `"life"` value and keys minted with the slug form).
+ *   2. If that fails, fall back to the single default vault — pre-P8
+ *      installs only had one vault (`vault_00000000`) so this is the
+ *      right target for any orphan.
+ */
+function migrateApiKeyVaultId(database: Database.Database): void {
+  // Bail if api_keys doesn't exist (fresh install paths may call this
+  // out of order — defense in depth).
+  const exists = database
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='api_keys'")
+    .get();
+  if (!exists) return;
+
+  const orphans = database
+    .prepare(
+      `SELECT id, vault_id
+         FROM api_keys
+        WHERE vault_id NOT IN (SELECT id FROM vaults)`,
+    )
+    .all() as Array<{ id: string; vault_id: string }>;
+  if (orphans.length === 0) return;
+
+  const fallback = database
+    .prepare("SELECT id FROM vaults ORDER BY created_at ASC LIMIT 1")
+    .get() as { id: string } | undefined;
+  if (!fallback) return; // No vaults at all — nothing we can do.
+
+  const resolveBySlug = database.prepare("SELECT id FROM vaults WHERE slug = ?");
+  const updateKey = database.prepare("UPDATE api_keys SET vault_id = ? WHERE id = ?");
+
+  const tx = database.transaction(() => {
+    for (const k of orphans) {
+      const match = resolveBySlug.get(k.vault_id) as { id: string } | undefined;
+      updateKey.run(match?.id ?? fallback.id, k.id);
+    }
+  });
+  tx();
+
+  const stillBad = database
+    .prepare("SELECT COUNT(*) AS n FROM api_keys WHERE vault_id NOT IN (SELECT id FROM vaults)")
+    .get() as { n: number };
+  if (stillBad.n > 0) {
+    throw new Error(
+      `[db] api_keys.vault_id backfill left ${stillBad.n} orphan(s) — migration failed`,
+    );
+  }
 }
 
 /**
