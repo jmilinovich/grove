@@ -31,10 +31,12 @@ describe("ecosystem-gen (P8-A4)", () => {
     },
   ];
 
-  it("emits grove-proxy + qmd-server + one server/discovery pair per vault", () => {
+  it("emits grove-proxy + one server/discovery pair per vault (no qmd-server)", () => {
     const out = generateEcosystemConfig(vaults);
     expect(out).toContain(`"name": "grove-proxy"`);
-    expect(out).toContain(`"name": "qmd-server"`);
+    // qmd-server is intentionally NOT emitted — qmd 2.1+ has no `serve`
+    // subcommand and the legacy BM25 HTTP wrapper no longer exists.
+    expect(out).not.toContain(`"name": "qmd-server"`);
     expect(out).toContain(`"name": "grove-server-personal"`);
     expect(out).toContain(`"name": "grove-discovery-personal"`);
     expect(out).toContain(`"name": "grove-server-team"`);
@@ -48,18 +50,15 @@ describe("ecosystem-gen (P8-A4)", () => {
     expect(out).toMatch(/"GROVE_VAULT_ID": "vault_team"[\s\S]*?"GROVE_SERVER_PORT": "8191"/);
   });
 
-  it("default qmd binary is /usr/bin/qmd, not node_modules", () => {
-    // /usr/bin/qmd is the APT-installed system binary — the previous default
-    // pointed at node_modules, which doesn't exist in prod and silently
-    // killed the shared qmd-server the first time pm2 reloaded.
+  it("wraps tsx invocations in bash so prod without node_modules/.bin/tsx still boots", () => {
+    // CI's `npm ci --production` skips devDependencies (where tsx lives),
+    // so a direct `script: <repo>/node_modules/.bin/tsx` reference dies on
+    // first PM2 start. /bin/bash + `npx tsx` resolves tsx from node's
+    // cache or fetches on demand — matches the legacy ecosystem config.
     const out = generateEcosystemConfig(vaults);
-    expect(out).toContain(`"script": "/usr/bin/qmd"`);
-    expect(out).not.toContain("node_modules/.bin/qmd");
-  });
-
-  it("custom qmdBin override threads through", () => {
-    const out = generateEcosystemConfig(vaults, { qmdBin: "/opt/custom/qmd" });
-    expect(out).toContain(`"script": "/opt/custom/qmd"`);
+    expect(out).toContain(`"script": "/bin/bash"`);
+    expect(out).toContain("npx tsx");
+    expect(out).not.toContain("node_modules/.bin/tsx");
   });
 
   it("spreads .env under each process's static env at PM2 load time", () => {
@@ -134,15 +133,14 @@ describe("ecosystem-gen (P8-A4)", () => {
         apps: Array<{ name: string }>;
       };
       expect(Array.isArray(parsed.apps)).toBe(true);
-      // proxy + qmd + 2 per vault = 2 + 4 = 6
-      expect(parsed.apps).toHaveLength(6);
+      // proxy + 2 per vault = 1 + 4 = 5 (qmd-server intentionally absent)
+      expect(parsed.apps).toHaveLength(5);
       expect(parsed.apps.map((a) => a.name).sort()).toEqual([
         "grove-discovery-personal",
         "grove-discovery-team",
         "grove-proxy",
         "grove-server-personal",
         "grove-server-team",
-        "qmd-server",
       ]);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
@@ -160,10 +158,10 @@ describe("ecosystem-gen (P8-A4)", () => {
     expect(out).toContain(`"QMD_PORT": "9177"`);
   });
 
-  it("handles zero-vault input (no server/discovery entries)", () => {
+  it("handles zero-vault input (proxy only, no server/discovery entries)", () => {
     const out = generateEcosystemConfig([]);
     expect(out).toContain(`"name": "grove-proxy"`);
-    expect(out).toContain(`"name": "qmd-server"`);
+    expect(out).not.toContain(`"name": "qmd-server"`);
     expect(out).not.toContain(`"grove-server-`);
     expect(out).not.toContain(`"grove-discovery-`);
   });

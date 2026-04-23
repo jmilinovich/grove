@@ -64,16 +64,26 @@ export function generateEcosystemConfig(
   const repoRoot = opts.repoRoot ?? "/root/grove";
   const proxyPort = opts.proxyPort ?? 8420;
   const qmdPort = opts.qmdPort ?? 8177;
-  const qmdBin = opts.qmdBin ?? DEFAULT_QMD_BIN;
+  // qmdBin is kept in the options shape for compatibility — see comment
+  // below about why `qmd-server` is no longer emitted.
+  void (opts.qmdBin ?? DEFAULT_QMD_BIN);
 
   const apps: Record<string, unknown>[] = [];
+
+  // All TypeScript processes run under `/bin/bash -c 'npx tsx <file>'`
+  // so CI's `npm ci --production` (which skips devDependencies where
+  // tsx lives) doesn't break PM2 start-up. npx resolves tsx from node's
+  // own cache or fetches it on demand. Matches the legacy hand-rolled
+  // ecosystem.config.cjs that the VPS ran for months before multi-vault.
+  const tsxRunner = "/bin/bash";
+  const tsxArgs = (script: string) => `-c 'npx tsx ${repoRoot}/src/${script}'`;
 
   // Proxy — one process, not vault-scoped. `env_static` is the static,
   // per-process override that sits on top of `.env` at PM2 load time.
   apps.push({
     name: "grove-proxy",
-    script: `${repoRoot}/node_modules/.bin/tsx`,
-    args: `${repoRoot}/src/proxy.ts`,
+    script: tsxRunner,
+    args: tsxArgs("proxy.ts"),
     cwd: repoRoot,
     env_static: {
       NODE_ENV: "production",
@@ -84,25 +94,23 @@ export function generateEcosystemConfig(
     max_restarts: 10,
   });
 
-  // QMD — one process, shared across vaults.
-  apps.push({
-    name: "qmd-server",
-    script: qmdBin,
-    args: "serve",
-    cwd: repoRoot,
-    env_static: {
-      NODE_ENV: "production",
-      QMD_PORT: String(qmdPort),
-    },
-    autorestart: true,
-    max_restarts: 10,
-  });
+  // QMD — intentionally NOT emitted.
+  //
+  // The legacy `qmd-server` process wrapped a BM25-over-HTTP service on
+  // :8177, used by `proxy.ts` at the `/search` endpoint + in the deep
+  // `/health` check. qmd ≥ 2.1 removed that server mode (no `qmd serve`
+  // command exists), so every attempt to start it crashes. Proxy-side
+  // fallbacks already handle port 8177 being unreachable (503 + soft
+  // degrade), and `hybrid-search.ts` runs BM25 in-process via FTS5 —
+  // so nothing currently needs qmd-server. Leaving this commented so
+  // the next operator knows why it's absent; bring it back only once
+  // a working BM25 HTTP server is in place.
 
   for (const v of vaults) {
     apps.push({
       name: `grove-server-${v.slug}`,
-      script: `${repoRoot}/node_modules/.bin/tsx`,
-      args: `${repoRoot}/src/server.ts`,
+      script: tsxRunner,
+      args: tsxArgs("server.ts"),
       cwd: repoRoot,
       env_static: {
         NODE_ENV: "production",
@@ -116,8 +124,8 @@ export function generateEcosystemConfig(
     });
     apps.push({
       name: `grove-discovery-${v.slug}`,
-      script: `${repoRoot}/node_modules/.bin/tsx`,
-      args: `${repoRoot}/src/discovery-worker.ts`,
+      script: tsxRunner,
+      args: tsxArgs("discovery-worker.ts"),
       cwd: repoRoot,
       env_static: {
         NODE_ENV: "production",
