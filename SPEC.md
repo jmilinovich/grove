@@ -1,230 +1,296 @@
-# P8-B6 — Hoist user-scoped routes out of `[vaultSlug]`
+# Dashboard IA — collapse to Home + Access
 
-**Status:** Spec'd 2026-04-22
-**Scope:** `grove-www` only (no backend, no DB, no MCP changes)
-**Depends on:** Phase 8B (shipped 2026-04-22)
+**Status:** Spec'd 2026-04-23 (Phase A ships first; Phase B gated on feedback)
+**Scope:** `grove-www` frontend refactor; tiny backend change for activity endpoint in Phase B only
+**Depends on:** P8-B6 (PR #29) — profile hoist to `/@<h>/profile` must land first so avatar menu has a canonical target
 
 ---
 
 ## Context
 
-Phase 8B's route restructure (P8-B3, `grove-www` bb76c22) moved every authenticated route under `/@<handle>/<vault-slug>/*`. That was correct for vault-specific pages (dashboard, images, per-vault keys) but wrong for three pages whose underlying data is user-scoped, not vault-scoped:
+Grove's vault dashboard grew to 8 top-level tabs — Overview, Keys, Shares, Trails, Users, Usage, Graph, Health — plus a hidden Lifecycle page and an orphaned `/profile` route. The owner's felt pain:
 
-- `/@<h>/<v>/profile` — fetches `/v1/me`; the `<v>` segment is never read
-- `/@<h>/<v>/settings/vaults` — fetches `/v1/me.vaults[]`; the `<v>` segment is unused
-- `/@<h>/<v>/settings` — redirect shim that forwards to the above
+- Overlap between Keys / Shares / Trails / Users
+- Graph page is demo-grade, no real utility
+- Usage page "has nothing showing up" (it's actually wired; it renders empty when no traffic)
+- Profile is unreachable from the dashboard
 
-Visiting `/@jm/personal/profile` and `/@jm/work/profile` renders identical pages. The URL lies about the resource.
+The underlying insight: **Keys, Trails, Shares, and Members are all principals that access the vault — different mechanisms of the same concept.** They shouldn't be peer rail items. Everything else (Overview, Usage, Health, Lifecycle) is vault status, which belongs together.
 
-This phase corrects the IA by hoisting user-scoped pages one level up. Pure URL restructure — zero backend API changes.
+This spec collapses the dashboard to **2 rail items** (Home, Access) + an avatar menu, retires the Graph page, and stages the work in two phases.
 
-## Research
+## Research findings
 
-Across GitHub, Linear, Notion, Vercel, Figma, the dominant convention is **user stuff in user URL scope, workspace stuff in workspace URL scope**:
+From a survey of Vercel, Supabase, Clerk, Resend, Linear, Notion, GitHub, Anthropic console, PostHog, Railway:
 
-- GitHub: `/settings/*` (user) vs `/organizations/{org}/settings/*` (org); profile at `/{username}`
-- Vercel: `/account/settings` (user) vs `/teams/{team}/settings` (team)
-- Notion: consolidated `/settings` with tabs (UI split, not URL split)
-- Linear: hybrid
+1. **Two-tier nav is universal.** Top bar = scope switcher + avatar. Left rail = sections.
+2. **Principals cluster.** Keys, members, share links, tokens live under one "Access" or "Team" parent with tabs inside.
+3. **Overview pages are dying** — modern dashboards open on the most-used working surface.
+4. **Personal profile is always** in an avatar dropdown top-right.
+5. **Usage/billing** is its own rail item, never inside Settings.
 
-Grove already has `/@<handle>` as the resident scope, so the natural shape is **flat under handle** (`/@jm/profile`), matching GitHub. Nesting an explicit `/account` scope (Vercel-style) was considered and rejected — redundant with `@handle`.
+P8-B6 (PR #29) already hoists profile to `/@<h>/profile` which matches the avatar-menu pattern and unlocks this redesign.
+
+## Current state (what's being replaced)
+
+All paths are grove-www:
+
+| Page | Path | Fate |
+|------|------|------|
+| Overview | `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/page.tsx` | Phase B: Replace with Home |
+| Keys | `.../dashboard/keys/page.tsx` | Phase A: Move to `access/keys` |
+| Shares | `.../dashboard/shares/page.tsx` | Phase A: Move to `access/shares` |
+| Trails | `.../dashboard/trails/page.tsx` | Phase A: Move to `access/trails` (UI label: "Scoped Keys") |
+| Users | `.../dashboard/users/page.tsx` | Phase A: Move to `access/members` |
+| Usage | `.../dashboard/usage/page.tsx` | Phase B: Delete, fold into Home card |
+| Graph | `.../dashboard/graph/page.tsx` (~415 LOC) | Phase A: **Delete entirely** + drop D3 |
+| Health | `.../dashboard/health/page.tsx` | Phase B: Delete, fold into Home status strip |
+| Lifecycle (hidden) | `.../dashboard/lifecycle/page.tsx` | Phase A: Delete; Phase B re-surfaces in Home |
+| `DashboardNav` | `src/components/dashboard-nav.tsx` | Phase A: Rewrite to 2 items |
 
 ## Design decisions (locked during grilling)
 
-1. **URL shape:** flat under handle for user-scope; `[vaultSlug]` stays for vault-scope.
-2. **User-scope taxonomy** (pinned for the whole epic, not just this phase):
-   - **User-scoped:** profile, account settings, vault list, cross-vault API keys overview, sessions, billing
-   - **Vault-scoped:** dashboard/*, images, per-vault API keys, members, vault name/slug, integrations, trails, content paths
-3. **In scope THIS phase:** move only `profile` and `settings/vaults`. Defer account settings, keys overview, vault-level settings, public profile — each needs new backend endpoints or product definition.
-4. **Bare `/@<h>` (signed-in as `<h>`):** redirect to MRU vault dashboard.
-5. **Vault switcher on user-scoped pages:** neutral "Switch to vault…" launcher (not an active-vault chip). The URL has no vault, so the switcher must not claim one is "current."
-6. **Vault-scoped `/@<h>/<v>/settings`:** render an empty-state "Vault-level settings coming soon" page — **do not redirect** (redirecting a vault-contextual URL to a user-scoped list violates user intent).
-7. **Legacy user-scoped URLs** (`/@<h>/<v>/profile`, `/@<h>/<v>/settings/vaults`): 308 permanent to user-scoped counterparts. Strip vault segment, preserve query string + fragment.
-8. **Bare `/@<h>/settings`:** 308 to `/@<h>/settings/vaults`.
-9. **Profile access:** auth-walled, self-edit only. No public profile in this phase.
+1. **Rail shape:** 2 items — **Home** and **Access**. Nothing else.
+2. **Top bar:** Grove wordmark · vault switcher (existing) · avatar menu.
+3. **Avatar menu:** links to `/@<h>/profile`, account settings (`/@<h>/settings/vaults`), sign out.
+4. **Home absorbs:** Overview stats, Lifecycle digest, Health status strip, Usage 7-day card, Recent Activity feed.
+5. **Home ordering (pulse-first, revised from panel feedback):** **Health strip → Usage → Activity → Vault stats + Garden Lifecycle.** Health on top because "is anything broken" is the highest-urgency signal.
+6. **Access is a single route** with 4 tabs, UI labels: **Keys · Scoped Keys · Shares · Members**. (Backend/API term stays "Trails.")
+7. **Members = flat list** (Email · Role · Last active). Click a row → URL-addressable drawer (`?member=<id>`).
+8. **Graph page is deleted** — low utility, ~415 LOC, verified only consumer is `src/proxy.ts:2323` (grove repo). `analyzeGraph()` in `vault-graph.ts` **stays** — still used by `vault-stats.ts` and `server.ts`.
+9. **Non-owner/viewer gate:** existing `dashboard/layout.tsx:22` redirects non-owners to `/home`. Access inherits this. If viewer roles are added later, Access must hide tabs per role, not 403 silently.
+10. **Redirects use `next.config.ts` `redirects()`** — static, edge-cached, testable via HTTP, no middleware invention. Page-level `permanentRedirect()` as fallback where dynamic logic is needed.
 
 ## Specification
 
-### Routes after move
+### URL structure
 
 ```
-User-scoped (new canonical):
-  /@<h>/profile                     (moved from /@<h>/<v>/profile)
-  /@<h>/settings/vaults             (moved from /@<h>/<v>/settings/vaults)
-  /@<h>/settings                    308 → /@<h>/settings/vaults
-
-Vault-scoped (unchanged):
-  /@<h>/<v>/dashboard/*
-  /@<h>/<v>/images
-  /@<h>/<v>/[...path]
-  /@<h>/<v>/trails/*
-  /@<h>/<v>/s/[id]
-  /@<h>/<v>/settings                (NEW — empty-state page, no redirect)
-
-Legacy redirects (308 permanent):
-  /@<h>/<v>/profile                 → /@<h>/profile           (strip vault)
-  /@<h>/<v>/settings/vaults         → /@<h>/settings/vaults   (strip vault)
-
-Bare (MRU-resolved):
-  /profile                          → /@<h>/profile            (no MRU needed)
-  /settings                         → /@<h>/settings/vaults    (no MRU needed)
-  /settings/vaults                  → /@<h>/settings/vaults    (no MRU needed)
-  /@<h>                             302 → /@<h>/<mru>/dashboard (NOT 308 — MRU is mutable)
-  /dashboard                        → /@<h>/<mru>/dashboard    (unchanged)
+/@<h>/<v>/dashboard                  → Home
+/@<h>/<v>/dashboard/access           → default tab (keys)
+/@<h>/<v>/dashboard/access/keys
+/@<h>/<v>/dashboard/access/trails    (UI label: "Scoped Keys")
+/@<h>/<v>/dashboard/access/shares
+/@<h>/<v>/dashboard/access/members   (?member=<id> opens drawer)
 ```
 
-### Redirect implementation
+Legacy redirects via `next.config.ts`:
 
-Legacy redirects (#2 in the map above) go in **`middleware.ts`**, not page-level `permanentRedirect()` shims. Rationale: middleware runs before RSC, so no server component spin-up per legacy hit. Matches on URL regex, emits single 308 with preserved query + fragment.
-
-```ts
-// middleware.ts (sketch)
-const LEGACY_USER_SCOPED = /^\/@([^/]+)\/([^/]+)\/(profile|settings\/vaults)$/;
-
-if (LEGACY_USER_SCOPED.test(pathname)) {
-  const [, handle, , subpath] = pathname.match(LEGACY_USER_SCOPED)!;
-  const target = new URL(`/@${handle}/${subpath}`, request.url);
-  target.search = request.nextUrl.search;
-  target.hash = request.nextUrl.hash;
-  const res = NextResponse.redirect(target, 308);
-  res.headers.set('Cache-Control', 'max-age=3600'); // relax during rollout, tighten after
-  return res;
-}
+```
+/@<h>/<v>/dashboard/keys       → /@<h>/<v>/dashboard/access/keys         (308)
+/@<h>/<v>/dashboard/shares     → /@<h>/<v>/dashboard/access/shares       (308)
+/@<h>/<v>/dashboard/trails     → /@<h>/<v>/dashboard/access/trails       (308)
+/@<h>/<v>/dashboard/users      → /@<h>/<v>/dashboard/access/members      (308)
+/@<h>/<v>/dashboard/graph      → /@<h>/<v>/dashboard                     (308, no replacement)
+/@<h>/<v>/dashboard/lifecycle  → /@<h>/<v>/dashboard                     (308)
 ```
 
-Page-level `permanentRedirect()` shims are used only where middleware can't cover (e.g., when authentication state needs to be checked first).
+Phase B adds:
 
-### Component behavior
-
-- **`header.tsx`** — profile/settings nav links use a new `userScopedPath(handle, subPath)` helper returning `/@<h>/<subPath>`. Dashboard/images/vault-scoped links continue to use `scopedPath(handle, vault, subPath)`.
-- **`vault-switcher.tsx`** — behavior changes on user-scoped pages:
-  - On vault-scoped pages (`/@<h>/<v>/*`): unchanged. Chip shows `<v>`; dropdown navigates to `/@<h>/<chosen>/dashboard`.
-  - On user-scoped pages (`/@<h>/profile`, `/@<h>/settings/*`): chip shows **no active vault** ("Switch to vault…" placeholder). Dropdown lists vaults; click → `/@<h>/<chosen>/dashboard`.
-  - Derived from `useParams()` — if `vaultSlug` is undefined, user-scoped state.
-- **`dashboard-nav.tsx`** — unchanged (all dashboard tabs are vault-scoped).
-- **`useScopedLink`** hook — gains `.userLink(subPath)` method returning `userScopedPath(handle, subPath)`.
-- **`lib/vault-context.ts`** — add:
-  - `userScopedPath(handle: string, subPath: string): string`
-  - Private `normalizeHandle(raw: string): string` — **shared** by `userScopedPath` and `scopedPath`. Both call it; no duplicated normalization logic.
-
-### Auth & return-path flow
-
-`profile/page.tsx:28` currently builds `loginRedirect = '/login?redirect=<encoded>'` via `scopedPath`. In the new location, this uses `userScopedPath`:
-
-```ts
-const loginRedirect = `/login?redirect=${encodeURIComponent(
-  userScopedPath(atHandle, "/profile"),
-)}`;
+```
+/@<h>/<v>/dashboard/usage      → /@<h>/<v>/dashboard                     (308)
+/@<h>/<v>/dashboard/health     → /@<h>/<v>/dashboard                     (308)
 ```
 
-Same change in the new `settings/vaults/page.tsx`. After sign-in, the redirect parameter lands the user on the new canonical URL, not the legacy path.
+Query + fragment preserved. Max 1 hop. No 308→307 chains (avoids cache confusion with layout-level role redirects).
 
-### Data flow (unchanged)
+### Access page layout (Phase A)
 
-- `/@<h>/profile` calls `/v1/me`
-- `/@<h>/settings/vaults` calls `/v1/me.vaults[]`
+```
+┌──────────────────────────────────────────────────┐
+│ Access                                            │
+│ ┌──────┬──────────────┬────────┬─────────┐       │
+│ │ Keys │ Scoped Keys  │ Shares │ Members │       │
+│ └──────┴──────────────┴────────┴─────────┘       │
+│ (selected tab content — existing table, unchanged)│
+└──────────────────────────────────────────────────┘
+```
 
-No backend endpoint changes.
+First-time hint above the tab strip (dismissible, localStorage): *"Access groups every principal that can read or write this vault — your own keys, scoped keys you've shared, public snapshot links, and humans you've invited."*
 
-## Implementation sketch
+Tab order reflects **trust radius** (narrowest → widest): your keys → keys you've scoped for others → public snapshot links → humans with membership.
 
-### Files moved
+Accessibility: roving tabindex on tabs; `aria-current` on active rail item + active tab; skip-link to main.
 
-| From | To |
-|------|----|
-| `src/app/(resident)/[atHandle]/[vaultSlug]/profile/page.tsx` | `src/app/(resident)/[atHandle]/profile/page.tsx` |
-| `src/app/(resident)/[atHandle]/[vaultSlug]/settings/vaults/page.tsx` | `src/app/(resident)/[atHandle]/settings/vaults/page.tsx` |
+### Home page layout (Phase B)
 
-Both: drop `vaultSlug` param, switch `scopedPath` → `userScopedPath`, update login return path.
+```
+┌──────────────────────────────────────────────────┐
+│ Grove   @jm/vault ▾                      👤 ▾    │
+├────────┬─────────────────────────────────────────┤
+│ Home • │ ● All systems healthy · 2 flags ▾       │
+│ Access │ ──────────────────────────────────────  │
+│        │ Usage (7d)                               │
+│        │ 1,247 req · p95 230ms · 0.2% err         │
+│        │ [sparkline]                              │
+│        │ ──────────────────────────────────────  │
+│        │ Recent Activity (5 rows · View all →)   │
+│        │ 2m  claude   get_note       200          │
+│        │ 5m  main     write_note     200          │
+│        │ ──────────────────────────────────────  │
+│        │ Vault                                     │
+│        │ 2,847 notes · 98% fresh · index ok       │
+│        │                                          │
+│        │ Garden Lifecycle                          │
+│        │ seeds 4 · sprouts 12 · growing 203 ·     │
+│        │ mature 2,589 · dormant 39 · withering 0  │
+└────────┴─────────────────────────────────────────┘
+```
 
-### Files added
+Each card is an independently-suspending RSC with its own p95 budget:
 
-- `src/app/(resident)/[atHandle]/settings/page.tsx` — `permanentRedirect('/@<h>/settings/vaults')`
-- `src/app/(resident)/[atHandle]/[vaultSlug]/settings/page.tsx` — **replace existing shim with empty-state "Vault-level settings coming soon" page.** Keeps `<v>/settings` meaningful for users who clicked settings from within a vault.
-- `middleware.ts` — regex matcher for legacy user-scoped URLs, emits 308 with query + fragment + `Cache-Control: max-age=3600`.
+| Card | Endpoint | p95 budget | Empty state | Degraded state |
+|------|----------|-----------|-------------|----------------|
+| Health strip | `/v1/admin/health/current` | 300ms | "No flags" | Amber chip: "Health check degraded" |
+| Usage 7d | `/metrics` (trimmed) | 500ms | "No requests yet — try a key" + curl snippet | "Usage data temporarily unavailable" |
+| Recent Activity | **new** `/v1/admin/activity?limit=5` (Phase B backend) | 500ms | "No recent API calls" | Inline error toast |
+| Vault stats | `/v1/stats` | 300ms | N/A (always populated) | Skeleton placeholder |
+| Lifecycle | `/v1/status/digest` | 400ms | "No notes yet" | Skeleton placeholder |
 
-### Files updated
+Total Home p95 target: ≤1.5s for above-the-fold (Health + Usage); full page may stream in beyond that.
 
-- `src/lib/vault-context.ts` — add `userScopedPath`, extract `normalizeHandle`, route both helpers through it.
-- `src/lib/use-scoped-link.ts` (or wherever `useScopedLink` lives) — add `.userLink()` method.
-- `src/components/header.tsx` — profile/settings nav links use `userScopedPath` / `.userLink()`.
-- `src/components/vault-switcher.tsx` — neutral state when `vaultSlug` param is undefined.
-- `src/app/profile/page.tsx` (bare) — drop MRU lookup; redirect direct to `/@<h>/profile`.
-- `src/app/settings/[[...rest]]/page.tsx` (bare) — drop MRU lookup; redirect direct to `/@<h>/settings/<rest>`.
-- `src/app/(resident)/[atHandle]/page.tsx` (bare handle) — use **302** (not 308) when redirecting to MRU vault dashboard. MRU target is mutable; 308 would cache and pin first-visited vault forever.
+### Avatar menu
 
-### Files deleted
+```
+👤 ▾
+├─ Signed in as jm@...
+├─ ──────────────
+├─ Profile            → /@<h>/profile
+├─ Account settings   → /@<h>/settings/vaults
+├─ ──────────────
+└─ Sign out
+```
 
-- Old `src/app/(resident)/[atHandle]/[vaultSlug]/profile/page.tsx` (replaced by middleware redirect — no shim file needed once middleware covers it)
-- Old `src/app/(resident)/[atHandle]/[vaultSlug]/settings/vaults/page.tsx` (same)
+### Deletions (verified safe)
 
-### Tests
+**Phase A (grove-www):**
 
-Add to `test/route-structure.spec.ts`:
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/graph/` — entire folder (~415 LOC)
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/lifecycle/` — entire folder
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/users/` — moved, not deleted (file moves)
+- `package.json`: remove `d3` + `@types/d3` (confirmed only consumer is the deleted `graph-explorer.tsx`; `mermaid` is separate and stays)
 
-- **Redirect correctness:**
-  - `/@<h>/<v>/profile?q=1#frag` → 308 `/@<h>/profile?q=1#frag` (query + fragment preserved)
-  - `/@<h>/<v>/settings/vaults?q=1` → 308 `/@<h>/settings/vaults?q=1`
-  - `/@<h>/<v>/settings/vaults/` (trailing slash) → 308 (Next.js default behavior verified)
-  - `/@<h>/settings` → 308 `/@<h>/settings/vaults`
-  - Bare `/profile` → `/@<h>/profile` (no MRU resolution, direct)
-  - Bare `/settings` → `/@<h>/settings/vaults`
-- **Redirect chain depth:** every legacy path resolves to its terminal in **at most 1 hop**. Assert via `fetch(url, { redirect: 'manual' })` returning 308 with `location` pointing to a non-redirecting URL.
-- **Handle normalization round-trip:** `/@jm%40foo/profile` (if that's legal) normalizes the same way `scopedPath` does.
-- **302 (not 308) for bare `/@<h>`** → MRU dashboard.
-- **Login return-path:** unauthed request to `/@<h>/profile` → redirect to `/login?redirect=%2F%40<h>%2Fprofile`. After sign-in, land on `/@<h>/profile`.
-- **Vault switcher:** on `/@<h>/profile`, switcher shows "Switch to vault…" placeholder (not an active vault chip).
+**Phase A (grove):**
 
-### Rough order of operations
+- `/v1/status/graph` HTTP route in `src/proxy.ts` (around line 2323)
+- `analyzeGraph()` in `src/vault-graph.ts` — **KEEP**, still called by `src/vault-stats.ts` and `src/server.ts`
 
-1. Add `normalizeHandle` + `userScopedPath` to `vault-context.ts`; add unit tests.
-2. Add `middleware.ts` legacy redirect rules + tests (fetch with `redirect: 'manual'`).
-3. Create new user-scoped page files (move, drop param, switch helper, update login return path).
-4. Update bare `/profile` and `/settings/[[...rest]]` shims — drop MRU lookup.
-5. Update `/@<h>` bare handle shim: 302 not 308.
-6. Add empty-state `/@<h>/<v>/settings/page.tsx` ("Vault-level settings coming soon").
-7. Update `header.tsx` / `useScopedLink`.
-8. Update `vault-switcher.tsx` neutral state.
-9. Delete old page files at `[vaultSlug]/profile` and `[vaultSlug]/settings/vaults`.
-10. Run `route-structure.spec.ts`; run manual smoke: click profile from inside a vault, from outside a vault, via legacy bookmark, via email-link simulation.
+**Phase B (grove-www):**
 
-## Pre-merge checklist (from red-team review)
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/usage/` — fold into Home
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/health/` — fold into Home
+- Legacy Overview replaced by new Home composition
 
-Before merging, confirm:
+### New/changed files
 
-- [ ] **Email invite templates** (from P8-B2) — audit every URL they embed. If any point at `/@<h>/<v>/profile` or `/@<h>/<v>/settings/*`, they'll still resolve via 308 but we should know the set.
-- [ ] **OAuth redirect allowlists** — if any OAuth flow allowlists paths under `/@<h>/<v>/settings*`, update the allowlist or confirm the new canonical is already covered.
-- [ ] **Analytics dashboards** — any queries keyed on `/@<h>/<v>/profile` or `/@<h>/<v>/settings*` path strings need updating to track the new canonical.
-- [ ] **P8-B3 follow-up churn** — confirm `c9c7bb3` (handle normalization) and `b5cd77e` (settings 404) have been stable for ≥ 2 days before merging this on top.
-- [ ] **Cache-Control on 308s** set to `max-age=3600` during rollout; tighten to longer after 1 week of no regressions.
+**Phase A — grove-www:**
 
-## Migration & rollback
+- `src/components/dashboard-nav.tsx` — rewrite to 2 items (Home, Access)
+- `src/components/access-tabs.tsx` — new, tab strip with roving tabindex
+- `src/components/dashboard-access-hint.tsx` — new, dismissible first-time hint
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/layout.tsx` — tab strip wrapper
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/page.tsx` — redirect to `access/keys`
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/keys/page.tsx`
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/trails/page.tsx`
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/shares/page.tsx`
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/access/members/page.tsx` (+ URL-addressable drawer)
+- `src/components/user-table.tsx` → rename `member-table.tsx`
+- `next.config.ts` — add `redirects()` block for 6 legacy paths
+- `src/components/header.tsx` — add avatar menu; link to `/@<h>/profile` + `/@<h>/settings/vaults`
+- `test/legacy-redirects.spec.ts` — **extend** (do not create a new file). Required cases:
+  - 6 legacy → 6 new paths
+  - query + fragment preservation on each
+  - auth pass-through (non-owner still gets `/home` redirect)
+  - chain depth ≤ 1 hop
 
-- All redirects are additive; old URLs continue to resolve via 308. Bookmarks and inbound links keep working.
-- **308 caching trap:** if a legacy redirect target ever needs to be un-set, users with cached 308s are stuck. Mitigated by `max-age=3600` during rollout.
-- Rollback: revert the PR. Middleware redirects and moved pages go together; old routes return to canonical location. No DB impact.
-- No coordination required with the Grove backend team; pure `grove-www` PR.
+**Phase A — grove:**
 
-## Success criteria
+- `src/proxy.ts` — remove `handleStatusGraph` dispatch at `~:2323`
+- No DB migration, no schema change
 
-- `/@<h>/profile` and `/@<h>/settings/vaults` render correctly for the signed-in user.
-- Legacy `/@<h>/<v>/{profile,settings/vaults}` 308 to user-scoped equivalents in exactly 1 hop, with query and fragment preserved.
-- Bare `/profile` and `/settings` redirect straight to user-scoped canonical without MRU lookup.
-- `/@<h>` (bare handle, signed-in) 302s to MRU vault dashboard (**not 308**).
-- `/@<h>/<v>/settings` renders an empty-state page (does not redirect).
-- Vault switcher on user-scoped pages shows neutral "Switch to vault…" state; clicking a vault navigates to `/@<h>/<chosen>/dashboard`.
-- Login return-path round-trip lands user on the new canonical URL post-sign-in.
-- All `test/route-structure.spec.ts` cases pass.
-- Pre-merge checklist items completed.
+**Phase B — grove-www:**
+
+- `src/components/dashboard-home.tsx` — new composition
+- `src/components/dashboard-home/health-strip.tsx`
+- `src/components/dashboard-home/usage-card.tsx`
+- `src/components/dashboard-home/activity-feed.tsx`
+- `src/components/dashboard-home/vault-stats-card.tsx`
+- `src/components/dashboard-home/lifecycle-card.tsx`
+- `src/app/(resident)/[atHandle]/[vaultSlug]/dashboard/page.tsx` — swap Overview for Home
+- `next.config.ts` — extend `redirects()` with 2 more legacy paths
+
+**Phase B — grove:**
+
+- `src/proxy.ts` — new `/v1/admin/activity?limit=N` endpoint returning structured recent requests (JSON, not Prometheus text)
+- `src/metrics.ts` — expose a read-path for structured recent requests
+
+### Non-owner / viewer behavior
+
+Current state: `dashboard/layout.tsx:22` redirects non-owners to `/home`. The new Access route sits under the same layout, so this inheritance is automatic.
+
+When viewer roles are introduced (post-this-spec):
+- Access rail item hides if the viewer has no tabs they can see
+- Each Access tab checks its own permission server-side
+- Members drawer hides keys belonging to other members for non-admin viewers
+
+## Implementation order
+
+### Phase A — Access consolidation (ship first)
+
+**Single PR, grove-www + grove:**
+
+1. Add `redirects()` to `next.config.ts` for 6 legacy dashboard paths
+2. Create `access/` layout + 4 sub-routes, move existing page components
+3. Rename `users` → `members` (file move + component rename)
+4. Rewrite `DashboardNav` to 2 items
+5. Add avatar menu to `header.tsx` (depends on PR #29 merging first)
+6. Delete `/dashboard/graph/` + `/dashboard/lifecycle/`
+7. Remove `d3` + `@types/d3` from `package.json`
+8. Remove `/v1/status/graph` route in grove/proxy.ts
+9. Extend `test/legacy-redirects.spec.ts`
+10. Smoke test: every legacy URL 308s, every new URL renders, Graph 404s
+
+**Exit criteria:** 4 stated pains resolved (Graph gone, Usage still visible at own URL, Profile reachable via avatar, Access principals clustered). Stop here. Gather feedback.
+
+### Phase B — Home rebuild (gated on feedback)
+
+**Only pursue if Phase A feedback surfaces unmet need.** Do not bundle with A.
+
+1. Spec the `/v1/admin/activity` endpoint (new, structured — not `/metrics` scraping)
+2. Build 5 Home card components with their empty/loading/degraded states
+3. Replace Overview with Home composition
+4. Delete `/dashboard/usage/` and `/dashboard/health/`
+5. Add 2 more redirects to `next.config.ts`
+6. Extend redirect tests
+
+**Exit criteria:** Home p95 ≤1.5s above-the-fold; each card degrades independently; no card blocks siblings.
+
+### Phase C — observability + cleanup (30 days after Phase A)
+
+- Confirm via access logs that `/v1/status/graph` has zero external consumers before final teardown
+- Measure bundle size delta (expect ~50-80KB reduction from D3 drop)
+- Audit OAuth allowlists, email templates, docs for any legacy path references (same checklist pattern as P8-B6 pre-merge)
 
 ## Open questions
 
-None. Deferred items — account settings, cross-vault keys overview, vault-level settings (members, integrations, vault name), public profile — are intentionally out of scope and become future phases with their own specs.
+1. Does `/@<h>/<v>/settings` (P8-B6's empty-state page) eventually redirect to `/dashboard/access`, or stay distinct? **Deferred** — not blocking.
+2. If/when viewer roles land, what subset of Access do they see? **Deferred** — current state is owner-only.
+3. Any OAuth redirect allowlists or email templates referencing `/dashboard/{users,keys,shares,trails,graph,lifecycle}`? **Pre-merge audit required** (mirror P8-B6's checklist).
 
-## What this spec explicitly does NOT do
+## Success criteria (Phase A)
 
-- Does not build `/@<h>/settings/account` (account settings page). No backend endpoint exists yet.
-- Does not build `/@<h>/settings/keys` (cross-vault keys overview). Requires new `/v1/keys` endpoint scoped to user.
-- Does not build vault-level settings pages (members, integrations, vault name). Separate scope.
-- Does not introduce a public profile at `/@<h>`. Signed-in users land on MRU dashboard; unauthenticated visitors fall through to existing public-note handling at `/@<h>/<v>/<path>`.
-- Does not change any backend API, database schema, or MCP protocol.
+- Left rail shows exactly 2 items
+- All 6 legacy dashboard URLs 308 redirect to canonical paths, ≤1 hop
+- Query + fragment preserved on redirects
+- Graph page returns 404 (and re-added-in-prod would require new code)
+- D3 no longer in grove-www bundle
+- Profile is reachable in ≤1 click from any dashboard page via avatar menu
+- Zero broken incoming links (verified against email templates + OAuth allowlists)
+- `test/legacy-redirects.spec.ts` green
+- Existing table behaviors (Keys, Shares, Trails, Members) regress-free
+
+## Rollback plan
+
+- **Phase A is a two-way door** for frontend (file moves + redirects revert cleanly via git). The `d3` package can be re-added.
+- **Backend removal of `/v1/status/graph`** is effectively one-way once deployed. Mitigation: grep both repos + 7-day access-log sample before removing the route; keep `analyzeGraph()` so re-adding the HTTP surface is trivial.
+- **Phase B** is socially one-way — once Home is "the dashboard," owner expectation shifts. Mitigation: gate on Phase A feedback; don't ship B unless A's pain persists.
