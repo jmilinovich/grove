@@ -67,6 +67,7 @@ import {
   handleTrailPreview, handleTrailPreviewTest,
   VALID_STATUS_MODES,
   handleImageUpload,
+  defaultVaultContext,
   type StatusMode,
 } from "./rest.js";
 import { VaultLockedError } from "./index-crypto.js";
@@ -103,6 +104,9 @@ import {
   decideRoute,
   sunsetDate,
   lookupById as lookupVaultById,
+  lookupBySlug as lookupVaultBySlug,
+  contextFromRoute,
+  type VaultContext,
 } from "./vault-router.js";
 
 installCrashHandlers("grove-proxy");
@@ -1279,8 +1283,43 @@ const server = createServer(async (req, res) => {
   }
 
   // ── REST API v1 endpoints (for grove-www note viewer) ──────────────
-  // These are GET-only, Bearer-authed, CORS-locked to grove.md.
-  if (url.pathname.startsWith("/v1/")) {
+  // These are Bearer-authed, CORS-locked to grove.md, and accept either
+  // the legacy `/v1/*` path (which targets the proxy's bound vault) OR
+  // the multi-vault `/v/<slug>/v1/*` shape (routed to the matching
+  // vault's git repo via vault-router). `restPath` is the path the
+  // dispatch table below matches on; `restCtx` is the per-request vault
+  // context threaded into every rest.ts handler call.
+  let restPath = url.pathname;
+  let restCtx: VaultContext = defaultVaultContext();
+  const vaultV1Match = /^\/v\/([^/?#]+)(\/v1\/.*)$/.exec(url.pathname);
+  if (vaultV1Match) {
+    const slug = vaultV1Match[1]!;
+    const route = lookupVaultBySlug(slug);
+    if (!route) {
+      // Unknown slug — return 403 (not 404) so we don't leak which slugs exist.
+      structuredLog("warn", "vault.rest_route_denied", rid, {
+        url_slug: slug, reason: "unknown vault", status: 403,
+      });
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    // Bearer token must match the URL's vault. We re-validate here so
+    // vault-scoped REST traffic is gated even on paths that the legacy
+    // /v1/* handlers below would otherwise serve from the wrong vault.
+    const restAuthHeader = req.headers.authorization;
+    const restToken = restAuthHeader?.startsWith("Bearer ") ? restAuthHeader.slice(7) : null;
+    const restKey = restToken ? validateToken(restToken) : null;
+    if (!restKey || restKey.vault_id !== route.id) {
+      structuredLog("warn", "vault.rest_auth_denied", rid, {
+        url_slug: slug, token_vault_id: restKey?.vault_id ?? null, status: 403,
+      });
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    restPath = vaultV1Match[2]!;
+    restCtx = contextFromRoute(route);
+  }
+  if (restPath.startsWith("/v1/")) {
     const REST_CORS_ORIGIN = process.env.GROVE_WWW_ORIGIN ?? "https://grove.md";
 
     // CORS for /v1/* — locked to grove.md only
@@ -1296,7 +1335,7 @@ const server = createServer(async (req, res) => {
     }
 
     // ── Admin endpoints (session cookie or Bearer) ──
-    if (url.pathname === "/v1/admin/users" && req.method === "GET") {
+    if (restPath === "/v1/admin/users" && req.method === "GET") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1306,11 +1345,11 @@ const server = createServer(async (req, res) => {
     }
 
     // DELETE /v1/admin/users/:id — remove a user and all their data
-    if (url.pathname.startsWith("/v1/admin/users/") && req.method === "DELETE") {
+    if (restPath.startsWith("/v1/admin/users/") && req.method === "DELETE") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
-      const userId = url.pathname.slice("/v1/admin/users/".length);
+      const userId = restPath.slice("/v1/admin/users/".length);
       if (!userId) { sendJson(res, 400, { error: "user id required" }); return; }
 
       try {
@@ -1325,7 +1364,7 @@ const server = createServer(async (req, res) => {
     }
 
     // POST /v1/admin/invite — invite a user to a trail
-    if (url.pathname === "/v1/admin/invite" && req.method === "POST") {
+    if (restPath === "/v1/admin/invite" && req.method === "POST") {
       const admin = adminAuth(req);
       if (!admin) { sendJson(res, 401, { error: "unauthorized" }); return; }
 
@@ -1369,7 +1408,7 @@ const server = createServer(async (req, res) => {
 
     // ── Vault encryption lifecycle (admin only) ──
     // POST /v1/admin/vault/encrypt — enable encryption (generate + store wrapped key)
-    if (url.pathname === "/v1/admin/vault/encrypt" && req.method === "POST") {
+    if (restPath === "/v1/admin/vault/encrypt" && req.method === "POST") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1402,7 +1441,7 @@ const server = createServer(async (req, res) => {
     }
 
     // POST /v1/admin/vault/unlock — provide passphrase, decrypt key into memory
-    if (url.pathname === "/v1/admin/vault/unlock" && req.method === "POST") {
+    if (restPath === "/v1/admin/vault/unlock" && req.method === "POST") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1430,7 +1469,7 @@ const server = createServer(async (req, res) => {
     }
 
     // POST /v1/admin/vault/lock — purge the in-memory vault key
-    if (url.pathname === "/v1/admin/vault/lock" && req.method === "POST") {
+    if (restPath === "/v1/admin/vault/lock" && req.method === "POST") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1452,7 +1491,7 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/admin/vault/status — encryption + unlock state
-    if (url.pathname === "/v1/admin/vault/status" && req.method === "GET") {
+    if (restPath === "/v1/admin/vault/status" && req.method === "GET") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1465,7 +1504,7 @@ const server = createServer(async (req, res) => {
     }
 
     // POST /v1/admin/vault/change-passphrase — rewrap vault key under new passphrase
-    if (url.pathname === "/v1/admin/vault/change-passphrase" && req.method === "POST") {
+    if (restPath === "/v1/admin/vault/change-passphrase" && req.method === "POST") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1497,7 +1536,7 @@ const server = createServer(async (req, res) => {
     }
 
     // POST /v1/admin/share — create a share-a-note link (admin only)
-    if (url.pathname === "/v1/admin/share" && req.method === "POST") {
+    if (restPath === "/v1/admin/share" && req.method === "POST") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1544,7 +1583,7 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/admin/share — list share links for the owner
-    if (url.pathname === "/v1/admin/share" && req.method === "GET") {
+    if (restPath === "/v1/admin/share" && req.method === "GET") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1569,7 +1608,7 @@ const server = createServer(async (req, res) => {
     }
 
     // DELETE /v1/admin/share/:id — soft-revoke a share link
-    const adminShareDeleteMatch = url.pathname.match(/^\/v1\/admin\/share\/([^/]+)$/);
+    const adminShareDeleteMatch = restPath.match(/^\/v1\/admin\/share\/([^/]+)$/);
     if (adminShareDeleteMatch && req.method === "DELETE") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
@@ -1596,7 +1635,7 @@ const server = createServer(async (req, res) => {
 
     // ── Graph health (admin only) ──
     // GET /v1/admin/health/current — latest metrics snapshot + score
-    if (url.pathname === "/v1/admin/health/current" && req.method === "GET") {
+    if (restPath === "/v1/admin/health/current" && req.method === "GET") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1606,7 +1645,7 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/admin/health/history?days=30 — time series
-    if (url.pathname === "/v1/admin/health/history" && req.method === "GET") {
+    if (restPath === "/v1/admin/health/history" && req.method === "GET") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1622,7 +1661,7 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/admin/health/flags — unresolved flags
-    if (url.pathname === "/v1/admin/health/flags" && req.method === "GET") {
+    if (restPath === "/v1/admin/health/flags" && req.method === "GET") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
@@ -1632,7 +1671,7 @@ const server = createServer(async (req, res) => {
     }
 
     // POST /v1/admin/health/flags/:id/resolve — dismiss a flag
-    const resolveFlagMatch = url.pathname.match(/^\/v1\/admin\/health\/flags\/([^/]+)\/resolve$/);
+    const resolveFlagMatch = restPath.match(/^\/v1\/admin\/health\/flags\/([^/]+)\/resolve$/);
     if (resolveFlagMatch && req.method === "POST") {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
@@ -1646,7 +1685,7 @@ const server = createServer(async (req, res) => {
 
     // GET /v1/share/:id — resolve a share link (public, no auth required)
     // The share ID itself is the secret — anyone with the link can view.
-    const shareMatch = url.pathname.match(/^\/v1\/share\/([^/]+)$/);
+    const shareMatch = restPath.match(/^\/v1\/share\/([^/]+)$/);
     if (shareMatch && req.method === "GET") {
       // CORS: allow any origin for public share links
       res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1682,7 +1721,7 @@ const server = createServer(async (req, res) => {
       let noteContent: string | null = null;
       let noteTitle: string | null = null;
       try {
-        const note = await handleGetNote(link.note_path);
+        const note = await handleGetNote(restCtx, link.note_path);
         if (note) {
           noteContent = note.content;
           noteTitle = (note.frontmatter?.title as string) ?? link.note_path.replace(/\.md$/, "").split("/").pop() ?? null;
@@ -1710,10 +1749,10 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/trails/:id/info — public trail info (unauthenticated)
-    const trailInfoMatch = url.pathname.match(/^\/v1\/trails\/([^/]+)\/info$/);
+    const trailInfoMatch = restPath.match(/^\/v1\/trails\/([^/]+)\/info$/);
     if (trailInfoMatch && req.method === "GET") {
       const trailId = decodeURIComponent(trailInfoMatch[1]);
-      const info = handleTrailInfo(trailId);
+      const info = handleTrailInfo(restCtx, trailId);
       if (!info) {
         sendJson(res, 404, { error: "trail not found" });
         return;
@@ -1723,12 +1762,12 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/residents/:handle — public resident profile (unauthenticated, P16-1)
-    const residentMatch = url.pathname.match(/^\/v1\/residents\/([^/]+)$/);
+    const residentMatch = restPath.match(/^\/v1\/residents\/([^/]+)$/);
     if (residentMatch && req.method === "GET") {
       // CORS: allow any origin — profile pages render signed-out too.
       res.setHeader("Access-Control-Allow-Origin", "*");
       const handle = decodeURIComponent(residentMatch[1]);
-      const profile = handleResidentProfile(handle);
+      const profile = handleResidentProfile(restCtx, handle);
       if (!profile) {
         sendJson(res, 404, { error: "resident not found" });
         return;
@@ -1770,7 +1809,7 @@ const server = createServer(async (req, res) => {
     const restTrail = resolveTrail(restKey.id);
 
     // GET /v1/whoami — return identity for the current token
-    if (url.pathname === "/v1/whoami" && req.method === "GET") {
+    if (restPath === "/v1/whoami" && req.method === "GET") {
       res.writeHead(200, restHeaders);
       res.end(JSON.stringify({
         key_id: restKey.id,
@@ -1783,7 +1822,7 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/me — current user profile (P15-1)
-    if (url.pathname === "/v1/me" && req.method === "GET") {
+    if (restPath === "/v1/me" && req.method === "GET") {
       const user = getUserById(restKey.user_id);
       if (!user) {
         res.writeHead(404, restHeaders);
@@ -1865,7 +1904,7 @@ const server = createServer(async (req, res) => {
     }
 
     // PATCH /v1/me — update display name, handle, or bio (P15-1, P16-1)
-    if (url.pathname === "/v1/me" && req.method === "PATCH") {
+    if (restPath === "/v1/me" && req.method === "PATCH") {
       let body: string;
       try { body = await readBody(req); } catch {
         res.writeHead(400, restHeaders);
@@ -1943,7 +1982,7 @@ const server = createServer(async (req, res) => {
     }
 
     // DELETE /v1/me/sessions/:id — revoke a single session (P15-1)
-    const sessionMatch = url.pathname.match(/^\/v1\/me\/sessions\/([^/]+)$/);
+    const sessionMatch = restPath.match(/^\/v1\/me\/sessions\/([^/]+)$/);
     if (sessionMatch && req.method === "DELETE") {
       const sessionId = decodeURIComponent(sessionMatch[1]);
       const revoked = revokeUserSession(restKey.user_id, sessionId);
@@ -1958,7 +1997,7 @@ const server = createServer(async (req, res) => {
     }
 
     // DELETE /v1/me/sessions — revoke all sessions except current (P15-1)
-    if (url.pathname === "/v1/me/sessions" && req.method === "DELETE") {
+    if (restPath === "/v1/me/sessions" && req.method === "DELETE") {
       // Resolve the caller's current session via the bearer key's session_id so the
       // client doesn't have to supply it (and can't accidentally log itself out).
       const explicitKeep = (url.searchParams.get("keep") ?? "").trim();
@@ -1982,8 +2021,8 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/notes/* — fetch a single note with resolved links and backlinks
-    if (url.pathname.startsWith("/v1/notes/") && req.method === "GET") {
-      const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
+    if (restPath.startsWith("/v1/notes/") && req.method === "GET") {
+      const notePath = decodeURIComponent(restPath.slice("/v1/notes/".length));
       if (!notePath || notePath.includes("..")) {
         res.writeHead(400, restHeaders);
         res.end(JSON.stringify({ error: "invalid path" }));
@@ -1992,7 +2031,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.get_note", rid, { key_id: restKey.id, key_name: restKey.name, path: notePath });
       try {
-        const note = await handleGetNote(notePath, restTrail);
+        const note = await handleGetNote(restCtx, notePath, restTrail);
         if (!note) {
           res.writeHead(404, restHeaders);
           res.end(JSON.stringify({ error: "not found" }));
@@ -2013,8 +2052,8 @@ const server = createServer(async (req, res) => {
     }
 
     // PUT /v1/notes/* — create or update a note
-    if (url.pathname.startsWith("/v1/notes/") && req.method === "PUT") {
-      const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
+    if (restPath.startsWith("/v1/notes/") && req.method === "PUT") {
+      const notePath = decodeURIComponent(restPath.slice("/v1/notes/".length));
       if (!notePath || notePath.includes("..")) {
         res.writeHead(400, restHeaders);
         res.end(JSON.stringify({ error: "invalid path" }));
@@ -2051,7 +2090,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.put_note", rid, { key_id: restKey.id, key_name: restKey.name, path: notePath });
       try {
-        const result = await handleWriteNote(notePath, parsed.frontmatter, parsed.content, {
+        const result = await handleWriteNote(restCtx, notePath, parsed.frontmatter, parsed.content, {
           ifHash: ifMatch,
           trail: restTrail,
           keyName: restKey.name,
@@ -2079,8 +2118,8 @@ const server = createServer(async (req, res) => {
     }
 
     // DELETE /v1/notes/* — soft delete (archive) by default, hard delete with ?hard=true
-    if (url.pathname.startsWith("/v1/notes/") && req.method === "DELETE") {
-      const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
+    if (restPath.startsWith("/v1/notes/") && req.method === "DELETE") {
+      const notePath = decodeURIComponent(restPath.slice("/v1/notes/".length));
       if (!notePath || notePath.includes("..")) {
         res.writeHead(400, restHeaders);
         res.end(JSON.stringify({ error: "invalid path" }));
@@ -2093,7 +2132,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.delete_note", rid, { key_id: restKey.id, key_name: restKey.name, path: notePath, hard });
       try {
-        const result = await handleDeleteNote(notePath, {
+        const result = await handleDeleteNote(restCtx, notePath, {
           hard,
           ifHash: ifMatch,
           trail: restTrail,
@@ -2124,8 +2163,8 @@ const server = createServer(async (req, res) => {
     }
 
     // PATCH /v1/notes/* — currently only supports { move_to: <new-path> }
-    if (url.pathname.startsWith("/v1/notes/") && req.method === "PATCH") {
-      const notePath = decodeURIComponent(url.pathname.slice("/v1/notes/".length));
+    if (restPath.startsWith("/v1/notes/") && req.method === "PATCH") {
+      const notePath = decodeURIComponent(restPath.slice("/v1/notes/".length));
       if (!notePath || notePath.includes("..")) {
         res.writeHead(400, restHeaders);
         res.end(JSON.stringify({ error: "invalid path" }));
@@ -2160,7 +2199,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.move_note", rid, { key_id: restKey.id, key_name: restKey.name, from: notePath, to: parsed.move_to });
       try {
-        const result = await handleMoveNote(notePath, parsed.move_to, {
+        const result = await handleMoveNote(restCtx, notePath, parsed.move_to, {
           ifHash: ifMatch,
           trail: restTrail,
           keyName: restKey.name,
@@ -2190,7 +2229,7 @@ const server = createServer(async (req, res) => {
     }
 
     // POST /v1/images — upload an image + companion note
-    if (url.pathname === "/v1/images" && req.method === "POST") {
+    if (restPath === "/v1/images" && req.method === "POST") {
       const boundary = parseBoundary(req.headers["content-type"]);
       if (!boundary) {
         res.writeHead(400, restHeaders);
@@ -2237,6 +2276,7 @@ const server = createServer(async (req, res) => {
 
       try {
         const result = await handleImageUpload(
+          restCtx,
           {
             file: fileField.data,
             contentType: fileField.contentType,
@@ -2268,7 +2308,7 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/search?q=...&limit=N — hybrid search
-    if (url.pathname === "/v1/search" && req.method === "GET") {
+    if (restPath === "/v1/search" && req.method === "GET") {
       const query = url.searchParams.get("q") ?? "";
       const limit = Math.min(Number(url.searchParams.get("limit") ?? 10), 50);
       if (!query) {
@@ -2279,7 +2319,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.search", rid, { key_id: restKey.id, key_name: restKey.name, query, limit });
       try {
-        const results = await handleSearch(query, limit, restTrail);
+        const results = await handleSearch(restCtx, query, limit, restTrail);
         res.writeHead(200, restHeaders);
         res.end(JSON.stringify({ results }));
       } catch (err) {
@@ -2296,7 +2336,7 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/list?prefix=&type=... — list notes under a path prefix, optionally filtered by frontmatter type
-    if (url.pathname === "/v1/list" && req.method === "GET") {
+    if (restPath === "/v1/list" && req.method === "GET") {
       const prefix = url.searchParams.get("prefix") ?? "";
       const type = url.searchParams.get("type");
       if (prefix.includes("..")) {
@@ -2307,7 +2347,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.list", rid, { key_id: restKey.id, key_name: restKey.name, prefix, type: type ?? undefined });
       try {
-        const entries = handleListNotes(prefix, restTrail, type);
+        const entries = handleListNotes(restCtx, prefix, restTrail, type);
         res.writeHead(200, restHeaders);
         res.end(JSON.stringify({ prefix, type: type ?? null, entries }));
       } catch (err) {
@@ -2319,7 +2359,7 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/stats?sections=vault,graph — vault analytics
-    if (url.pathname === "/v1/stats" && req.method === "GET") {
+    if (restPath === "/v1/stats" && req.method === "GET") {
       const sectionsParam = url.searchParams.get("sections");
       const sections = sectionsParam ? sectionsParam.split(",").map(s => s.trim()) : undefined;
 
@@ -2328,7 +2368,7 @@ const server = createServer(async (req, res) => {
 
       structuredLog("info", "rest.stats", rid, { key_id: restKey.id, key_name: restKey.name, sections: sections?.join(",") });
 
-      const stats = handleStats(sections, restTrail, isAdmin);
+      const stats = handleStats(restCtx, sections, restTrail, isAdmin);
       if (!stats) {
         res.writeHead(503, restHeaders);
         res.end(JSON.stringify({ error: "stats not yet computed, try again shortly" }));
@@ -2340,7 +2380,7 @@ const server = createServer(async (req, res) => {
     }
 
     // GET /v1/status/:mode — vault status endpoints
-    const statusMatch = url.pathname.match(/^\/v1\/status\/([a-z]+)$/);
+    const statusMatch = restPath.match(/^\/v1\/status\/([a-z]+)$/);
     if (statusMatch && req.method === "GET") {
       const mode = statusMatch[1] as StatusMode;
       if (!VALID_STATUS_MODES.has(mode)) {
@@ -2356,7 +2396,7 @@ const server = createServer(async (req, res) => {
 
         switch (mode) {
           case "health":
-            result = handleStatusHealth(restTrail);
+            result = handleStatusHealth(restCtx, restTrail);
             if (!result) {
               res.writeHead(503, restHeaders);
               res.end(JSON.stringify({ error: "stats not yet computed, try again shortly" }));
@@ -2366,17 +2406,17 @@ const server = createServer(async (req, res) => {
           case "history": {
             const since = url.searchParams.get("since") ?? undefined;
             const pathPrefix = url.searchParams.get("path_prefix") ?? undefined;
-            result = await handleStatusHistory(since, pathPrefix);
+            result = await handleStatusHistory(restCtx, since, pathPrefix);
             break;
           }
           case "diagnostics":
-            result = handleStatusDiagnostics();
+            result = handleStatusDiagnostics(restCtx, );
             break;
           case "graph":
-            result = await handleStatusGraph();
+            result = await handleStatusGraph(restCtx, );
             break;
           case "digest":
-            result = await handleStatusDigest();
+            result = await handleStatusDigest(restCtx, );
             break;
         }
 
@@ -2391,7 +2431,7 @@ const server = createServer(async (req, res) => {
     }
 
     // POST /v1/admin/trails — list, create, update, delete (admin only)
-    if (url.pathname === "/v1/admin/trails" && req.method === "POST") {
+    if (restPath === "/v1/admin/trails" && req.method === "POST") {
       if (restTrail || getUserRole(restKey.user_id) !== "owner") {
         // Trail-scoped keys and non-owners cannot manage trails
         res.writeHead(403, restHeaders);
@@ -2474,7 +2514,7 @@ const server = createServer(async (req, res) => {
 
     // GET /v1/admin/trails/:id/preview — live preview of notes matching a proposed scope (admin only)
     // :id is for context only; the scope comes from query params so new trails can be previewed too.
-    const trailPreviewMatch = url.pathname.match(/^\/v1\/admin\/trails\/([^/]+)\/preview$/);
+    const trailPreviewMatch = restPath.match(/^\/v1\/admin\/trails\/([^/]+)\/preview$/);
     if (trailPreviewMatch && req.method === "GET") {
       if (restTrail || getUserRole(restKey.user_id) !== "owner") {
         res.writeHead(403, restHeaders);
@@ -2498,7 +2538,7 @@ const server = createServer(async (req, res) => {
 
       const testPath = url.searchParams.get("test_path");
       if (testPath) {
-        const result = handleTrailPreviewTest(testPath, scope);
+        const result = handleTrailPreviewTest(restCtx, testPath, scope);
         if (!result) {
           res.writeHead(404, restHeaders);
           res.end(JSON.stringify({ error: "note not found" }));
@@ -2511,14 +2551,14 @@ const server = createServer(async (req, res) => {
 
       const sampleLimitRaw = url.searchParams.get("sample_limit");
       const sampleLimit = sampleLimitRaw ? Math.max(0, Math.min(100, parseInt(sampleLimitRaw, 10) || 10)) : 10;
-      const result = handleTrailPreview(scope, sampleLimit);
+      const result = handleTrailPreview(restCtx, scope, sampleLimit);
       res.writeHead(200, restHeaders);
       res.end(JSON.stringify(result));
       return;
     }
 
     // GET /v1/admin/trails/:id/usage — per-trail usage metrics (admin only)
-    const trailUsageMatch = url.pathname.match(/^\/v1\/admin\/trails\/([^/]+)\/usage$/);
+    const trailUsageMatch = restPath.match(/^\/v1\/admin\/trails\/([^/]+)\/usage$/);
     if (trailUsageMatch && req.method === "GET") {
       const auth = adminAuth(req);
       if (!auth.ok) {
@@ -2631,7 +2671,11 @@ const server = createServer(async (req, res) => {
   // scope". Legacy (non-slug) paths fall through to the existing handlers
   // unchanged.
   if (vaultParsed.slug !== null && backendPath !== "/mcp") {
-    structuredLog("info", "vault.scoped_rest_not_supported", rid, {
+    // /v/<slug>/v1/* and /v/<slug>/health are handled in earlier blocks
+    // (the REST preprocessing + the pre-auth health route). Anything else
+    // under /v/<slug>/ is unrecognized — 404 to avoid leaking it through
+    // to the legacy QMD fallback below.
+    structuredLog("info", "vault.scoped_path_not_recognized", rid, {
       key_id: key.id,
       key_name: key.name,
       url_slug: vaultParsed.slug,
@@ -2639,10 +2683,7 @@ const server = createServer(async (req, res) => {
       status: 404,
     });
     res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      error: "not found",
-      detail: "vault-scoped REST paths are not yet supported; use /v1/* with a vault-bound token",
-    }));
+    res.end(JSON.stringify({ error: "not found" }));
     return;
   }
 

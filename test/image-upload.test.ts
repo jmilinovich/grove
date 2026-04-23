@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { defaultVaultContext } from "../src/rest.js";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -98,7 +99,7 @@ describe("handleImageUpload", () => {
     }));
 
     const png = makePngHeader(1920, 1080);
-    const result = await rest.handleImageUpload({
+    const result = await rest.handleImageUpload(defaultVaultContext(), {
       file: png,
       contentType: "image/png",
       filename: "diagram.png",
@@ -148,7 +149,7 @@ describe("handleImageUpload", () => {
     }));
 
     const png = makePngHeader(100, 200);
-    const result = await rest.handleImageUpload({
+    const result = await rest.handleImageUpload(defaultVaultContext(), {
       file: png,
       contentType: "image/png",
       tags: ["travel", "nature"],
@@ -174,7 +175,7 @@ describe("handleImageUpload", () => {
     rest.setAutoTagFn(async () => ({ description: "", tags: [], concepts: [], ocr_text: "" }));
 
     await expect(
-      rest.handleImageUpload({
+      rest.handleImageUpload(defaultVaultContext(), {
         file: Buffer.from("some-text"),
         contentType: "application/pdf",
       }),
@@ -192,7 +193,7 @@ describe("handleImageUpload", () => {
 
     const tooBig = Buffer.alloc(10 * 1024 * 1024 + 1);
     await expect(
-      rest.handleImageUpload({ file: tooBig, contentType: "image/png" }),
+      rest.handleImageUpload(defaultVaultContext(), { file: tooBig, contentType: "image/png" }),
     ).rejects.toMatchObject({ code: "PAYLOAD_TOO_LARGE" });
   });
 
@@ -206,7 +207,7 @@ describe("handleImageUpload", () => {
     rest.setAutoTagFn(async () => ({ description: "", tags: [], concepts: [], ocr_text: "" }));
 
     await expect(
-      rest.handleImageUpload({ file: Buffer.alloc(0), contentType: "image/png" }),
+      rest.handleImageUpload(defaultVaultContext(), { file: Buffer.alloc(0), contentType: "image/png" }),
     ).rejects.toMatchObject({ code: "VALIDATION" });
   });
 
@@ -235,7 +236,7 @@ describe("handleImageUpload", () => {
 
     const png = makePngHeader(10, 10);
     await expect(
-      rest.handleImageUpload({ file: png, contentType: "image/png" }, { trail }),
+      rest.handleImageUpload(defaultVaultContext(), { file: png, contentType: "image/png" }, { trail }),
     ).rejects.toMatchObject({ code: "TRAIL_DENIED" });
   });
 
@@ -255,9 +256,9 @@ describe("handleImageUpload", () => {
 
     const { enqueueDiscovery } = await import("../src/db.js");
     const png = makePngHeader(10, 10);
-    const result = await rest.handleImageUpload({ file: png, contentType: "image/png" });
+    const result = await rest.handleImageUpload(defaultVaultContext(), { file: png, contentType: "image/png" });
 
-    expect(enqueueDiscovery).toHaveBeenCalledWith(result.note_path, "write");
+    expect(enqueueDiscovery).toHaveBeenCalledWith(result.note_path, "write", expect.any(String));
   });
 
   it("uses provided path when supplied", async () => {
@@ -275,7 +276,7 @@ describe("handleImageUpload", () => {
     }));
 
     const png = makePngHeader(10, 10);
-    const result = await rest.handleImageUpload({
+    const result = await rest.handleImageUpload(defaultVaultContext(), {
       file: png,
       contentType: "image/png",
       path: "Resources/Images/explicit-name.md",

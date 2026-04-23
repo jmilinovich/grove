@@ -48,6 +48,14 @@ function getVaultId(): string {
 /** Default processor — extracts entities and wires wikilinks. */
 const defaultProcessor: Processor = async (entry) => {
   const vaultPath = getVaultPath();
+  // Build a per-process VaultContext for the rest.ts entry points the
+  // processor calls into. The discovery worker is pinned to one vault per
+  // PM2 process, so this context is stable for the worker's lifetime.
+  const ctx = {
+    vaultPath,
+    vaultId: getVaultId(),
+    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",
+  };
 
   // Embed-retry entries skip entity extraction; they just re-run the
   // embed step for a note whose fire-and-forget embed failed earlier.
@@ -74,7 +82,7 @@ const defaultProcessor: Processor = async (entry) => {
       );
     }
     console.log(`[discovery] image enrich (attempt ${entry.attempts}) for ${entry.path}`);
-    const result = await enrichImageNote(vaultPath, entry.path);
+    const result = await enrichImageNote(ctx, entry.path);
     if (result.skipped) {
       console.log(`[discovery] image enrich skipped (already enriched): ${entry.path}`);
     } else {

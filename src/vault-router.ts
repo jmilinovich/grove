@@ -19,6 +19,29 @@ export interface VaultRoute {
   slug: string;
   server_port: number;
   discovery_port: number;
+  /** On-disk git checkout for this vault (vaults.git_repo_path). */
+  git_repo_path: string;
+}
+
+/**
+ * Per-request vault context. Threaded through every REST handler so the
+ * proxy (a single shared process) can serve multiple vaults without the
+ * old module-level `VAULT_PATH` constant baking one vault's path into
+ * every read/write.
+ */
+export interface VaultContext {
+  vaultPath: string;
+  vaultId: string;
+  vaultSlug: string;
+}
+
+/** Build a VaultContext from a routed vault entry. */
+export function contextFromRoute(route: VaultRoute): VaultContext {
+  return {
+    vaultPath: route.git_repo_path,
+    vaultId: route.id,
+    vaultSlug: route.slug,
+  };
 }
 
 // Reserved URL-level slugs that collide with the proxy's own routes. Kept
@@ -57,7 +80,7 @@ export function loadVaultMap(): number {
   const db = getDb();
   const rows = db
     .prepare(
-      `SELECT id, slug, server_port, discovery_port
+      `SELECT id, slug, server_port, discovery_port, git_repo_path
          FROM vaults
         WHERE server_port IS NOT NULL AND discovery_port IS NOT NULL`,
     )

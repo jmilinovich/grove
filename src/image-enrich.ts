@@ -16,12 +16,14 @@ import { readFileSync, existsSync } from "node:fs";
 import { handleWriteNote } from "./rest.js";
 import { autoTagImage } from "./image-tag.js";
 import { parseNote } from "./notes-validate.js";
+import type { VaultContext } from "./vault-router.js";
 
 /** Enrich a previously-uploaded image note in place. */
 export async function enrichImageNote(
-  vaultPath: string,
+  ctx: VaultContext,
   notePath: string,
 ): Promise<{ tags_added: number; description_length: number; skipped: boolean }> {
+  const vaultPath = ctx.vaultPath;
   const abs = join(vaultPath, notePath);
   if (!existsSync(abs)) {
     throw new Error(`image note not found: ${notePath}`);
@@ -78,7 +80,7 @@ export async function enrichImageNote(
   const headline = `# ${title.replace(/\b\w/g, (c) => c.toUpperCase())}`;
   const newContent = `${headline}\n\n${tagResult.description}\n\n![${title}](${imageUrl})\n`;
 
-  await handleWriteNote(notePath, newFrontmatter, newContent, {
+  await handleWriteNote(ctx, notePath, newFrontmatter, newContent, {
     keyName: "image-enrich",
   });
 

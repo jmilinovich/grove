@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { defaultVaultContext } from "../src/rest.js";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -60,7 +61,7 @@ describe("resolveNote — QMD codepoint-slug compatibility", () => {
     const { handleGetNote } = await loadRest();
 
     const qmdPath = "sources/2025-12-29-iamemily2050-the-system-prompt-is-out-have-fun-1faf6-system.md";
-    const note = await handleGetNote(qmdPath);
+    const note = await handleGetNote(defaultVaultContext(), qmdPath);
     expect(note).not.toBeNull();
     expect(note!.path).toBe(`Sources/${diskName}`);
   });
@@ -74,7 +75,7 @@ describe("resolveNote — QMD codepoint-slug compatibility", () => {
     const { handleGetNote } = await loadRest();
 
     const qmdPath = "sources/2026-03-16-pelaseyed-introducing-infinite-monitor-1f310-monitor-any-situat.md";
-    const note = await handleGetNote(qmdPath);
+    const note = await handleGetNote(defaultVaultContext(), qmdPath);
     expect(note).not.toBeNull();
     expect(note!.path).toBe(`Sources/${diskName}`);
   });
@@ -88,7 +89,7 @@ describe("resolveNote — QMD codepoint-slug compatibility", () => {
     writeFileSync(join(dir, "Week of 2026-03-02.md"), "---\ntype: journal\n---\nNotes");
 
     const { handleGetNote } = await loadRest();
-    const note = await handleGetNote("areas/meal-planning/weekly-plans/week-of-2026-03-02.md");
+    const note = await handleGetNote(defaultVaultContext(), "areas/meal-planning/weekly-plans/week-of-2026-03-02.md");
     expect(note).not.toBeNull();
     expect(note!.path).toBe("Areas/Meal Planning/Weekly Plans/Week of 2026-03-02.md");
   });

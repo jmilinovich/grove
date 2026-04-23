@@ -11,6 +11,7 @@ import {
   parseVaultPath,
   decideRoute,
   vaultMapSize,
+  contextFromRoute,
   RESERVED_SLUGS,
   SLUG_PATTERN,
   sunsetDate,
@@ -52,9 +53,24 @@ describe("vault-router (P8-A2)", () => {
     expect(personal).not.toBeNull();
     expect(personal!.id).toBe("vault_00000000");
     expect(personal!.server_port).toBe(8190);
+    // git_repo_path threads through so the proxy can build a VaultContext
+    // from the in-memory map without a separate DB lookup per request.
+    expect(personal!.git_repo_path).toBe("/root/life");
 
     expect(lookupById("vault_team")?.slug).toBe("team");
+    expect(lookupById("vault_team")?.git_repo_path).toBe("/root/vaults/team");
     expect(lookupBySlug("ghost")).toBeNull();
+  });
+
+  it("contextFromRoute builds a VaultContext from a routed vault", () => {
+    loadVaultMap();
+    const route = lookupBySlug("team")!;
+    const ctx = contextFromRoute(route);
+    expect(ctx).toEqual({
+      vaultPath: "/root/vaults/team",
+      vaultId: "vault_team",
+      vaultSlug: "team",
+    });
   });
 
   it("skips vaults without server_port/discovery_port (not yet provisioned)", () => {

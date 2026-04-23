@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { defaultVaultContext } from "../src/rest.js";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -58,7 +59,7 @@ describe("handleWriteNote", () => {
   it("creates a new note and returns expected fields", async () => {
     const { handleWriteNote } = await loadRest();
 
-    const result = await handleWriteNote(
+    const result = await handleWriteNote(defaultVaultContext(), 
       "Inbox/test-note.md",
       { type: "concept", tags: ["test"] },
       "# Test\n\nHello world",
@@ -89,7 +90,7 @@ describe("handleWriteNote", () => {
     writeFileSync(join(tempVault, "Inbox/existing.md"), initial);
     const hash = contentHash(initial);
 
-    const result = await handleWriteNote(
+    const result = await handleWriteNote(defaultVaultContext(), 
       "Inbox/existing.md",
       { type: "concept", tags: ["test", "updated"] },
       "Updated content",
@@ -109,7 +110,7 @@ describe("handleWriteNote", () => {
     writeFileSync(join(tempVault, "Inbox/conflict.md"), "---\ntype: concept\ntags:\n  - test\n---\nV1");
 
     try {
-      await handleWriteNote(
+      await handleWriteNote(defaultVaultContext(), 
         "Inbox/conflict.md",
         { type: "concept", tags: ["test"] },
         "V2",
@@ -126,7 +127,7 @@ describe("handleWriteNote", () => {
     const { handleWriteNote } = await loadRest();
 
     try {
-      await handleWriteNote(
+      await handleWriteNote(defaultVaultContext(), 
         "Inbox/bad.md",
         { tags: ["test"] },
         "content",
@@ -143,7 +144,7 @@ describe("handleWriteNote", () => {
     const { handleWriteNote } = await loadRest();
 
     try {
-      await handleWriteNote(
+      await handleWriteNote(defaultVaultContext(), 
         "../etc/passwd.md",
         { type: "concept", tags: ["test"] },
         "content",
@@ -172,7 +173,7 @@ describe("handleWriteNote", () => {
     };
 
     try {
-      await handleWriteNote(
+      await handleWriteNote(defaultVaultContext(), 
         "Journal/2026/2026-04-13.md",
         { type: "journal", tags: ["journal"], date: "2026-04-13" },
         "content",
@@ -187,7 +188,7 @@ describe("handleWriteNote", () => {
   it("creates parent directories when they don't exist", async () => {
     const { handleWriteNote } = await loadRest();
 
-    await handleWriteNote(
+    await handleWriteNote(defaultVaultContext(), 
       "Resources/Concepts/deep/nested/note.md",
       { type: "concept", tags: ["test"] },
       "nested content",
@@ -201,7 +202,7 @@ describe("handleWriteNote", () => {
     const { handleWriteNote } = await loadRest();
     const { gitCommit } = await import("../src/vault-ops.js");
 
-    await handleWriteNote(
+    await handleWriteNote(defaultVaultContext(), 
       "Inbox/key-test.md",
       { type: "concept", tags: ["test"] },
       "content",
@@ -228,7 +229,7 @@ describe("handleWriteNote — two-hash model", () => {
   it("returns source_hash alongside content_hash, equal at write time", async () => {
     const { handleWriteNote } = await loadRest();
 
-    const result = await handleWriteNote(
+    const result = await handleWriteNote(defaultVaultContext(), 
       "Inbox/hash-test.md",
       { type: "concept", tags: ["test"] },
       "body",
@@ -246,7 +247,7 @@ describe("handleWriteNote — two-hash model", () => {
     // still holds the original source_hash, which must continue to validate.
     const { handleWriteNote } = await loadRest();
 
-    const first = await handleWriteNote(
+    const first = await handleWriteNote(defaultVaultContext(), 
       "Inbox/drift.md",
       { type: "concept", tags: ["test"] },
       "original body",
@@ -261,7 +262,7 @@ describe("handleWriteNote — two-hash model", () => {
     writeFileSync(abs, current.replace("original body", "[[SomeConcept|original body]]"));
 
     // A follow-up update with the caller's original source_hash must succeed.
-    const second = await handleWriteNote(
+    const second = await handleWriteNote(defaultVaultContext(), 
       "Inbox/drift.md",
       { type: "concept", tags: ["test"] },
       "second body",
@@ -275,7 +276,7 @@ describe("handleWriteNote — two-hash model", () => {
   it("rejects if_hash that doesn't match the recorded source_hash", async () => {
     const { handleWriteNote } = await loadRest();
 
-    await handleWriteNote(
+    await handleWriteNote(defaultVaultContext(), 
       "Inbox/conflict-prov.md",
       { type: "concept", tags: ["test"] },
       "v1",
@@ -283,7 +284,7 @@ describe("handleWriteNote — two-hash model", () => {
     );
 
     try {
-      await handleWriteNote(
+      await handleWriteNote(defaultVaultContext(), 
         "Inbox/conflict-prov.md",
         { type: "concept", tags: ["test"] },
         "v2",
@@ -311,7 +312,7 @@ describe("handleWriteNote — two-hash model", () => {
 
     // if_hash matching the disk content succeeds — we fall back to reading
     // the file when no provenance row is found.
-    const result = await handleWriteNote(
+    const result = await handleWriteNote(defaultVaultContext(), 
       "Inbox/legacy.md",
       { type: "concept", tags: ["test"] },
       "new body",

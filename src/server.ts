@@ -85,6 +85,18 @@ const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 const PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
 const VAULT_CONFIG: VaultConfig = loadVaultConfig(VAULT_PATH);
 
+// grove-server is pinned to one vault per PM2 process. Build the
+// VaultContext once from env so every rest.ts handler call reuses the
+// same identity. The slug is best-effort — proxy already enforces
+// `X-Grove-Vault-Id` matching, so a missing slug here is a logging-only
+// concern, not a correctness one.
+import type { VaultContext } from "./vault-router.js";
+const SERVER_VAULT_CONTEXT: VaultContext = {
+  vaultPath: VAULT_PATH,
+  vaultId: process.env.GROVE_VAULT_ID ?? "vault_00000000",
+  vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",
+};
+
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 const idempotencyCache = new IdempotencyCache(1000, 3_600_000);
 
@@ -160,7 +172,7 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
       });
     }
     try {
-      const result = await deps.handleWriteBatch(parsedOps, { atomic: input.atomic, trail });
+      const result = await deps.handleWriteBatch(SERVER_VAULT_CONTEXT, parsedOps, { atomic: input.atomic, trail });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err: any) {
       return { content: [{ type: "text", text: err.message }], isError: true };
@@ -175,7 +187,7 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
 
   if (act === "delete" || act === "hard_delete") {
     try {
-      const result = await deps.handleDeleteNote(notePath, {
+      const result = await deps.handleDeleteNote(SERVER_VAULT_CONTEXT, notePath, {
         hard: act === "hard_delete",
         ifHash: input.if_hash,
         trail,
@@ -191,7 +203,7 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
       return { content: [{ type: "text", text: "move_to is required when action is 'move'" }], isError: true };
     }
     try {
-      const result = await deps.handleMoveNote(notePath, input.move_to, {
+      const result = await deps.handleMoveNote(SERVER_VAULT_CONTEXT, notePath, input.move_to, {
         ifHash: input.if_hash,
         trail,
       });
@@ -212,7 +224,7 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
   }
 
   try {
-    const result = await deps.handleWriteNote(notePath, frontmatter, input.content, {
+    const result = await deps.handleWriteNote(SERVER_VAULT_CONTEXT, notePath, frontmatter, input.content, {
       ifHash: input.if_hash,
       trail,
     });

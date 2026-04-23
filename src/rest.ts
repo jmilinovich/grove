@@ -47,17 +47,53 @@ import {
 } from "./db.js";
 import { getImageStore, contentKey, extForContentType, type ImageStore } from "./image-store.js";
 import { autoTagImage, type ImageTagResult } from "./image-tag.js";
+import { type VaultContext } from "./vault-router.js";
 
-const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
+/**
+ * Build a `VaultContext` from the legacy single-vault env vars.
+ *
+ * Used by tests and any caller that doesn't (yet) supply a real per-request
+ * context. Production traffic comes through the proxy, which always builds a
+ * context from the routed vault row — so this fallback only matters for
+ * unit-test invocations and the tail end of the legacy code path that hasn't
+ * threaded `ctx` through yet.
+ */
+export function defaultVaultContext(): VaultContext {
+  return {
+    vaultPath: process.env.GROVE_VAULT ?? join(homedir(), "life"),
+    vaultId: process.env.GROVE_VAULT_ID ?? "vault_00000000",
+    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",
+  };
+}
 
-// ── Shared write queue (serializes all writes within this process) ──
+// ── Per-vault write queues (serializes writes within each vault) ────
+// One PM2 process serves many vaults via the proxy, so we can't reuse a
+// single module-level queue — that would force vault X's writes to wait
+// behind vault Y's git op. Each vault gets its own queue, lazily created
+// on first write. CLAUDE.md rule #3 (writes serialized per-repo) holds
+// inside each queue; cross-vault writes proceed in parallel.
 
-const writeQueue = new WriteQueue();
-writeQueue.schedulePush(() => gitPush(VAULT_PATH));
+const writeQueueByVault = new Map<string, WriteQueue>();
 
-/** Flush pending writes and push — call on graceful shutdown. */
+function getWriteQueue(ctx: VaultContext): WriteQueue {
+  let q = writeQueueByVault.get(ctx.vaultId);
+  if (!q) {
+    q = new WriteQueue();
+    // Capture vaultPath at queue-creation time — this closure runs after
+    // every drain to push the per-vault repo. The map keys by vault_id so
+    // a vault can never silently bind to a different path mid-process.
+    const pushPath = ctx.vaultPath;
+    q.schedulePush(() => gitPush(pushPath));
+    writeQueueByVault.set(ctx.vaultId, q);
+  }
+  return q;
+}
+
+/** Flush pending writes across every known vault — call on graceful shutdown. */
 export async function flushWriteQueue(): Promise<void> {
-  await writeQueue.flush();
+  await Promise.all(
+    Array.from(writeQueueByVault.values()).map((q) => q.flush()),
+  );
 }
 
 /**
@@ -133,7 +169,7 @@ interface ResolvedNote {
   resolved_from?: string;
 }
 
-async function resolveNote(file: string): Promise<ResolvedNote | null> {
+async function resolveNote(ctx: VaultContext, file: string): Promise<ResolvedNote | null> {
   // 1. Normalize
   let filePath = file.replace(/^(life\/|qmd:\/\/life\/)/, "");
   if (!filePath.endsWith(".md")) filePath += ".md";
@@ -148,16 +184,16 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
   };
 
   // 2. Direct path
-  const abs = sanitizePath(VAULT_PATH, filePath);
+  const abs = sanitizePath(ctx.vaultPath, filePath);
   if (!abs) return null;
   if (existsSync(abs)) return readNote(abs, filePath);
 
   // 3. Case-insensitive full path match (handles Resources/ vs resources/)
-  const allNotes = listNotes(VAULT_PATH, "*");
+  const allNotes = listNotes(ctx.vaultPath, "*");
   const filePathLower = filePath.toLowerCase();
   const pathMatch = allNotes.find((n) => n.path.toLowerCase() === filePathLower);
   if (pathMatch) {
-    const matchAbs = join(VAULT_PATH, pathMatch.path);
+    const matchAbs = join(ctx.vaultPath, pathMatch.path);
     if (existsSync(matchAbs)) return readNote(matchAbs, pathMatch.path, file);
   }
 
@@ -170,7 +206,7 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
     const year = dateMatch[1];
     for (const y of [year, String(new Date().getFullYear())]) {
       const journalPath = `Journal/${y}/${searchTerm}.md`;
-      const journalAbs = join(VAULT_PATH, journalPath);
+      const journalAbs = join(ctx.vaultPath, journalPath);
       if (existsSync(journalAbs)) return readNote(journalAbs, journalPath, file);
     }
   }
@@ -179,7 +215,7 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
   const searchLower = searchTerm.toLowerCase();
   const nameMatch = allNotes.find((n) => n.name.toLowerCase() === searchLower);
   if (nameMatch) {
-    const matchAbs = join(VAULT_PATH, nameMatch.path);
+    const matchAbs = join(ctx.vaultPath, nameMatch.path);
     if (existsSync(matchAbs)) return readNote(matchAbs, nameMatch.path, file);
   }
 
@@ -188,7 +224,7 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
   const searchKebab = toKebab(searchTerm);
   const kebabMatch = allNotes.find((n) => toKebab(n.name) === searchKebab);
   if (kebabMatch) {
-    const matchAbs = join(VAULT_PATH, kebabMatch.path);
+    const matchAbs = join(ctx.vaultPath, kebabMatch.path);
     if (existsSync(matchAbs)) return readNote(matchAbs, kebabMatch.path, file);
   }
 
@@ -208,18 +244,18 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
       (n) => toKebab(n.name) === searchKebabCollapsed,
     );
     if (collapsedMatch) {
-      const matchAbs = join(VAULT_PATH, collapsedMatch.path);
+      const matchAbs = join(ctx.vaultPath, collapsedMatch.path);
       if (existsSync(matchAbs)) return readNote(matchAbs, collapsedMatch.path, file);
     }
   }
 
   // 7. Alias search
-  const aliasNotes = listNotes(VAULT_PATH, "*", { includeAliases: true });
+  const aliasNotes = listNotes(ctx.vaultPath, "*", { includeAliases: true });
   const aliasMatch = aliasNotes.find(
     (n) => n.aliases?.some((a: string) => a.toLowerCase() === searchLower),
   );
   if (aliasMatch) {
-    const matchAbs = join(VAULT_PATH, aliasMatch.path);
+    const matchAbs = join(ctx.vaultPath, aliasMatch.path);
     if (existsSync(matchAbs)) return readNote(matchAbs, aliasMatch.path, file);
   }
 
@@ -230,7 +266,7 @@ async function resolveNote(file: string): Promise<ResolvedNote | null> {
       const resolvedLower = results[0].vault_path.toLowerCase();
       const realNote = allNotes.find((n) => n.path.toLowerCase() === resolvedLower);
       const realPath = realNote?.path ?? results[0].vault_path;
-      const resolvedAbs = join(VAULT_PATH, realPath);
+      const resolvedAbs = join(ctx.vaultPath, realPath);
       if (existsSync(resolvedAbs)) return readNote(resolvedAbs, realPath, file);
     }
   } catch {
@@ -256,21 +292,24 @@ function walkMd(dir: string, acc: string[] = []): string[] {
   return acc;
 }
 
-// Cache backlinks index — rebuilt lazily, invalidated on a timer
-let backlinkIndex: Map<string, string[]> | null = null;
-let backlinkIndexAge = 0;
+// Per-vault backlink cache — rebuilt lazily, invalidated on a timer.
+// Each vault has its own cache so cross-vault traffic doesn't churn one
+// shared index. Key by vault_id (not vaultPath) so renames or fs-link
+// changes don't accidentally split the cache.
+const backlinkIndexByVault = new Map<string, { index: Map<string, string[]>; age: number }>();
 const BACKLINK_TTL_MS = 60_000; // rebuild every 60s max
 
-function getBacklinkIndex(): Map<string, string[]> {
-  if (backlinkIndex && Date.now() - backlinkIndexAge < BACKLINK_TTL_MS) {
-    return backlinkIndex;
+function getBacklinkIndex(ctx: VaultContext): Map<string, string[]> {
+  const cached = backlinkIndexByVault.get(ctx.vaultId);
+  if (cached && Date.now() - cached.age < BACKLINK_TTL_MS) {
+    return cached.index;
   }
 
   const index = new Map<string, string[]>();
-  const files = walkMd(VAULT_PATH);
+  const files = walkMd(ctx.vaultPath);
 
   for (const abs of files) {
-    const srcPath = relative(VAULT_PATH, abs);
+    const srcPath = relative(ctx.vaultPath, abs);
     const srcName = basename(abs, ".md");
     let text: string;
     try { text = readNoteFile(abs); } catch { continue; }
@@ -284,14 +323,13 @@ function getBacklinkIndex(): Map<string, string[]> {
     }
   }
 
-  backlinkIndex = index;
-  backlinkIndexAge = Date.now();
+  backlinkIndexByVault.set(ctx.vaultId, { index, age: Date.now() });
   return index;
 }
 
-function getBacklinks(notePath: string): string[] {
+function getBacklinks(ctx: VaultContext, notePath: string): string[] {
   const noteName = basename(notePath, ".md");
-  const index = getBacklinkIndex();
+  const index = getBacklinkIndex(ctx);
   return index.get(noteName) ?? [];
 }
 
@@ -299,10 +337,11 @@ function getBacklinks(notePath: string): string[] {
 // For each wikilink target in a note, resolve it to a vault path.
 
 async function resolveLinks(
+  ctx: VaultContext,
   targets: string[],
 ): Promise<Record<string, { path: string | null; exists: boolean }>> {
-  const allNotes = listNotes(VAULT_PATH, "*");
-  const aliasNotes = listNotes(VAULT_PATH, "*", { includeAliases: true });
+  const allNotes = listNotes(ctx.vaultPath, "*");
+  const aliasNotes = listNotes(ctx.vaultPath, "*", { includeAliases: true });
   const result: Record<string, { path: string | null; exists: boolean }> = {};
 
   for (const target of targets) {
@@ -388,7 +427,7 @@ export interface ResidentProfile {
  * `note_count` reflects the current vault total; this server is
  * single-resident today.
  */
-export function handleResidentProfile(handle: string): ResidentProfile | null {
+export function handleResidentProfile(ctx: VaultContext, handle: string): ResidentProfile | null {
   if (!handle) return null;
   const db = getDb();
   const row = db
@@ -400,7 +439,7 @@ export function handleResidentProfile(handle: string): ResidentProfile | null {
 
   let noteCount = 0;
   try {
-    noteCount = listNotes(VAULT_PATH, "*").length;
+    noteCount = listNotes(ctx.vaultPath, "*").length;
   } catch {
     // Vault missing or unreadable — fall back to 0 rather than 500.
   }
@@ -414,7 +453,7 @@ export function handleResidentProfile(handle: string): ResidentProfile | null {
   };
 }
 
-export function handleTrailInfo(trailId: string): TrailInfoResponse | null {
+export function handleTrailInfo(ctx: VaultContext, trailId: string): TrailInfoResponse | null {
   const info = getTrailPublicInfo(trailId);
   if (!info || !info.enabled) return null;
 
@@ -422,7 +461,7 @@ export function handleTrailInfo(trailId: string): TrailInfoResponse | null {
   const config = getTrailConfig(trailId);
   let noteCount = 0;
   if (config) {
-    const allNotes = listNotes(VAULT_PATH, "*");
+    const allNotes = listNotes(ctx.vaultPath, "*");
     noteCount = allNotes.filter((n) => {
       const meta: NoteMetadata = {
         path: n.path,
@@ -456,8 +495,8 @@ export function handleTrailInfo(trailId: string): TrailInfoResponse | null {
  * Fetch a note by path or title. Returns note content, resolved wikilinks, and backlinks.
  * If a trail is provided, applies trail filtering (returns null for hidden notes).
  */
-export async function handleGetNote(notePath: string, trail?: TrailConfig | null): Promise<NoteResponse | null> {
-  const note = await resolveNote(notePath);
+export async function handleGetNote(ctx: VaultContext, notePath: string, trail?: TrailConfig | null): Promise<NoteResponse | null> {
+  const note = await resolveNote(ctx, notePath);
   if (!note) return null;
 
   // Trail filter: if note not visible, return null (404, not 403)
@@ -475,14 +514,14 @@ export async function handleGetNote(notePath: string, trail?: TrailConfig | null
 
   // Extract and resolve wikilinks from content
   const targets = extractWikilinks(note.content);
-  const links = await resolveLinks(targets);
+  const links = await resolveLinks(ctx, targets);
 
   // Trail filter wikilinks: mark trail-invisible notes as non-existent
   if (trail) {
     for (const [target, info] of Object.entries(links)) {
       if (info.exists && info.path) {
         try {
-          const linkAbs = join(VAULT_PATH, info.path + ".md");
+          const linkAbs = join(ctx.vaultPath, info.path + ".md");
           const raw = readNoteFile(linkAbs);
           const { frontmatter } = parseNote(raw);
           const linkTags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] : [];
@@ -503,11 +542,11 @@ export async function handleGetNote(notePath: string, trail?: TrailConfig | null
   }
 
   // Get backlinks (filter by trail if scoped)
-  let backlinks = getBacklinks(note.path);
+  let backlinks = getBacklinks(ctx, note.path);
   if (trail) {
     backlinks = backlinks.filter((bl) => {
       try {
-        const abs = join(VAULT_PATH, bl);
+        const abs = join(ctx.vaultPath, bl);
         const raw = readNoteFile(abs);
         const { frontmatter } = parseNote(raw);
         const blTags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] : [];
@@ -551,9 +590,9 @@ export interface ListEntry {
  * Read image-specific frontmatter fields from a note file.
  * Returns undefined if the file is unreadable or missing image metadata.
  */
-function readImageMetadata(notePath: string): Pick<ListEntry, "thumbnail_url" | "image_url" | "dimensions" | "description"> {
+function readImageMetadata(ctx: VaultContext, notePath: string): Pick<ListEntry, "thumbnail_url" | "image_url" | "dimensions" | "description"> {
   try {
-    const abs = join(VAULT_PATH, notePath);
+    const abs = join(ctx.vaultPath, notePath);
     const raw = readFileSync(abs, "utf-8");
     const { frontmatter, content } = parseNote(raw);
     const out: Pick<ListEntry, "thumbnail_url" | "image_url" | "dimensions" | "description"> = {};
@@ -582,10 +621,10 @@ function readImageMetadata(notePath: string): Pick<ListEntry, "thumbnail_url" | 
  * If a type is provided, filters to notes with that frontmatter type.
  * Image notes (type: image) carry thumbnail_url/image_url/dimensions.
  */
-export function handleListNotes(prefix: string, trail?: TrailConfig | null, type?: string | null): ListEntry[] {
+export function handleListNotes(ctx: VaultContext, prefix: string, trail?: TrailConfig | null, type?: string | null): ListEntry[] {
   // Empty prefix means "list all notes" (for sidebar folder discovery)
   const dirPrefix = prefix === "" ? "" : (prefix.endsWith("/") ? prefix : prefix + "/");
-  const allNotes = listNotes(VAULT_PATH, "*");
+  const allNotes = listNotes(ctx.vaultPath, "*");
 
   return allNotes
     .filter((n) => {
@@ -610,7 +649,7 @@ export function handleListNotes(prefix: string, trail?: TrailConfig | null, type
         tags: n.tags ?? [],
         modified_at: n.modified_at,
       };
-      if (n.type === "image") Object.assign(base, readImageMetadata(n.path));
+      if (n.type === "image") Object.assign(base, readImageMetadata(ctx, n.path));
       return base;
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -647,6 +686,7 @@ export interface TrailPreviewResult {
  * Builds an ephemeral TrailConfig from the scope and runs filterByTrail against every note.
  */
 export function handleTrailPreview(
+  ctx: VaultContext,
   scope: TrailPreviewScope,
   sampleLimit: number = 10,
 ): TrailPreviewResult {
@@ -667,7 +707,7 @@ export function handleTrailPreview(
     rate_limit_writes: 0,
   };
 
-  const allNotes = listNotes(VAULT_PATH, "*");
+  const allNotes = listNotes(ctx.vaultPath, "*");
   const tagSet = new Set<string>();
   const typeSet = new Set<string>();
   for (const n of allNotes) {
@@ -720,10 +760,11 @@ export interface TrailPreviewTestResult {
 }
 
 export function handleTrailPreviewTest(
+  ctx: VaultContext,
   notePath: string,
   scope: TrailPreviewScope,
 ): TrailPreviewTestResult | null {
-  const allNotes = listNotes(VAULT_PATH, "*");
+  const allNotes = listNotes(ctx.vaultPath, "*");
   const note = allNotes.find((n) => n.path === notePath);
   if (!note) return null;
 
@@ -794,7 +835,7 @@ export function handleTrailPreviewTest(
  * `handle` scopes result URLs to `/@<handle>/...`; falls back to the
  * vault owner when the caller doesn't know it (single-tenant mode).
  */
-export async function handleSearch(query: string, limit: number = 10, trail?: TrailConfig | null, handle?: string): Promise<SearchResult[]> {
+export async function handleSearch(ctx: VaultContext, query: string, limit: number = 10, trail?: TrailConfig | null, handle?: string): Promise<SearchResult[]> {
   const fetchLimit = trail ? limit * 3 : limit; // over-fetch for trail filtering
   const results = await hybridSearch(query, fetchLimit);
 
@@ -803,7 +844,7 @@ export async function handleSearch(query: string, limit: number = 10, trail?: Tr
   // Resolve QMD's lowercase-kebab paths to real filesystem paths.
   // QMD index stores e.g. "resources/concepts/meditation-mindfulness.md"
   // but the filesystem has "Resources/Concepts/Meditation & Mindfulness.md".
-  const allNotes = listNotes(VAULT_PATH, "*");
+  const allNotes = listNotes(ctx.vaultPath, "*");
   const resolveRealPath = (vaultPath: string, title: string): string => {
     const vp = vaultPath.toLowerCase();
     const note = allNotes.find((n) => n.path.toLowerCase() === vp || n.name === title);
@@ -848,11 +889,12 @@ const VALID_STATS_SECTIONS = new Set(["vault", "freshness", "graph", "index", "l
  * Returns null if stats haven't been computed yet.
  */
 export function handleStats(
+  ctx: VaultContext,
   sections?: string[],
   trail?: TrailConfig | null,
   isAdmin?: boolean,
 ): Record<string, unknown> | null {
-  const stats = getStats(VAULT_PATH);
+  const stats = getStats(ctx.vaultPath);
   if (!stats) return null;
 
   const result: Record<string, unknown> = {
@@ -902,13 +944,13 @@ export const VALID_STATUS_MODES = new Set<StatusMode>(["health", "history", "dia
 /**
  * Health: doc count, freshness, lifecycle, folder/type breakdown.
  */
-export function handleStatusHealth(trail?: TrailConfig | null): Record<string, unknown> | null {
-  const stats = getStats(VAULT_PATH);
+export function handleStatusHealth(ctx: VaultContext, trail?: TrailConfig | null): Record<string, unknown> | null {
+  const stats = getStats(ctx.vaultPath);
   if (!stats) return null;
 
   const result: Record<string, unknown> = {
     total_notes: stats.vault.total_notes,
-    vault_path: VAULT_PATH,
+    vault_path: ctx.vaultPath,
     by_folder: stats.vault.by_folder,
     by_type: stats.vault.by_type,
     frontmatter_completeness: stats.vault.frontmatter_completeness,
@@ -928,10 +970,11 @@ export function handleStatusHealth(trail?: TrailConfig | null): Record<string, u
  * History: recent git log, optionally filtered by since/path_prefix.
  */
 export async function handleStatusHistory(
+  ctx: VaultContext,
   since?: string,
   pathPrefix?: string,
 ): Promise<{ entries: unknown[] }> {
-  const entries = await gitLog(VAULT_PATH, {
+  const entries = await gitLog(ctx.vaultPath, {
     since: since ?? "1 week ago",
     pathPrefix: pathPrefix ?? undefined,
   });
@@ -941,10 +984,10 @@ export async function handleStatusHistory(
 /**
  * Diagnostics: orphan notes, broken links, missing frontmatter, stale inbox.
  */
-export function handleStatusDiagnostics(): Record<string, unknown> {
-  const notes = listNotes(VAULT_PATH, "*", { includeAliases: true });
+export function handleStatusDiagnostics(ctx: VaultContext): Record<string, unknown> {
+  const notes = listNotes(ctx.vaultPath, "*", { includeAliases: true });
 
-  const config = loadVaultConfig(VAULT_PATH);
+  const config = loadVaultConfig(ctx.vaultPath);
   const folders = entityFolders(config);
   const defaultFolder = config.structure.entities.default;
   const isEntityNote = (p: string) => folders.some((f) => p.startsWith(f));
@@ -962,7 +1005,7 @@ export function handleStatusDiagnostics(): Record<string, unknown> {
   for (const note of notes) incomingLinks.set(note.path, 0);
 
   for (const note of notes) {
-    const abs = join(VAULT_PATH, note.path);
+    const abs = join(ctx.vaultPath, note.path);
     let raw: string;
     try { raw = readNoteFile(abs); } catch { continue; }
 
@@ -1011,17 +1054,17 @@ export function handleStatusDiagnostics(): Record<string, unknown> {
 /**
  * Graph: wikilink graph analysis — most connected, bridges, clusters, orphans.
  */
-export async function handleStatusGraph(): Promise<Record<string, unknown>> {
-  const stats = getStats(VAULT_PATH);
+export async function handleStatusGraph(ctx: VaultContext): Promise<Record<string, unknown>> {
+  const stats = getStats(ctx.vaultPath);
   if (stats) return stats.graph as unknown as Record<string, unknown>;
-  return await analyzeGraph(VAULT_PATH) as unknown as Record<string, unknown>;
+  return await analyzeGraph(ctx.vaultPath) as unknown as Record<string, unknown>;
 }
 
 /**
  * Digest: garden lifecycle — seeds, sprouts, growing, mature, dormant, withering.
  */
-export async function handleStatusDigest(): Promise<Record<string, unknown>> {
-  return await computeDigest(VAULT_PATH) as unknown as Record<string, unknown>;
+export async function handleStatusDigest(ctx: VaultContext): Promise<Record<string, unknown>> {
+  return await computeDigest(ctx.vaultPath) as unknown as Record<string, unknown>;
 }
 
 /**
@@ -1033,6 +1076,16 @@ export async function handleStatusDigest(): Promise<Record<string, unknown>> {
  */
 export async function handleStatusPerf(): Promise<Record<string, unknown>> {
   const toolMetrics = metrics.getMetrics();
+  // Aggregate write-queue stats across every per-vault queue. depth is a
+  // sum; oldest_queued_age_ms is the max so the worst-case latency is what
+  // operators see (matches the legacy single-queue semantics).
+  let depthSum = 0;
+  let oldestAge = 0;
+  for (const q of writeQueueByVault.values()) {
+    depthSum += q.depth();
+    const age = q.oldestQueuedAgeMs();
+    if (age > oldestAge) oldestAge = age;
+  }
   return {
     uptime_seconds: toolMetrics.uptime_seconds,
     total_requests: toolMetrics.total_requests,
@@ -1041,8 +1094,9 @@ export async function handleStatusPerf(): Promise<Record<string, unknown>> {
     tools: toolMetrics.by_tool,
     search: searchMetrics.getSearchStats(),
     write_queue: {
-      depth: writeQueue.depth(),
-      oldest_queued_age_ms: writeQueue.oldestQueuedAgeMs(),
+      depth: depthSum,
+      oldest_queued_age_ms: oldestAge,
+      vaults: writeQueueByVault.size,
     },
     discovery: {
       queue_depth: discoveryQueueDepth(),
@@ -1063,6 +1117,7 @@ export async function handleStatusPerf(): Promise<Record<string, unknown>> {
  * share the exact same write semantics under one mutex acquisition.
  */
 async function executeWriteInMutex(params: {
+  ctx: VaultContext;
   absPath: string;
   relPath: string;
   frontmatter: Record<string, unknown>;
@@ -1071,7 +1126,7 @@ async function executeWriteInMutex(params: {
   keyName?: string;
   handle?: string;
 }): Promise<WriteNoteResult> {
-  const { absPath, relPath, frontmatter, content, isNew, keyName, handle } = params;
+  const { ctx, absPath, relPath, frontmatter, content, isNew, keyName, handle } = params;
 
   const serialized = serializeNote(frontmatter, content);
   const dir = dirname(absPath);
@@ -1082,7 +1137,7 @@ async function executeWriteInMutex(params: {
   const action = isNew ? "create" : "update";
   const who = keyName ? `grove (${keyName})` : "grove (api)";
   const commitMsg = `${who}: ${action} ${relPath}`;
-  const sha = await gitCommit(VAULT_PATH, relPath, commitMsg);
+  const sha = await gitCommit(ctx.vaultPath, relPath, commitMsg);
 
   const sourceHash = contentHash(serialized);
   recordWrite(relPath, sourceHash, sha, keyName ?? "api");
@@ -1153,6 +1208,7 @@ export interface WriteNoteResult {
  * Returns a conflict object on hash mismatch (caller should return 409).
  */
 export async function handleWriteNote(
+  ctx: VaultContext,
   notePath: string,
   frontmatter: Record<string, unknown>,
   content: string,
@@ -1168,14 +1224,14 @@ export async function handleWriteNote(
   // Validate path
   let absPath: string;
   try {
-    absPath = validatePath(VAULT_PATH, notePath);
+    absPath = validatePath(ctx.vaultPath, notePath);
   } catch (err: any) {
     throw Object.assign(new Error(`Path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
   }
-  const relPath = relative(VAULT_PATH, absPath);
+  const relPath = relative(ctx.vaultPath, absPath);
 
   // Validate note structure (config drives type_paths + tag rules + journal pattern)
-  const { errors } = validateNote(relPath, frontmatter, content, loadVaultConfig(VAULT_PATH));
+  const { errors } = validateNote(relPath, frontmatter, content, loadVaultConfig(ctx.vaultPath));
   if (errors.length > 0) {
     throw Object.assign(new Error(`Validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}`), { code: "VALIDATION", errors });
   }
@@ -1185,7 +1241,8 @@ export async function handleWriteNote(
 
   // Enqueue the write. All disk + git work is done by executeWriteInMutex,
   // so single writes and batched writes share identical semantics.
-  const result = await writeQueue.enqueue(() => executeWriteInMutex({
+  const result = await getWriteQueue(ctx).enqueue(() => executeWriteInMutex({
+    ctx,
     absPath,
     relPath,
     frontmatter,
@@ -1195,9 +1252,11 @@ export async function handleWriteNote(
     handle: options.handle,
   }));
 
-  // Enqueue for discovery processing
+  // Enqueue for discovery processing — tag the row with the writing vault
+  // so the per-vault discovery worker (which scopes its dequeue by
+  // vault_id) actually picks it up.
   try {
-    enqueueDiscovery(result.path, "write");
+    enqueueDiscovery(result.path, "write", ctx.vaultId);
   } catch (err) {
     console.error(`[grove] discovery enqueue failed for ${result.path}:`, (err as Error).message);
   }
@@ -1206,10 +1265,10 @@ export async function handleWriteNote(
   // Voyage API down, rate limit, etc.) enqueue an embed_retry so the
   // discovery worker picks it up and retries with the ordinary poll
   // cadence. Stays silent on success; logs + retries on failure.
-  embedFile(VAULT_PATH, result.path).catch((err) => {
+  embedFile(ctx.vaultPath, result.path).catch((err) => {
     console.error(`[grove] embed-single failed for ${result.path}:`, err.message);
     try {
-      enqueueDiscovery(result.path, "embed_retry");
+      enqueueDiscovery(result.path, "embed_retry", ctx.vaultId);
     } catch (enqueueErr) {
       console.error(
         `[grove] embed_retry enqueue failed for ${result.path}:`,
@@ -1256,6 +1315,7 @@ export interface WriteBatchResult {
  * possible — already-succeeded ops stay committed; the error stops the batch.
  */
 export async function handleWriteBatch(
+  ctx: VaultContext,
   operations: BatchOperation[],
   options: { atomic?: boolean; trail?: TrailConfig | null; keyName?: string; handle?: string } = {},
 ): Promise<WriteBatchResult> {
@@ -1274,7 +1334,7 @@ export async function handleWriteBatch(
     if_hash?: string;
     if_hash_from_op?: number;
   }> = [];
-  const config = loadVaultConfig(VAULT_PATH);
+  const config = loadVaultConfig(ctx.vaultPath);
 
   for (const [i, op] of operations.entries()) {
     if (!op || typeof op.path !== "string") {
@@ -1285,11 +1345,11 @@ export async function handleWriteBatch(
     }
     let absPath: string;
     try {
-      absPath = validatePath(VAULT_PATH, op.path);
+      absPath = validatePath(ctx.vaultPath, op.path);
     } catch (err: any) {
       throw Object.assign(new Error(`op ${i}: path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
     }
-    const relPath = relative(VAULT_PATH, absPath);
+    const relPath = relative(ctx.vaultPath, absPath);
     const { errors } = validateNote(relPath, op.frontmatter ?? {}, op.content ?? "", config);
     if (errors.length > 0) {
       throw Object.assign(
@@ -1316,9 +1376,9 @@ export async function handleWriteBatch(
   }
 
   // Execute inside the write mutex so no concurrent writer interleaves.
-  const results = await writeQueue.enqueue(async () => {
+  const results = await getWriteQueue(ctx).enqueue(async () => {
     // Snapshot state for atomic rollback. Captured BEFORE any disk change.
-    const preSha: string | null = atomic ? await gitRevParseHead(VAULT_PATH) : null;
+    const preSha: string | null = atomic ? await gitRevParseHead(ctx.vaultPath) : null;
     const preProvenance: Map<string, ReturnType<typeof getProvenance>> | null = atomic
       ? new Map(validated.map((v) => [v.relPath, getProvenance(v.relPath)]))
       : null;
@@ -1334,6 +1394,7 @@ export async function handleWriteBatch(
         if (ifHash) assertIfHashMatches(op.relPath, op.absPath, ifHash);
 
         const r = await executeWriteInMutex({
+          ctx,
           absPath: op.absPath,
           relPath: op.relPath,
           frontmatter: op.frontmatter,
@@ -1351,14 +1412,14 @@ export async function handleWriteBatch(
         // changes. Then restore provenance table to its pre-batch shape so
         // future if_hash checks behave as if the batch never happened.
         try {
-          await gitResetHard(VAULT_PATH, preSha);
+          await gitResetHard(ctx.vaultPath, preSha);
         } catch (resetErr) {
           console.error(`[grove] batch rollback git reset failed: ${(resetErr as Error).message}`);
         }
         for (const [path, prior] of preProvenance) {
           if (prior === null) deleteProvenance(path);
           else setProvenanceRow(prior);
-          invalidateFrontmatterCache(join(VAULT_PATH, path));
+          invalidateFrontmatterCache(join(ctx.vaultPath, path));
         }
       }
       throw err;
@@ -1368,14 +1429,14 @@ export async function handleWriteBatch(
   // Post-batch fire-and-forget per path.
   for (const r of results) {
     try {
-      enqueueDiscovery(r.path, "write");
+      enqueueDiscovery(r.path, "write", ctx.vaultId);
     } catch (enqueueErr) {
       console.error(`[grove] discovery enqueue failed for ${r.path}:`, (enqueueErr as Error).message);
     }
-    embedFile(VAULT_PATH, r.path).catch((err) => {
+    embedFile(ctx.vaultPath, r.path).catch((err) => {
       console.error(`[grove] embed-single failed for ${r.path}:`, (err as Error).message);
       try {
-        enqueueDiscovery(r.path, "embed_retry");
+        enqueueDiscovery(r.path, "embed_retry", ctx.vaultId);
       } catch {
         /* swallow — already logged */
       }
@@ -1404,17 +1465,18 @@ export interface DeleteNoteResult {
  * attributed to the caller. Returns { action, original_path, archive_path?, commit }.
  */
 export async function handleDeleteNote(
+  ctx: VaultContext,
   notePath: string,
   options: { hard?: boolean; ifHash?: string; trail?: TrailConfig | null; keyName?: string } = {},
 ): Promise<DeleteNoteResult> {
   // Validate source path
   let srcAbs: string;
   try {
-    srcAbs = validatePath(VAULT_PATH, notePath);
+    srcAbs = validatePath(ctx.vaultPath, notePath);
   } catch (err: any) {
     throw Object.assign(new Error(`Path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
   }
-  const srcRel = relative(VAULT_PATH, srcAbs);
+  const srcRel = relative(ctx.vaultPath, srcAbs);
 
   if (!existsSync(srcAbs)) {
     throw Object.assign(new Error("Note not found"), { code: "NOT_FOUND" });
@@ -1433,16 +1495,17 @@ export async function handleDeleteNote(
   if (options.ifHash) assertIfHashMatches(srcRel, srcAbs, options.ifHash);
 
   const who = options.keyName ? `grove (${options.keyName})` : "grove (api)";
+  const queue = getWriteQueue(ctx);
 
   if (options.hard) {
-    const sha = await writeQueue.enqueue(async () => {
+    const sha = await queue.enqueue(async () => {
       // Unlink from working tree only; `git add -A -- <path>` in
       // gitCommitPaths stages the deletion for tracked-but-missing files.
       // (Using `git rm` removes the index entry too, which makes a later
       // `git add -A -- <path>` fail with "pathspec did not match any files".)
       unlinkSync(srcAbs);
       invalidateFrontmatterCache(srcAbs);
-      const commitSha = await gitCommitPaths(VAULT_PATH, [srcRel], `${who}: delete ${srcRel}`);
+      const commitSha = await gitCommitPaths(ctx.vaultPath, [srcRel], `${who}: delete ${srcRel}`);
       qmdReindex(srcRel).catch(() => {});
       deleteProvenance(srcRel);
     // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
@@ -1452,13 +1515,13 @@ export async function handleDeleteNote(
   }
 
   // Soft delete — compute archive destination and enforce trail scope on it too.
-  const config = loadVaultConfig(VAULT_PATH);
+  const config = loadVaultConfig(ctx.vaultPath);
   const archiveRoot = config.structure.archive_path; // e.g. "Archives/"
   const archiveRel = `${archiveRoot}${srcRel}`;
 
   let archiveAbs: string;
   try {
-    archiveAbs = validatePath(VAULT_PATH, archiveRel);
+    archiveAbs = validatePath(ctx.vaultPath, archiveRel);
   } catch (err: any) {
     throw Object.assign(new Error(`Archive path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
   }
@@ -1474,7 +1537,7 @@ export async function handleDeleteNote(
     throw Object.assign(new Error(`Archive destination already exists: ${archiveRel}`), { code: "CONFLICT" });
   }
 
-  const sha = await writeQueue.enqueue(async () => {
+  const sha = await queue.enqueue(async () => {
     const raw = readNoteFile(srcAbs);
     const { frontmatter, content } = parseNote(raw);
     const archivedFm: Record<string, unknown> = {
@@ -1495,7 +1558,7 @@ export async function handleDeleteNote(
     invalidateFrontmatterCache(srcAbs);
 
     const commitSha = await gitCommitPaths(
-      VAULT_PATH,
+      ctx.vaultPath,
       [srcRel, archiveRel],
       `${who}: archive ${srcRel}`,
     );
@@ -1535,6 +1598,7 @@ export interface MoveNoteResult {
  * and rewrites them in place. All changes land in a single commit.
  */
 export async function handleMoveNote(
+  ctx: VaultContext,
   notePath: string,
   newPath: string,
   options: { ifHash?: string; trail?: TrailConfig | null; keyName?: string; handle?: string } = {},
@@ -1542,19 +1606,19 @@ export async function handleMoveNote(
   // Validate both paths
   let srcAbs: string;
   try {
-    srcAbs = validatePath(VAULT_PATH, notePath);
+    srcAbs = validatePath(ctx.vaultPath, notePath);
   } catch (err: any) {
     throw Object.assign(new Error(`Source path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
   }
   let dstAbs: string;
   try {
-    dstAbs = validatePath(VAULT_PATH, newPath);
+    dstAbs = validatePath(ctx.vaultPath, newPath);
   } catch (err: any) {
     throw Object.assign(new Error(`Destination path error: ${err.message}`), { code: "VALIDATION", errors: [err.message] });
   }
 
-  const srcRel = relative(VAULT_PATH, srcAbs);
-  const dstRel = relative(VAULT_PATH, dstAbs);
+  const srcRel = relative(ctx.vaultPath, srcAbs);
+  const dstRel = relative(ctx.vaultPath, dstAbs);
 
   if (srcRel === dstRel) {
     throw Object.assign(new Error("Destination is the same as source"), { code: "VALIDATION", errors: ["source and destination must differ"] });
@@ -1593,20 +1657,20 @@ export async function handleMoveNote(
 
   const who = options.keyName ? `grove (${options.keyName})` : "grove (api)";
 
-  const result = await writeQueue.enqueue(async () => {
+  const result = await getWriteQueue(ctx).enqueue(async () => {
     // Ensure destination directory exists (git mv requires it)
     const dstDir = dirname(dstAbs);
     if (!existsSync(dstDir)) mkdirSync(dstDir, { recursive: true });
 
-    await gitMv(VAULT_PATH, srcRel, dstRel);
+    await gitMv(ctx.vaultPath, srcRel, dstRel);
     invalidateFrontmatterCache(srcAbs);
     invalidateFrontmatterCache(dstAbs);
 
-    const modified = updateWikilinks(VAULT_PATH, srcRel, dstRel, aliases);
+    const modified = updateWikilinks(ctx.vaultPath, srcRel, dstRel, aliases);
 
     const paths = [srcRel, dstRel, ...modified];
     const commitSha = await gitCommitPaths(
-      VAULT_PATH,
+      ctx.vaultPath,
       paths,
       `${who}: move ${srcRel} → ${dstRel}`,
     );
@@ -1635,10 +1699,10 @@ export async function handleMoveNote(
   });
 
   // Fire-and-forget: re-embed the moved note. Retry via discovery queue on failure.
-  embedFile(VAULT_PATH, dstRel).catch((err) => {
+  embedFile(ctx.vaultPath, dstRel).catch((err) => {
     console.error(`[grove] embed-single failed for ${dstRel}:`, err.message);
     try {
-      enqueueDiscovery(dstRel, "embed_retry");
+      enqueueDiscovery(dstRel, "embed_retry", ctx.vaultId);
     } catch (enqueueErr) {
       console.error(
         `[grove] embed_retry enqueue failed for ${dstRel}:`,
@@ -1794,6 +1858,7 @@ function slugFromFilename(filename: string | undefined, hash: string): string {
  *   - Vision tagging failure → image + stub note persist; enrichment retries
  */
 export async function handleImageUpload(
+  ctx: VaultContext,
   input: ImageUploadInput,
   options: { trail?: TrailConfig | null; keyName?: string; handle?: string } = {},
 ): Promise<ImageUploadResult> {
@@ -1811,8 +1876,10 @@ export async function handleImageUpload(
     throw Object.assign(new Error(`unsupported content type: ${input.contentType}`), { code: "VALIDATION" });
   }
 
-  // Compute content-addressed key
-  const vaultId = vaultIdResolver();
+  // Compute content-addressed key. Prefer the request's vault_id so the
+  // R2 object lands in this vault's prefix; fall back to the legacy
+  // `vaultIdResolver()` if the caller didn't supply a context (test code).
+  const vaultId = ctx.vaultId ?? vaultIdResolver();
   const key = contentKey(vaultId, input.file, ext);
   const hash = key.split("/").pop()!.replace(/\.[^.]+$/, "");
 
@@ -1856,7 +1923,7 @@ export async function handleImageUpload(
   const content = `# ${title}\n\n${placeholderDescription}\n\n![${title}](${uploaded.url})\n`;
 
   // Write the stub note (validates + commits + reindexes + fires embed)
-  const noteResult = await handleWriteNote(notePath, frontmatter, content, {
+  const noteResult = await handleWriteNote(ctx, notePath, frontmatter, content, {
     trail: options.trail,
     keyName: options.keyName,
     handle: options.handle,
@@ -1864,7 +1931,7 @@ export async function handleImageUpload(
 
   // Queue async enrichment (Vision description + tags + OCR → rewrite note)
   try {
-    enqueueDiscovery(noteResult.path, "image_enrich");
+    enqueueDiscovery(noteResult.path, "image_enrich", ctx.vaultId);
   } catch (err) {
     console.error(
       `[grove] image_enrich enqueue failed for ${noteResult.path}:`,

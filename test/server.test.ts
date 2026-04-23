@@ -70,6 +70,7 @@ describe("dispatchWriteNote — action routing", () => {
     expect(res.isError).toBeFalsy();
     expect(deps.handleWriteNote).toHaveBeenCalledOnce();
     expect(deps.handleWriteNote).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultId: expect.any(String) }),
       "x.md",
       { type: "concept", tags: ["t"] },
       "body",
@@ -93,14 +94,22 @@ describe("dispatchWriteNote — action routing", () => {
     const res = await dispatchWriteNote({ action: "delete", path: "Inbox/old.md" }, deps);
     expect(res.isError).toBeFalsy();
     expect(deps.handleDeleteNote).toHaveBeenCalledOnce();
-    expect(deps.handleDeleteNote).toHaveBeenCalledWith("Inbox/old.md", expect.objectContaining({ hard: false, trail: null }));
+    expect(deps.handleDeleteNote).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultId: expect.any(String) }),
+      "Inbox/old.md",
+      expect.objectContaining({ hard: false, trail: null }),
+    );
     expect(deps.handleWriteNote).not.toHaveBeenCalled();
   });
 
   it("action=hard_delete routes to handleDeleteNote with hard=true", async () => {
     const deps = makeDeps();
     await dispatchWriteNote({ action: "hard_delete", path: "Inbox/gone.md" }, deps);
-    expect(deps.handleDeleteNote).toHaveBeenCalledWith("Inbox/gone.md", expect.objectContaining({ hard: true }));
+    expect(deps.handleDeleteNote).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultId: expect.any(String) }),
+      "Inbox/gone.md",
+      expect.objectContaining({ hard: true }),
+    );
   });
 
   it("action=move routes to handleMoveNote", async () => {
@@ -111,6 +120,7 @@ describe("dispatchWriteNote — action routing", () => {
     );
     expect(res.isError).toBeFalsy();
     expect(deps.handleMoveNote).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultId: expect.any(String) }),
       "Inbox/a.md",
       "Resources/Concepts/a.md",
       expect.objectContaining({ trail: null }),
@@ -166,6 +176,10 @@ describe("dispatchWriteNote — action routing", () => {
       { action: "delete", path: "x.md", if_hash: "abc" },
       { ...deps, trail },
     );
-    expect(deps.handleDeleteNote).toHaveBeenCalledWith("x.md", expect.objectContaining({ ifHash: "abc", trail }));
+    expect(deps.handleDeleteNote).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultId: expect.any(String) }),
+      "x.md",
+      expect.objectContaining({ ifHash: "abc", trail }),
+    );
   });
 });
