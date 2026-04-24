@@ -2877,7 +2877,15 @@ const server = createServer(async (req, res) => {
     // P8-A3: capture vault_id outside the closure so TypeScript's narrowing
     // holds — inside groveHeaders, `key` is through a closure and narrowing
     // would be lost otherwise.
-    const authedVaultId = key.vault_id;
+    //
+    // Use the ROUTED vault's id when a vault route was resolved (both
+    // `/v/<slug>/...` and legacy paths produce a routed vault). The
+    // backend process is pinned to one `GROVE_VAULT_ID` and rejects
+    // requests whose `X-Grove-Vault-Id` doesn't match — sending the
+    // token's bound vault would 403 when a session key on its primary
+    // vault authenticates into one of the user's other vaults via
+    // `userIsVaultMember`.
+    const authedVaultId = routedVault?.id ?? key.vault_id;
 
     // Build headers for Grove server (strip auth, add Accept, pass correlation ID + trail info, optionally strip stale session)
     function groveHeaders(stripSession = false): Record<string, string> {
