@@ -50,6 +50,20 @@ describe("ecosystem-gen (P8-A4)", () => {
     expect(out).toMatch(/"GROVE_VAULT_ID": "vault_team"[\s\S]*?"GROVE_SERVER_PORT": "8191"/);
   });
 
+  it("injects GROVE_VAULT_SLUG per vault so URL builders stop defaulting to 'personal'", () => {
+    // server.ts, rest.ts, and discovery.ts all derive the vaultSlug used
+    // in noteUrl() from process.env.GROVE_VAULT_SLUG, falling back to
+    // "personal". Without this env var on per-vault processes, every URL
+    // that every non-personal vault mints points at /@<handle>/personal/,
+    // which silently cross-links wrong (and 404s on grove-www when
+    // followed).
+    const out = generateEcosystemConfig(vaults);
+    expect(out).toMatch(/"name": "grove-server-personal"[\s\S]*?"GROVE_VAULT_SLUG": "personal"/);
+    expect(out).toMatch(/"name": "grove-server-team"[\s\S]*?"GROVE_VAULT_SLUG": "team"/);
+    expect(out).toMatch(/"name": "grove-discovery-personal"[\s\S]*?"GROVE_VAULT_SLUG": "personal"/);
+    expect(out).toMatch(/"name": "grove-discovery-team"[\s\S]*?"GROVE_VAULT_SLUG": "team"/);
+  });
+
   it("wraps tsx invocations in bash so prod without node_modules/.bin/tsx still boots", () => {
     // CI's `npm ci --production` skips devDependencies (where tsx lives),
     // so a direct `script: <repo>/node_modules/.bin/tsx` reference dies on
