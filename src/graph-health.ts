@@ -607,13 +607,19 @@ export function storeHealthSnapshot(
   return { id, measured_at: ts, metrics, score };
 }
 
-export function getLatestHealthSnapshot(): HealthSnapshot | null {
+export function getLatestHealthSnapshot(vaultId?: string): HealthSnapshot | null {
   const db = getDb();
-  const row = db
-    .prepare(
-      "SELECT id, measured_at, metrics, score FROM graph_health ORDER BY measured_at DESC LIMIT 1",
-    )
-    .get() as
+  const row = (vaultId
+    ? db
+        .prepare(
+          "SELECT id, measured_at, metrics, score FROM graph_health WHERE vault_id = ? ORDER BY measured_at DESC LIMIT 1",
+        )
+        .get(vaultId)
+    : db
+        .prepare(
+          "SELECT id, measured_at, metrics, score FROM graph_health ORDER BY measured_at DESC LIMIT 1",
+        )
+        .get()) as
     | { id: string; measured_at: string; metrics: string; score: number }
     | undefined;
   return row ? parseSnapshotRow(row) : null;
@@ -624,17 +630,26 @@ export function getLatestHealthSnapshot(): HealthSnapshot | null {
  * Default window is 30 days; clamped to [1, 365]. Oldest-first ordering
  * suits dashboard trend lines (time flows left to right).
  */
-export function getHealthHistory(days = 30): HealthSnapshot[] {
+export function getHealthHistory(days = 30, vaultId?: string): HealthSnapshot[] {
   const db = getDb();
   const window = Math.min(365, Math.max(1, Math.floor(days)));
-  const rows = db
-    .prepare(
-      `SELECT id, measured_at, metrics, score
-         FROM graph_health
-        WHERE measured_at >= datetime('now', ?)
-        ORDER BY measured_at ASC`,
-    )
-    .all(`-${window} days`) as {
+  const rows = (vaultId
+    ? db
+        .prepare(
+          `SELECT id, measured_at, metrics, score
+             FROM graph_health
+            WHERE vault_id = ? AND measured_at >= datetime('now', ?)
+            ORDER BY measured_at ASC`,
+        )
+        .all(vaultId, `-${window} days`)
+    : db
+        .prepare(
+          `SELECT id, measured_at, metrics, score
+             FROM graph_health
+            WHERE measured_at >= datetime('now', ?)
+            ORDER BY measured_at ASC`,
+        )
+        .all(`-${window} days`)) as {
     id: string;
     measured_at: string;
     metrics: string;
@@ -1407,21 +1422,30 @@ function hydrateFlag(row: FlagRow): HealthFlag {
 }
 
 /** Alias for the admin API — returns the most recent health snapshot. */
-export function getCurrentHealth(): HealthSnapshot | null {
-  return getLatestHealthSnapshot();
+export function getCurrentHealth(vaultId?: string): HealthSnapshot | null {
+  return getLatestHealthSnapshot(vaultId);
 }
 
 /** Return unresolved health flags, most recent first. */
-export function getUnresolvedFlags(): HealthFlag[] {
+export function getUnresolvedFlags(vaultId?: string): HealthFlag[] {
   const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT id, flag_type, source_path, target_path, details, created_at, resolved_at
-         FROM graph_health_flags
-        WHERE resolved_at IS NULL
-        ORDER BY created_at DESC`,
-    )
-    .all() as FlagRow[];
+  const rows = (vaultId
+    ? db
+        .prepare(
+          `SELECT id, flag_type, source_path, target_path, details, created_at, resolved_at
+             FROM graph_health_flags
+            WHERE resolved_at IS NULL AND vault_id = ?
+            ORDER BY created_at DESC`,
+        )
+        .all(vaultId)
+    : db
+        .prepare(
+          `SELECT id, flag_type, source_path, target_path, details, created_at, resolved_at
+             FROM graph_health_flags
+            WHERE resolved_at IS NULL
+            ORDER BY created_at DESC`,
+        )
+        .all()) as FlagRow[];
   return rows.map(hydrateFlag);
 }
 

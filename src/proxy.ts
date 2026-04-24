@@ -1403,7 +1403,11 @@ const server = createServer(async (req, res) => {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
-      const users = listUsersWithMeta();
+      // Scope to the URL's vault when we arrived via
+      // `/v/<slug>/v1/admin/users` so the Members page shows only that
+      // vault's roster. Legacy unscoped path continues returning every
+      // user (admin panel elsewhere still depends on that shape).
+      const users = listUsersWithMeta(restIsVaultScoped ? restCtx.vaultId : undefined);
       sendJson(res, 200, { users });
       return;
     }
@@ -1712,7 +1716,9 @@ const server = createServer(async (req, res) => {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
-      const snapshot = getCurrentHealth();
+      const snapshot = getCurrentHealth(
+        restIsVaultScoped ? restCtx.vaultId : undefined,
+      );
       sendJson(res, 200, { snapshot });
       return;
     }
@@ -1728,7 +1734,10 @@ const server = createServer(async (req, res) => {
         sendJson(res, 400, { error: "days must be a positive number" });
         return;
       }
-      const snapshots = getHealthHistory(days);
+      const snapshots = getHealthHistory(
+        days,
+        restIsVaultScoped ? restCtx.vaultId : undefined,
+      );
       sendJson(res, 200, { snapshots });
       return;
     }
@@ -1738,7 +1747,9 @@ const server = createServer(async (req, res) => {
       const admin = adminAuth(req);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
-      const flags = getUnresolvedFlags();
+      const flags = getUnresolvedFlags(
+        restIsVaultScoped ? restCtx.vaultId : undefined,
+      );
       sendJson(res, 200, { flags });
       return;
     }

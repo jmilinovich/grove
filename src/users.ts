@@ -290,25 +290,73 @@ export interface UserWithMeta {
 }
 
 /**
- * List all users with their key counts and trail names.
+ * List users with their key counts and trail names.
+ *
+ * When `vaultId` is provided, the list is restricted to users who have
+ * a `vault_members` row for that vault, and the `key_count` + `trails`
+ * columns are narrowed to that vault only. Without it, returns every
+ * user in the DB (legacy unscoped admin view).
  */
-export function listUsersWithMeta(): UserWithMeta[] {
+export function listUsersWithMeta(vaultId?: string): UserWithMeta[] {
   const db = getDb();
-  const users = db.prepare(
-    "SELECT id, username, email, role, created_at, last_login_at FROM users"
-  ).all() as { id: string; username: string | null; email: string | null; role: string; created_at: string; last_login_at: string | null }[];
+  const users = vaultId
+    ? (db
+        .prepare(
+          `SELECT u.id, u.username, u.email, u.role, u.created_at, u.last_login_at, vm.role AS vault_role
+             FROM users u
+             JOIN vault_members vm ON vm.user_id = u.id
+            WHERE vm.vault_id = ?`,
+        )
+        .all(vaultId) as {
+        id: string;
+        username: string | null;
+        email: string | null;
+        role: string;
+        created_at: string;
+        last_login_at: string | null;
+        vault_role: string;
+      }[])
+    : (db
+        .prepare(
+          "SELECT id, username, email, role, created_at, last_login_at FROM users",
+        )
+        .all() as {
+        id: string;
+        username: string | null;
+        email: string | null;
+        role: string;
+        created_at: string;
+        last_login_at: string | null;
+      }[]);
 
   return users.map((u) => {
-    const keyCount = db.prepare(
-      "SELECT COUNT(*) as count FROM api_keys WHERE user_id = ?"
-    ).get(u.id) as { count: number };
+    const keyCount = vaultId
+      ? (db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM api_keys WHERE user_id = ? AND vault_id = ?",
+          )
+          .get(u.id, vaultId) as { count: number })
+      : (db
+          .prepare("SELECT COUNT(*) AS count FROM api_keys WHERE user_id = ?")
+          .get(u.id) as { count: number });
 
-    const trails = db.prepare(
-      `SELECT DISTINCT t.name FROM trails t
-       JOIN trail_grants tg ON t.id = tg.trail_id
-       JOIN api_keys ak ON tg.grantee_id = ak.id AND tg.grantee_type = 'token'
-       WHERE ak.user_id = ?`
-    ).all(u.id) as { name: string }[];
+    const trails = vaultId
+      ? (db
+          .prepare(
+            `SELECT DISTINCT t.name FROM trails t
+               JOIN trail_grants tg ON t.id = tg.trail_id
+               JOIN api_keys ak ON tg.grantee_id = ak.id AND tg.grantee_type = 'token'
+              WHERE ak.user_id = ? AND t.vault_id = ?`,
+          )
+          .all(u.id, vaultId) as { name: string }[])
+      : (db
+          .prepare(
+            `SELECT DISTINCT t.name FROM trails t
+               JOIN trail_grants tg ON t.id = tg.trail_id
+               JOIN api_keys ak ON tg.grantee_id = ak.id AND tg.grantee_type = 'token'
+              WHERE ak.user_id = ?`,
+          )
+          .all(u.id) as { name: string }[]);
 
     return {
       ...u,
