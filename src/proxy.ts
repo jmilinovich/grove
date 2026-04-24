@@ -106,6 +106,7 @@ import {
   lookupById as lookupVaultById,
   lookupBySlug as lookupVaultBySlug,
   contextFromRoute,
+  userCanWriteVault,
   userIsVaultMember,
   type VaultContext,
 } from "./vault-router.js";
@@ -1390,12 +1391,27 @@ const server = createServer(async (req, res) => {
     //      `vault_members`. Authorization follows user membership, not
     //      the key's bound vault, so a single session can reach every
     //      vault the user owns without re-minting a key per vault.
+    //
+    // For mutation methods (POST/PUT/PATCH/DELETE), require the
+    // member's role is `owner` or `member` — viewers are strictly
+    // read-only. Legacy per-vault keys bypass this check (they're
+    // bound directly to the vault and their scopes already encode
+    // read-vs-write intent).
     const restAuthHeader = req.headers.authorization;
     const restToken = restAuthHeader?.startsWith("Bearer ") ? restAuthHeader.slice(7) : null;
     const restKey = restToken ? validateToken(restToken) : null;
-    const restAuthorized =
+    const isMutation =
+      req.method === "POST" ||
+      req.method === "PUT" ||
+      req.method === "PATCH" ||
+      req.method === "DELETE";
+    const directlyBound = !!restKey && restKey.vault_id === route.id;
+    const memberAuthorized =
       !!restKey &&
-      (restKey.vault_id === route.id || userIsVaultMember(restKey.user_id, route.id));
+      (isMutation
+        ? userCanWriteVault(restKey.user_id, route.id)
+        : userIsVaultMember(restKey.user_id, route.id));
+    const restAuthorized = !!restKey && (directlyBound || memberAuthorized);
     if (!restAuthorized) {
       structuredLog("warn", "vault.rest_auth_denied", rid, {
         url_slug: slug,
