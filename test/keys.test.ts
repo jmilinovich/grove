@@ -1,17 +1,27 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 
-// ── hashToken ───────────────────────────────────────────────────────
-// Re-implement the pure hashToken function for testing (avoids importing
-// keys.ts which has top-level side effects with process.argv parsing).
+import { hashToken } from "../src/keys.js";
 
-function hashToken(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
-}
+describe("keys module — import side effects", () => {
+  it("does not write to stdout or stderr on import", async () => {
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // Force a fresh evaluation in case an earlier test cached the module.
+      await import("../src/keys.js?_nocache=" + Date.now());
+      expect(out).not.toHaveBeenCalled();
+      expect(err).not.toHaveBeenCalled();
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+  });
+});
 
 describe("hashToken", () => {
   it("produces a 64-char hex string", () => {
