@@ -110,6 +110,7 @@ import {
   userIsVaultMember,
   type VaultContext,
 } from "./vault-router.js";
+import { adminAuth, type AdminAuthResult } from "./admin-auth.js";
 
 installCrashHandlers("grove-proxy");
 
@@ -179,12 +180,11 @@ function shareRowToApi(link: SharedLink, baseUrl: string, ownerHandle: string | 
   };
 }
 
-// ── Admin auth: persistent session cookie (SQLite) + Bearer fallback ──
-const GROVE_ADMIN_KEY = process.env.GROVE_ADMIN_KEY; // optional: restrict admin to a specific key name
-
-type AdminAuthResult =
-  | { ok: true; keyId: string; keyName: string; userId: string }
-  | { ok: false; status: 401 | 403 };
+// ── Admin auth: see ./admin-auth.ts ──
+// `adminAuth(req, vaultId?)` is imported from a sibling module so unit
+// tests can exercise it without booting the proxy's HTTP server. The
+// `sessionAuth` helper below is proxy-local — used by `/keys` for "any
+// authenticated user can manage their own keys".
 
 /** Authenticate any session-cookie user (regardless of role). */
 function sessionAuth(req: IncomingMessage): AdminAuthResult {
@@ -194,28 +194,6 @@ function sessionAuth(req: IncomingMessage): AdminAuthResult {
     if (user) return { ok: true, keyId: user.id, keyName: user.username ?? user.email, userId: user.id };
   }
   return { ok: false, status: 401 };
-}
-
-function adminAuth(req: IncomingMessage): AdminAuthResult {
-  // Check session cookie first (persistent in SQLite)
-  const sessionToken = getSessionFromCookie(req);
-  if (sessionToken) {
-    const user = validateSession(sessionToken);
-    if (user) {
-      if (getUserRole(user.id) !== "owner") return { ok: false, status: 403 };
-      return { ok: true, keyId: user.id, keyName: user.username ?? user.email, userId: user.id };
-    }
-  }
-  // Fall back to Bearer token
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-  if (!token) return { ok: false, status: 401 };
-  const key = validateToken(token);
-  if (!key) return { ok: false, status: 401 };
-  // Optionally restrict admin to a specific key
-  if (GROVE_ADMIN_KEY && key.name !== GROVE_ADMIN_KEY) return { ok: false, status: 403 };
-  if (getUserRole(key.user_id) !== "owner") return { ok: false, status: 403 };
-  return { ok: true, keyId: key.id, keyName: key.name, userId: key.user_id };
 }
 
 function validateToken(token: string): StoredKey | null {
@@ -1496,7 +1474,7 @@ const server = createServer(async (req, res) => {
 
     // ── Admin endpoints (session cookie or Bearer) ──
     if (restPath === "/v1/admin/users" && req.method === "GET") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       // Scope to the URL's vault when we arrived via
@@ -1510,7 +1488,7 @@ const server = createServer(async (req, res) => {
 
     // DELETE /v1/admin/users/:id — remove a user and all their data
     if (restPath.startsWith("/v1/admin/users/") && req.method === "DELETE") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const userId = restPath.slice("/v1/admin/users/".length);
@@ -1551,7 +1529,7 @@ const server = createServer(async (req, res) => {
 
     // POST /v1/admin/invite — invite a user to a trail
     if (restPath === "/v1/admin/invite" && req.method === "POST") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       // `admin` is always a truthy object (AdminAuthResult). The correct
       // unauthenticated check is `!admin.ok` — the typo gated nothing
       // and made this endpoint fully unauthenticated. Anyone could
@@ -1630,7 +1608,7 @@ const server = createServer(async (req, res) => {
     // ── Vault encryption lifecycle (admin only) ──
     // POST /v1/admin/vault/encrypt — enable encryption (generate + store wrapped key)
     if (restPath === "/v1/admin/vault/encrypt" && req.method === "POST") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       let body: string;
@@ -1663,7 +1641,7 @@ const server = createServer(async (req, res) => {
 
     // POST /v1/admin/vault/unlock — provide passphrase, decrypt key into memory
     if (restPath === "/v1/admin/vault/unlock" && req.method === "POST") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       let body: string;
@@ -1691,7 +1669,7 @@ const server = createServer(async (req, res) => {
 
     // POST /v1/admin/vault/lock — purge the in-memory vault key
     if (restPath === "/v1/admin/vault/lock" && req.method === "POST") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       let parsed: any = {};
@@ -1713,7 +1691,7 @@ const server = createServer(async (req, res) => {
 
     // GET /v1/admin/vault/status — encryption + unlock state
     if (restPath === "/v1/admin/vault/status" && req.method === "GET") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const overrideVault = url.searchParams.get("vault_id") ?? undefined;
@@ -1726,7 +1704,7 @@ const server = createServer(async (req, res) => {
 
     // POST /v1/admin/vault/change-passphrase — rewrap vault key under new passphrase
     if (restPath === "/v1/admin/vault/change-passphrase" && req.method === "POST") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       let body: string;
@@ -1758,7 +1736,7 @@ const server = createServer(async (req, res) => {
 
     // POST /v1/admin/share — create a share-a-note link (admin only)
     if (restPath === "/v1/admin/share" && req.method === "POST") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const mintCheck = shareMintLimiter.check(admin.userId, "write");
@@ -1809,7 +1787,7 @@ const server = createServer(async (req, res) => {
 
     // GET /v1/admin/share — list share links for the owner
     if (restPath === "/v1/admin/share" && req.method === "GET") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const notePathFilter = url.searchParams.get("note_path") ?? undefined;
@@ -1840,7 +1818,7 @@ const server = createServer(async (req, res) => {
     // DELETE /v1/admin/share/:id — soft-revoke a share link
     const adminShareDeleteMatch = restPath.match(/^\/v1\/admin\/share\/([^/]+)$/);
     if (adminShareDeleteMatch && req.method === "DELETE") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const shareId = decodeURIComponent(adminShareDeleteMatch[1]!);
@@ -1877,7 +1855,7 @@ const server = createServer(async (req, res) => {
     // ── Graph health (admin only) ──
     // GET /v1/admin/health/current — latest metrics snapshot + score
     if (restPath === "/v1/admin/health/current" && req.method === "GET") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const snapshot = getCurrentHealth(
@@ -1889,7 +1867,7 @@ const server = createServer(async (req, res) => {
 
     // GET /v1/admin/health/history?days=30 — time series
     if (restPath === "/v1/admin/health/history" && req.method === "GET") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const daysParam = url.searchParams.get("days");
@@ -1908,7 +1886,7 @@ const server = createServer(async (req, res) => {
 
     // GET /v1/admin/health/flags — unresolved flags
     if (restPath === "/v1/admin/health/flags" && req.method === "GET") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const flags = getUnresolvedFlags(
@@ -1921,7 +1899,7 @@ const server = createServer(async (req, res) => {
     // POST /v1/admin/health/flags/:id/resolve — dismiss a flag
     const resolveFlagMatch = restPath.match(/^\/v1\/admin\/health\/flags\/([^/]+)\/resolve$/);
     if (resolveFlagMatch && req.method === "POST") {
-      const admin = adminAuth(req);
+      const admin = adminAuth(req, restCtx.vaultId);
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const flagId = decodeURIComponent(resolveFlagMatch[1]);
@@ -2847,7 +2825,7 @@ const server = createServer(async (req, res) => {
     // GET /v1/admin/trails/:id/usage — per-trail usage metrics (admin only)
     const trailUsageMatch = restPath.match(/^\/v1\/admin\/trails\/([^/]+)\/usage$/);
     if (trailUsageMatch && req.method === "GET") {
-      const auth = adminAuth(req);
+      const auth = adminAuth(req, restCtx.vaultId);
       if (!auth.ok) {
         res.writeHead(auth.status, restHeaders);
         res.end(JSON.stringify({ error: auth.status === 403 ? "forbidden" : "unauthorized" }));
