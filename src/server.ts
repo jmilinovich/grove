@@ -20,13 +20,7 @@ import { z } from "zod";
 
 import { hybridSearch, formatResults, bm25Search } from "./hybrid-search.js";
 import { VaultLockedError } from "./index-crypto.js";
-
-/** Encode a vault path as a valid URL (encode each segment, preserve slashes) */
-function noteUrl(vaultPath: string): string {
-  const stripped = vaultPath.replace(/\.md$/, "");
-  const encoded = stripped.split("/").map(encodeURIComponent).join("/");
-  return `https://grove.md/${encoded}`;
-}
+import { noteUrl, vaultOwnerHandle } from "./url.js";
 
 import { gitLog, startupRecovery, listNotes } from "./vault-ops.js";
 import { parseNote, contentHash, inferTags } from "./notes-validate.js";
@@ -269,7 +263,7 @@ ${formatVaultStructure(config)}
 Linking: Use [[wikilinks]] aggressively. Pipe for readability: [[Full Name|display text]].
 Red links (to notes that don't exist yet) are fine — they're a backlog.
 
-Searching: Use query with lex (keyword) and vec (semantic) sub-queries. Provide intent for better snippets.
+Searching: Use query with a searches array — e.g. searches=[{type:"lex", query:"..."}, {type:"vec", query:"..."}], plus intent for better snippets. Valid sub-query types: lex, vec, hyde.
 
 Writing: Use write_note with proper frontmatter (type + tags required). Use if_hash for safe updates to existing notes.
 
@@ -394,7 +388,8 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
         }
       }
 
-      const formatted = formatResults(filtered, resolveRealPath);
+      const handle = vaultOwnerHandle(SERVER_VAULT_CONTEXT);
+      const formatted = formatResults(filtered, resolveRealPath, handle);
       const filteredCount = activeTrail ? `\n\n[filtered_count: ${filtered.length}/${totalFound}]` : "";
       return { content: [{ type: "text" as const, text: (formatted || "No results found.") + filteredCount }] };
     },
@@ -431,7 +426,7 @@ Use the content_hash as if_hash when updating the note.`,
         }
 
         const hash = contentHash(raw);
-        const url = noteUrl(rel);
+        const url = noteUrl(SERVER_VAULT_CONTEXT, rel);
         const result: Record<string, unknown> = { path: rel, url, frontmatter, content, content_hash: hash };
         if (resolvedFrom) result.resolved_from = resolvedFrom;
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -540,7 +535,7 @@ Examples: "${entityPath(VAULT_CONFIG, "person")}*.md", "${VAULT_CONFIG.structure
             continue;
           }
         }
-        const url = noteUrl(entry.path);
+        const url = noteUrl(SERVER_VAULT_CONTEXT, entry.path);
         const diskHash = contentHash(raw);
         results.push({
           path: entry.path,

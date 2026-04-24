@@ -493,14 +493,26 @@ export async function hybridSearch(
  * resolveRealPath maps QMD's lowercase-kebab vault_path to the real filesystem path
  * (e.g. "resources/concepts/meditation-mindfulness.md" → "Resources/Concepts/Meditation & Mindfulness.md").
  * Without it, URLs are built from the QMD index path which may not resolve on case-sensitive filesystems.
+ *
+ * `handle` scopes result URLs to `/@<handle>/...` — the owner's username for
+ * whichever vault this server is bound to. Omitting it is only safe in tests
+ * that don't assert on URL shape; production callers in server.ts always
+ * supply it.
  */
-export function formatResults(results: HybridResult[], resolveRealPath?: (vaultPath: string, title: string) => string): string {
+export function formatResults(
+  results: HybridResult[],
+  resolveRealPath?: (vaultPath: string, title: string) => string,
+  handle?: string,
+): string {
   if (results.length === 0) return "No results found.";
+  const base = process.env.GROVE_PUBLIC_BASE_URL ?? "https://grove.md";
+  const scope = handle ? `/@${handle}` : "";
   return results
     .map(
       (r) => {
         const displayPath = resolveRealPath ? resolveRealPath(r.vault_path, r.title) : r.vault_path;
-        const url = "https://grove.md/" + displayPath.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
+        const encodedPath = displayPath.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
+        const url = `${base}${scope}/${encodedPath}`;
         const thumb = r.thumbnail_url ? `\n![thumbnail](${r.thumbnail_url})` : "";
         return `**${r.title}** (${url})${thumb}\n${r.snippet ?? ""}`;
       }
