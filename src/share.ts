@@ -123,11 +123,16 @@ export function getShareLink(id: string): SharedLink | null {
  */
 export function listShareLinks(
   userId: string,
-  opts?: { note_path?: string; include_expired?: boolean },
+  opts?: { note_path?: string; include_expired?: boolean; vault_id?: string },
 ): SharedLink[] {
   const db = getDb();
   const clauses: string[] = ["created_by = ?"];
   const params: unknown[] = [userId];
+
+  if (opts?.vault_id) {
+    clauses.push("vault_id = ?");
+    params.push(opts.vault_id);
+  }
 
   if (opts?.note_path) {
     clauses.push("note_path = ?");

@@ -1187,11 +1187,35 @@ const server = createServer(async (req, res) => {
 
     if (parsed.action === "list") {
       const db = getDb();
-      // Owner sees all keys; non-owner sees only their own
-      const query = owner
-        ? "SELECT id, user_id, name, scopes, vault_id, created_at, last_used_at, expires_at FROM api_keys"
-        : "SELECT id, user_id, name, scopes, vault_id, created_at, last_used_at, expires_at FROM api_keys WHERE user_id = ?";
-      const rows = (owner ? db.prepare(query).all() : db.prepare(query).all(admin.userId)) as StoredKey[];
+      // Optional per-vault filter: grove-www sends `vault_slug` when the
+      // caller is viewing a specific vault's keys page so a multi-vault
+      // owner doesn't see every vault's keys mashed together. Resolved
+      // to vault_id here rather than client-side so the filter survives
+      // stale cached vault lists in the UI.
+      let vaultIdFilter: string | null = null;
+      if (typeof parsed.vault_slug === "string" && parsed.vault_slug.length > 0) {
+        const row = db
+          .prepare("SELECT id FROM vaults WHERE slug = ? LIMIT 1")
+          .get(parsed.vault_slug) as { id: string } | undefined;
+        if (row?.id) vaultIdFilter = row.id;
+      } else if (typeof parsed.vault_id === "string" && parsed.vault_id.length > 0) {
+        vaultIdFilter = parsed.vault_id;
+      }
+
+      // Owner sees all keys; non-owner sees only their own.
+      const clauses: string[] = [];
+      const params: unknown[] = [];
+      if (!owner) {
+        clauses.push("user_id = ?");
+        params.push(admin.userId);
+      }
+      if (vaultIdFilter) {
+        clauses.push("vault_id = ?");
+        params.push(vaultIdFilter);
+      }
+      const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+      const query = `SELECT id, user_id, name, scopes, vault_id, created_at, last_used_at, expires_at FROM api_keys ${where}`;
+      const rows = db.prepare(query).all(...params) as StoredKey[];
       const keys = rows.map((k) => ({
         id: k.id,
         user_id: k.user_id,
@@ -1211,13 +1235,18 @@ const server = createServer(async (req, res) => {
       // has no session and stores null.
       const sessionToken = getSessionFromCookie(req);
       const linkedSessionId = sessionToken ? getSessionIdFromToken(sessionToken) : null;
-      // Pick the bound vault: explicit `vault` > caller's earliest vault
-      // membership > legacy "life" sentinel. The sentinel used to be the
-      // default but it never matched a real `vaults.id`, which broke the
-      // `/v/<slug>/v1/*` auth check (it fell through to user-membership
-      // only after we added that fallback). Picking a real id up front
-      // keeps new tokens consistent with the vaults table.
+      // Pick the bound vault: explicit `vault` (id) > `vault_slug`
+      // (resolved) > caller's earliest membership > legacy "life"
+      // sentinel. Grove-www sends `vault_slug` when the key is minted
+      // from a specific vault's `/dashboard/access/keys` page so the
+      // key binds to that vault instead of the user's primary.
       let boundVaultId: string = parsed.vault ?? "";
+      if (!boundVaultId && typeof parsed.vault_slug === "string" && parsed.vault_slug.length > 0) {
+        const row = getDb()
+          .prepare("SELECT id FROM vaults WHERE slug = ? LIMIT 1")
+          .get(parsed.vault_slug) as { id: string } | undefined;
+        if (row?.id) boundVaultId = row.id;
+      }
       if (!boundVaultId) {
         const membership = getDb()
           .prepare(
@@ -1310,6 +1339,10 @@ const server = createServer(async (req, res) => {
   // context threaded into every rest.ts handler call.
   let restPath = url.pathname;
   let restCtx: VaultContext = defaultVaultContext();
+  // True when this request arrived as `/v/<slug>/v1/*`. Admin endpoints
+  // use it to scope list results to that vault instead of returning
+  // every row the caller owns.
+  let restIsVaultScoped = false;
   const vaultV1Match = /^\/v\/([^/?#]+)(\/v1\/.*)$/.exec(url.pathname);
   if (vaultV1Match) {
     const slug = vaultV1Match[1]!;
@@ -1348,6 +1381,7 @@ const server = createServer(async (req, res) => {
     }
     restPath = vaultV1Match[2]!;
     restCtx = contextFromRoute(route);
+    restIsVaultScoped = true;
   }
   if (restPath.startsWith("/v1/")) {
     const REST_CORS_ORIGIN = process.env.GROVE_WWW_ORIGIN ?? "https://grove.md";
@@ -1626,9 +1660,14 @@ const server = createServer(async (req, res) => {
       const limitParam = url.searchParams.get("limit");
       const limit = limitParam ? Math.max(1, Math.min(100, Number(limitParam) || 50)) : 50;
 
+      // Scope to the URL's vault when we arrived via `/v/<slug>/v1/admin/share`
+      // so a multi-vault owner sees only that vault's shares. The legacy
+      // unscoped `/v1/admin/share` path still returns every share the
+      // caller created (single-vault callers depend on that shape).
       const rows = listShareLinks(admin.userId, {
         note_path: notePathFilter,
         include_expired: includeExpired,
+        vault_id: restIsVaultScoped ? restCtx.vaultId : undefined,
       });
       const owner = getUserById(admin.userId);
       const ownerHandle = owner?.username ?? null;
@@ -2507,7 +2546,11 @@ const server = createServer(async (req, res) => {
       }
 
       if (parsed.action === "list") {
-        const trails = loadTrails();
+        // Scope to the URL's vault when we arrived via
+        // `/v/<slug>/v1/admin/trails` so a multi-vault owner sees only
+        // that vault's trails. Legacy unscoped `/v1/admin/trails` still
+        // returns every trail.
+        const trails = loadTrails(restIsVaultScoped ? restCtx.vaultId : undefined);
         res.writeHead(200, restHeaders);
         res.end(JSON.stringify({ trails }));
         return;
