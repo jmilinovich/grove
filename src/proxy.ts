@@ -1603,7 +1603,11 @@ const server = createServer(async (req, res) => {
         return;
       }
 
-      const result = createShareLink(note_path, admin.userId, GROVE_URL, {
+      // Anchor the share to the current request's vault context. Without
+      // this, share resolution falls back to the proxy's default context
+      // and ends up serving the wrong vault's note (or worse, the wrong
+      // vault's fuzzy-match via resolveNote's BM25 fallback).
+      const result = createShareLink(note_path, admin.userId, restCtx.vaultId, GROVE_URL, {
         ttl_days: typeof ttl_days === "number" ? ttl_days : undefined,
         max_views: maxViewsOpt,
       });
@@ -1747,11 +1751,29 @@ const server = createServer(async (req, res) => {
 
       const link = result.link;
 
-      // Read the note content from disk
+      // Resolve the share's vault_id to a real filesystem context. Never
+      // use `restCtx` here — a public /v1/share/:id request has no
+      // bearer token, so restCtx is the proxy's default context (the
+      // bound vault) and reading through it was serving vault B's share
+      // from vault A's filesystem via fuzzy fallback.
+      const shareVault = link.vault_id ? lookupVaultById(link.vault_id) : null;
+      if (!shareVault) {
+        // Legacy row whose backfill failed, or a manually-inserted row
+        // with a bad vault_id. Fail closed.
+        sendJson(res, 404, { error: "not_found" });
+        return;
+      }
+      const shareCtx = contextFromRoute(shareVault);
+
+      // Read the note content from disk. `exact: true` disables
+      // resolveNote's BM25 / alias / basename fuzzy fallbacks — a share
+      // URL encodes a specific note path, so fuzzy resolution is a
+      // cross-boundary leak vector (wrong-vault notes that happen to
+      // share a basename would otherwise be served publicly).
       let noteContent: string | null = null;
       let noteTitle: string | null = null;
       try {
-        const note = await handleGetNote(restCtx, link.note_path);
+        const note = await handleGetNote(shareCtx, link.note_path, null, { exact: true });
         if (note) {
           noteContent = note.content;
           noteTitle = (note.frontmatter?.title as string) ?? link.note_path.replace(/\.md$/, "").split("/").pop() ?? null;

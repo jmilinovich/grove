@@ -49,10 +49,10 @@ describe("url builder (/@<handle>/<path>)", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("builds /@<handle>/<path> URLs for the vault owner", () => {
+  it("builds /@<handle>/<slug>/<path> URLs for the vault owner", () => {
     const url = noteUrl(personalCtx, "Resources/Recipes/Chicken Rice Broccoli.md");
     expect(url).toBe(
-      "https://grove.md/@alice/Resources/Recipes/Chicken%20Rice%20Broccoli",
+      "https://grove.md/@alice/personal/Resources/Recipes/Chicken%20Rice%20Broccoli",
     );
   });
 
@@ -66,17 +66,17 @@ describe("url builder (/@<handle>/<path>)", () => {
     const url = noteUrl(personalCtx, "Resources/People/Renée / Smith.md");
     // Each segment is individually encoded; the top-level slash separators
     // stay literal so the URL routes as a multi-segment path.
-    expect(url.startsWith("https://grove.md/@alice/")).toBe(true);
+    expect(url.startsWith("https://grove.md/@alice/personal/")).toBe(true);
     expect(url.includes("Ren%C3%A9e")).toBe(true);
-    expect(url.split("/").length).toBeGreaterThan(4);
+    expect(url.split("/").length).toBeGreaterThan(5);
   });
 
   it("uses the correct owner per vault (multi-vault safety)", () => {
     // Two vaults, two owners — URL for team vault must be /@bob, not /@alice.
     const aliceUrl = noteUrl(personalCtx, "Resources/foo.md");
     const bobUrl = noteUrl(teamCtx, "Resources/foo.md");
-    expect(aliceUrl).toBe("https://grove.md/@alice/Resources/foo");
-    expect(bobUrl).toBe("https://grove.md/@bob/Resources/foo");
+    expect(aliceUrl).toBe("https://grove.md/@alice/personal/Resources/foo");
+    expect(bobUrl).toBe("https://grove.md/@bob/team/Resources/foo");
   });
 
   it("vaultOwnerHandle returns the owner for the given vaultId", () => {
@@ -106,8 +106,10 @@ describe("url builder (/@<handle>/<path>)", () => {
 
   it("explicit handle override wins over ctx lookup", () => {
     // Shared notes from a trail or invite can be shown under a different handle.
+    // Scope still tracks the ctx so the invitee lands in the vault the share
+    // was minted from, not whatever the catch-all picks.
     const url = noteUrl(personalCtx, "Resources/foo.md", "guest");
-    expect(url).toBe("https://grove.md/@guest/Resources/foo");
+    expect(url).toBe("https://grove.md/@guest/personal/Resources/foo");
   });
 
   it("noteUrlForHandle builds the same shape without needing ctx", () => {
