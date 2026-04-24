@@ -191,7 +191,7 @@ function sessionAuth(req: IncomingMessage): AdminAuthResult {
   const sessionToken = getSessionFromCookie(req);
   if (sessionToken) {
     const user = validateSession(sessionToken);
-    if (user) return { ok: true, keyId: user.id, keyName: user.username ?? user.email, userId: user.id };
+    if (user) return { ok: true, keyName: user.username ?? user.email, userId: user.id };
   }
   return { ok: false, status: 401 };
 }
