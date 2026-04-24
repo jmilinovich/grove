@@ -33,7 +33,7 @@ import { getDb } from "./db.js";
 import { userRoleInVault } from "./vault-router.js";
 
 export type AdminAuthResult =
-  | { ok: true; keyId: string; keyName: string; userId: string }
+  | { ok: true; keyName: string; userId: string }
   | { ok: false; status: 401 | 403 };
 
 const GROVE_ADMIN_KEY = process.env.GROVE_ADMIN_KEY; // optional: restrict admin to a specific key name
@@ -49,7 +49,6 @@ function validateToken(token: string): StoredKey | null {
 
 export function adminAuth(req: IncomingMessage, vaultId?: string): AdminAuthResult {
   let userId: string | null = null;
-  let keyId = "";
   let keyName = "";
 
   // Session cookie first (persistent in SQLite).
@@ -58,7 +57,6 @@ export function adminAuth(req: IncomingMessage, vaultId?: string): AdminAuthResu
     const user = validateSession(sessionToken);
     if (user) {
       userId = user.id;
-      keyId = user.id;
       keyName = user.username ?? user.email;
     }
   }
@@ -72,7 +70,6 @@ export function adminAuth(req: IncomingMessage, vaultId?: string): AdminAuthResu
     if (!key) return { ok: false, status: 401 };
     if (GROVE_ADMIN_KEY && key.name !== GROVE_ADMIN_KEY) return { ok: false, status: 403 };
     userId = key.user_id;
-    keyId = key.id;
     keyName = key.name;
   }
 
@@ -82,5 +79,5 @@ export function adminAuth(req: IncomingMessage, vaultId?: string): AdminAuthResu
     if (getUserRole(userId) !== "owner") return { ok: false, status: 403 };
   }
 
-  return { ok: true, keyId, keyName, userId };
+  return { ok: true, keyName, userId };
 }
