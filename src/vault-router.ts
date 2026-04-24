@@ -173,7 +173,11 @@ export interface RouteDecision {
   reason?: string;
 }
 
-export function decideRoute(parsed: ParsedVaultPath, tokenVaultId: string | null): RouteDecision {
+export function decideRoute(
+  parsed: ParsedVaultPath,
+  tokenVaultId: string | null,
+  tokenUserId: string | null = null,
+): RouteDecision {
   if (parsed.isLegacy) {
     if (!tokenVaultId) return { kind: "deny", reason: "missing auth" };
     const vault = byId.get(tokenVaultId);
@@ -190,10 +194,16 @@ export function decideRoute(parsed: ParsedVaultPath, tokenVaultId: string | null
     return { kind: "deny", reason: "unknown or forbidden vault" };
   }
   if (!tokenVaultId) return { kind: "deny", reason: "missing auth" };
-  if (tokenVaultId !== vault.id) {
-    return { kind: "deny", reason: "vault slug mismatch" };
+  if (tokenVaultId === vault.id) return { kind: "route", vault };
+  // Token binds to a different vault, but the token's user may still
+  // be a member of the URL's vault (grove-www session keys, multi-vault
+  // owners). Mirrors the REST auth path added in P20 — without this
+  // fallback `/v/<slug>/mcp` 403s every time a session key tries to
+  // reach a non-primary vault.
+  if (tokenUserId && userIsVaultMember(tokenUserId, vault.id)) {
+    return { kind: "route", vault };
   }
-  return { kind: "route", vault };
+  return { kind: "deny", reason: "vault slug mismatch" };
 }
 
 /**

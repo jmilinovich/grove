@@ -2735,7 +2735,7 @@ const server = createServer(async (req, res) => {
   // mismatches both return 403 (never 404 — 404 would leak which vault
   // slugs exist).
   const vaultParsed = parseVaultPath(url.pathname);
-  const routeDecision = decideRoute(vaultParsed, key.vault_id);
+  const routeDecision = decideRoute(vaultParsed, key.vault_id, key.user_id);
 
   // Vault-scoped URLs (/v/<slug>/*) MUST decide to "route" — anything else
   // is a 403. For legacy paths (no /v/<slug>/) the decision comes back as
