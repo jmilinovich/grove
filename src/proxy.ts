@@ -2974,7 +2974,18 @@ seedAdminEmail();
 cleanupExpiredAuth();
 
 const VAULT_PATH_PROXY = process.env.GROVE_VAULT ?? join(homedir(), "life");
-startStatsTimer(VAULT_PATH_PROXY);
+// Refresh stats for every registered vault, not just the proxy's bound
+// vault — otherwise `/v/<slug>/v1/stats` for any non-primary vault
+// returns the primary's numbers. Uses a thunk so newly-provisioned
+// vaults picked up by SIGHUP start refreshing on the next tick without
+// bouncing the timer.
+startStatsTimer(() => {
+  const db = getDb();
+  const rows = db.prepare(`SELECT git_repo_path FROM vaults`).all() as { git_repo_path: string }[];
+  const paths = new Set<string>(rows.map((r) => r.git_repo_path).filter(Boolean));
+  paths.add(VAULT_PATH_PROXY);
+  return [...paths];
+});
 
 const keyCount = getDb().prepare("SELECT COUNT(*) as count FROM api_keys").get() as { count: number };
 

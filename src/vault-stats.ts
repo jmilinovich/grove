@@ -416,32 +416,64 @@ export async function computeVaultStats(
 
 // ── Cache Layer ──────────────────────────────────────────────────────
 
-let cachedStats: VaultStats | null = null;
+// Per-vault stats cache. Keyed by the vault's on-disk path (the same
+// string that `computeVaultStats` reads from) so `/v/<slug>/v1/stats`
+// returns that vault's numbers rather than whichever vault booted the
+// timer first. Prior to P20 this was a singleton, which silently served
+// every vault's dashboard with the bound vault's stats.
+const cachedByPath = new Map<string, VaultStats>();
+// Kept for callers that still reach for a "last refreshed anything"
+// view (heartbeat ping). Updated on every successful refresh.
+let lastRefreshed: VaultStats | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 
-// Dedup in-flight refreshes. Under write-heavy load (e.g. bulk image
-// import) many callers kick off refreshStats concurrently, and
-// computeVaultStats is expensive — graph + lifecycle can each take 120s
-// on a large vault. Stacking these exhausts memory and OOMs the process.
-// Callers during an in-flight refresh now get the existing promise.
-let inFlight: Promise<VaultStats> | null = null;
+// Dedup in-flight refreshes per vault path. Under write-heavy load
+// (e.g. bulk image import) many callers kick off refreshStats
+// concurrently, and `computeVaultStats` is expensive — graph +
+// lifecycle can each take 120s on a large vault. Stacking these
+// exhausts memory and OOMs the process. Callers during an in-flight
+// refresh now get the existing promise for that vault.
+const inFlightByPath = new Map<string, Promise<VaultStats>>();
 
-export function getStats(_vaultPath: string): VaultStats | null {
-  return cachedStats;
+export function getStats(vaultPath: string): VaultStats | null {
+  return cachedByPath.get(vaultPath) ?? null;
 }
 
 export async function refreshStats(vaultPath: string): Promise<VaultStats> {
-  if (inFlight) return inFlight;
-  inFlight = (async () => {
+  const existing = inFlightByPath.get(vaultPath);
+  if (existing) return existing;
+  const promise = (async () => {
     try {
-      cachedStats = await computeVaultStats(vaultPath);
-      pingHeartbeat(cachedStats);
-      return cachedStats;
+      const stats = await computeVaultStats(vaultPath);
+      cachedByPath.set(vaultPath, stats);
+      lastRefreshed = stats;
+      pingHeartbeat(stats);
+      return stats;
     } finally {
-      inFlight = null;
+      inFlightByPath.delete(vaultPath);
     }
   })();
-  return inFlight;
+  inFlightByPath.set(vaultPath, promise);
+  return promise;
+}
+
+/**
+ * Seed the per-vault cache so newly-added vaults can report stats on
+ * first read instead of returning null until the 5-minute timer ticks.
+ * Safe to call from the proxy's vault-map loader.
+ */
+export async function warmStats(vaultPaths: string[]): Promise<void> {
+  for (const path of vaultPaths) {
+    if (cachedByPath.has(path) || inFlightByPath.has(path)) continue;
+    refreshStats(path).catch((err) =>
+      console.warn(`[vault-stats] warm failed for ${path}:`, (err as Error).message),
+    );
+  }
+}
+
+/** Legacy hook — last successful refresh for callers that want *some* stats. */
+export function getLastRefreshedStats(): VaultStats | null {
+  return lastRefreshed;
 }
 
 // ── Better Stack Heartbeat ──────────────────────────────────────────
@@ -470,22 +502,38 @@ function pingHeartbeat(stats: VaultStats): void {
   );
 }
 
+/**
+ * Start the periodic stats refresh. `vaultPaths` can be a literal list
+ * or a thunk that resolves the current list at each tick — the proxy
+ * uses the thunk form so newly-provisioned vaults start refreshing
+ * without needing to bounce the timer.
+ */
 export function startStatsTimer(
-  vaultPath: string,
+  vaultPaths: string | string[] | (() => string[]),
   intervalMs: number = 300_000,
 ): void {
   // Avoid duplicate timers
   stopStatsTimer();
 
+  const resolve = (): string[] => {
+    if (typeof vaultPaths === "function") return vaultPaths();
+    if (Array.isArray(vaultPaths)) return vaultPaths;
+    return [vaultPaths];
+  };
+
   // Initial compute (fire-and-forget, logs on error)
-  refreshStats(vaultPath).catch((err) =>
-    console.warn("[vault-stats] initial computation failed:", err),
-  );
+  for (const vaultPath of resolve()) {
+    refreshStats(vaultPath).catch((err) =>
+      console.warn(`[vault-stats] initial computation failed for ${vaultPath}:`, err),
+    );
+  }
 
   timer = setInterval(() => {
-    refreshStats(vaultPath).catch((err) =>
-      console.warn("[vault-stats] periodic refresh failed:", err),
-    );
+    for (const vaultPath of resolve()) {
+      refreshStats(vaultPath).catch((err) =>
+        console.warn(`[vault-stats] periodic refresh failed for ${vaultPath}:`, err),
+      );
+    }
   }, intervalMs);
 }
 
