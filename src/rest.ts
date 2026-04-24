@@ -404,7 +404,7 @@ export interface ResidentProfile {
  * `note_count` reflects the current vault total; this server is
  * single-resident today.
  */
-export function handleResidentProfile(ctx: VaultContext, handle: string): ResidentProfile | null {
+export function handleResidentProfile(_ctx: VaultContext, handle: string): ResidentProfile | null {
   if (!handle) return null;
   const db = getDb();
   const row = db
@@ -414,19 +414,19 @@ export function handleResidentProfile(ctx: VaultContext, handle: string): Reside
     | undefined;
   if (!row) return null;
 
-  let noteCount = 0;
-  try {
-    noteCount = listNotes(ctx.vaultPath, "*").length;
-  } catch {
-    // Vault missing or unreadable — fall back to 0 rather than 500.
-  }
-
+  // Public profile: don't leak a note count. The previous shape
+  // computed it from whichever vault `ctx` happened to point at
+  // (usually the proxy's default), which fingerprinted private
+  // activity in that vault to every anonymous viewer of the
+  // profile. When public-trail-based counting is re-introduced it
+  // will come from an explicit `trails + memberships` query, not a
+  // filesystem walk.
   return {
     handle: row.username,
     display_name: row.display_name,
     bio: row.bio,
     public_trail_slugs: [],
-    note_count: noteCount,
+    note_count: 0,
   };
 }
 
