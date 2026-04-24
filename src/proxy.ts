@@ -2815,7 +2815,13 @@ const server = createServer(async (req, res) => {
           groveRes.resume();
           console.log("[proxy] stale session, initializing new Grove session");
 
-          // Step 1: send initialize to get a new session
+          // Step 1: send initialize to get a new session.
+          // MUST forward X-Grove-Vault-Id — since P8 (PR #26) grove-server
+          // refuses any request without it when GROVE_VAULT_ID is pinned,
+          // which is the default in prod. Prior to this, init silently got
+          // a 403 with no mcp-session-id header and every claude.ai query
+          // errored "Error occurred during tool execution" until the user
+          // disconnected and reconnected. See project_stale_mcp_session.md.
           const initBody = JSON.stringify({
             jsonrpc: "2.0", id: "proxy-init",
             method: "initialize",
@@ -2823,14 +2829,25 @@ const server = createServer(async (req, res) => {
           });
           const initReq = httpRequest(
             { hostname: "127.0.0.1", port: backendPort, path: "/mcp", method: "POST",
-              headers: { "Content-Type": "application/json", "Accept": "application/json, text/event-stream", "Content-Length": String(Buffer.byteLength(initBody)) } },
+              headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "Content-Length": String(Buffer.byteLength(initBody)),
+                "X-Grove-Vault-Id": authedVaultId,
+                "X-Request-Id": rid,
+              } },
             (initRes) => {
               let initData = "";
               const newSession = initRes.headers["mcp-session-id"] as string | undefined;
               initRes.on("data", (c) => initData += c);
               initRes.on("end", () => {
                 if (!newSession) {
-                  console.error("[proxy] failed to get new session from Grove");
+                  // Surface status + body snippet so future failures are
+                  // diagnosable from logs alone. Without this, every failure
+                  // looks identical regardless of root cause.
+                  console.error(
+                    `[proxy] failed to get new session from Grove: status=${initRes.statusCode} body=${initData.slice(0, 200)}`,
+                  );
                   pipeGroveResponse(groveRes); // fall back to original error
                   return;
                 }

@@ -1,4 +1,7 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // We can't import `exec` directly without running child processes,
 // but we can test the pure helpers: parseFrontmatter (via listNotes behavior)
@@ -58,6 +61,32 @@ Content here`;
   it("returns null type for missing frontmatter", () => {
     const text = "Just some content with no frontmatter";
     expect(text.startsWith("---")).toBe(false);
+  });
+});
+
+describe("startupRecovery with no remote", () => {
+  let vaultPath: string;
+
+  beforeEach(async () => {
+    vaultPath = mkdtempSync(join(tmpdir(), "grove-vault-noremote-"));
+    const { exec } = await import("../src/vault-ops.js");
+    await exec("git", ["init", "-b", "main"], vaultPath);
+    await exec("git", ["config", "user.email", "test@test"], vaultPath);
+    await exec("git", ["config", "user.name", "test"], vaultPath);
+    writeFileSync(join(vaultPath, "x.md"), "x");
+    await exec("git", ["add", "-A"], vaultPath);
+    await exec("git", ["commit", "-m", "init"], vaultPath);
+  });
+
+  afterEach(() => {
+    rmSync(vaultPath, { recursive: true, force: true });
+  });
+
+  it("does not throw when origin/main ref is missing", async () => {
+    const { startupRecovery } = await import("../src/vault-ops.js");
+    // No remote configured — prior to the fix this rejected with
+    // "ambiguous argument 'origin/main..HEAD'" and pm2 restart-looped.
+    await expect(startupRecovery(vaultPath)).resolves.toBeUndefined();
   });
 });
 
