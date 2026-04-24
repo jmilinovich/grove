@@ -6,5 +6,6 @@ dist/
 *.db-shm
 .claude/worktrees/
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 .agents/
 failures/
