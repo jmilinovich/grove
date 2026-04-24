@@ -106,6 +106,7 @@ import {
   lookupById as lookupVaultById,
   lookupBySlug as lookupVaultBySlug,
   contextFromRoute,
+  userIsVaultMember,
   type VaultContext,
 } from "./vault-router.js";
 
@@ -1210,10 +1211,28 @@ const server = createServer(async (req, res) => {
       // has no session and stores null.
       const sessionToken = getSessionFromCookie(req);
       const linkedSessionId = sessionToken ? getSessionIdFromToken(sessionToken) : null;
+      // Pick the bound vault: explicit `vault` > caller's earliest vault
+      // membership > legacy "life" sentinel. The sentinel used to be the
+      // default but it never matched a real `vaults.id`, which broke the
+      // `/v/<slug>/v1/*` auth check (it fell through to user-membership
+      // only after we added that fallback). Picking a real id up front
+      // keeps new tokens consistent with the vaults table.
+      let boundVaultId: string = parsed.vault ?? "";
+      if (!boundVaultId) {
+        const membership = getDb()
+          .prepare(
+            `SELECT vault_id FROM vault_members
+               WHERE user_id = ?
+               ORDER BY joined_at ASC
+               LIMIT 1`,
+          )
+          .get(admin.userId) as { vault_id: string } | undefined;
+        boundVaultId = membership?.vault_id ?? "life";
+      }
       const result = createKey(
         parsed.name,
         parsed.scopes ?? ["read", "write"],
-        parsed.vault ?? "life",
+        boundVaultId,
         undefined,
         admin.userId,
         linkedSessionId,
@@ -1303,15 +1322,26 @@ const server = createServer(async (req, res) => {
       sendJson(res, 403, { error: "forbidden" });
       return;
     }
-    // Bearer token must match the URL's vault. We re-validate here so
-    // vault-scoped REST traffic is gated even on paths that the legacy
-    // /v1/* handlers below would otherwise serve from the wrong vault.
+    // Bearer token must authorize the URL's vault. Two accepted shapes:
+    //   1. Legacy per-vault keys — `api_keys.vault_id === route.id`.
+    //   2. User-session keys from grove-www — `api_keys.vault_id` is a
+    //      legacy binding (may be a stale string like "life"), but the
+    //      token's `user_id` is a member of the URL's vault via
+    //      `vault_members`. Authorization follows user membership, not
+    //      the key's bound vault, so a single session can reach every
+    //      vault the user owns without re-minting a key per vault.
     const restAuthHeader = req.headers.authorization;
     const restToken = restAuthHeader?.startsWith("Bearer ") ? restAuthHeader.slice(7) : null;
     const restKey = restToken ? validateToken(restToken) : null;
-    if (!restKey || restKey.vault_id !== route.id) {
+    const restAuthorized =
+      !!restKey &&
+      (restKey.vault_id === route.id || userIsVaultMember(restKey.user_id, route.id));
+    if (!restAuthorized) {
       structuredLog("warn", "vault.rest_auth_denied", rid, {
-        url_slug: slug, token_vault_id: restKey?.vault_id ?? null, status: 403,
+        url_slug: slug,
+        token_vault_id: restKey?.vault_id ?? null,
+        token_user_id: restKey?.user_id ?? null,
+        status: 403,
       });
       sendJson(res, 403, { error: "forbidden" });
       return;
