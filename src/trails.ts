@@ -71,9 +71,11 @@ function rowToConfig(row: TrailRow, keyId: string): TrailConfig {
 
 // ── CRUD operations ───────────────────────────────────────────────
 
-export function loadTrails(): TrailConfig[] {
+export function loadTrails(vaultId?: string): TrailConfig[] {
   const db = getDb();
-  const rows = db.prepare("SELECT * FROM trails").all() as TrailRow[];
+  const rows = vaultId
+    ? (db.prepare("SELECT * FROM trails WHERE vault_id = ?").all(vaultId) as TrailRow[])
+    : (db.prepare("SELECT * FROM trails").all() as TrailRow[]);
   return rows.map((r) => rowToConfig(r, ""));
 }
 
