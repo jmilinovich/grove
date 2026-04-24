@@ -389,23 +389,35 @@ export async function startupRecovery(vaultPath: string): Promise<void> {
 
 // ── QMD reindex ──────────────────────────────────────────────────────
 
-// `qmd update` reindexes the entire vault (the filePath arg is unused
-// by the qmd CLI today), so a per-write call is a ~10s full rebuild.
+// `qmd update` reindexes the entire vault (no per-file targeting), so a
+// per-write call is a ~10s full rebuild.
 //
-// Under burst writes this would dominate latency, so we dedup + coalesce:
-//   - If an update is already in flight, every new call awaits that run.
-//   - At most one follow-up run is queued to pick up writes that arrived
-//     mid-flight. Further calls during that tail run collapse into it.
+// Under burst writes this would dominate latency, so we dedup + coalesce
+// per vault:
+//   - If an update is already in flight for a vault, every new call for
+//     that vault awaits that run.
+//   - At most one follow-up run is queued per vault to pick up writes
+//     that arrived mid-flight. Further calls during that tail run
+//     collapse into it.
+//
+// `cwd` MUST be the vault path. Earlier code used `/tmp`, which (a) isn't
+// guaranteed writable on every host and (b) confuses any relative-path
+// resolution qmd does. The vault dir is always present (we just wrote to
+// it) and is the correct working directory for vault-scoped tooling.
 //
 // Callers typically run qmdReindex inside the write queue, so their own
 // completion blocks on the shared promise. To keep write response latency
 // snappy the caller should treat this as fire-and-forget when possible.
-let activeReindex: Promise<void> | null = null;
-let tailReindexPending = false;
+interface ReindexState {
+  active: Promise<void> | null;
+  tailPending: boolean;
+}
 
-async function runReindexOnce(): Promise<void> {
+const reindexStateByVault = new Map<string, ReindexState>();
+
+async function runReindexOnce(vaultPath: string): Promise<void> {
   try {
-    await exec("qmd", ["update"], "/tmp", 10_000);
+    await exec("qmd", ["update"], vaultPath, 10_000);
   } catch (err) {
     console.warn(
       "[vault-ops] qmd reindex failed (search may be stale):",
@@ -414,23 +426,29 @@ async function runReindexOnce(): Promise<void> {
   }
 }
 
-export async function qmdReindex(_filePath: string): Promise<void> {
-  if (activeReindex) {
-    if (!tailReindexPending) {
-      tailReindexPending = true;
-      activeReindex = activeReindex
+export async function qmdReindex(vaultPath: string): Promise<void> {
+  let state = reindexStateByVault.get(vaultPath);
+  if (!state) {
+    state = { active: null, tailPending: false };
+    reindexStateByVault.set(vaultPath, state);
+  }
+
+  if (state.active) {
+    if (!state.tailPending) {
+      state.tailPending = true;
+      state.active = state.active
         .catch(() => {})
         .then(async () => {
-          tailReindexPending = false;
-          await runReindexOnce();
+          state!.tailPending = false;
+          await runReindexOnce(vaultPath);
         });
     }
-    return activeReindex;
+    return state.active;
   }
-  activeReindex = runReindexOnce().finally(() => {
-    if (!tailReindexPending) activeReindex = null;
+  state.active = runReindexOnce(vaultPath).finally(() => {
+    if (!state!.tailPending) state!.active = null;
   });
-  return activeReindex;
+  return state.active;
 }
 
 // ── File listing ─────────────────────────────────────────────────────
