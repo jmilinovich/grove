@@ -41,10 +41,12 @@ export interface VaultStats {
     most_connected: { name: string; path: string; links: number }[];
   };
   index: {
-    indexed_docs: number;
+    // `null` when the vault isn't yet in QMD (per-vault index pending) —
+    // the dashboard renders N/A rather than a bogus large negative drift.
+    indexed_docs: number | null;
     vault_docs: number;
-    drift: number;
-    embedding_coverage: number;
+    drift: number | null;
+    embedding_coverage: number | null;
     index_size_mb: number;
     last_reindex: string | null;
   };
@@ -257,10 +259,16 @@ async function computeGraphSection(
 
 // ── Index Section ────────────────────────────────────────────────────
 
-function computeIndexSection(totalNotes: number): VaultStats["index"] {
+function computeIndexSection(totalNotes: number, vaultPath: string): VaultStats["index"] {
   const indexPath =
     process.env.QMD_INDEX ??
     join(process.env.HOME ?? "", ".cache/qmd/index.sqlite");
+
+  // QMD indexes each vault under a collection named by the vault's
+  // on-disk basename (personal → "life", test-vault → "test-vault").
+  // Filter by collection so a non-primary vault doesn't appear to
+  // have the whole Personal index drifting it by -N thousand notes.
+  const collection = vaultPath.split("/").filter(Boolean).pop() ?? "";
 
   const defaults: VaultStats["index"] = {
     indexed_docs: 0,
@@ -275,18 +283,35 @@ function computeIndexSection(totalNotes: number): VaultStats["index"] {
   try {
     db = new Database(indexPath, { readonly: true });
 
-    const docRow = db.prepare("SELECT COUNT(*) AS cnt FROM documents WHERE active = 1").get() as
-      | { cnt: number }
-      | undefined;
+    const docRow = db
+      .prepare("SELECT COUNT(*) AS cnt FROM documents WHERE active = 1 AND collection = ?")
+      .get(collection) as { cnt: number } | undefined;
     const indexedDocs = docRow?.cnt ?? 0;
+
+    // If the collection isn't in QMD yet but the vault has notes, the
+    // index isn't available for this vault — return a "pending" shape
+    // so the dashboard can render N/A instead of a bogus -N drift.
+    if (indexedDocs === 0 && totalNotes > 0) {
+      return {
+        indexed_docs: null,
+        vault_docs: totalNotes,
+        drift: null,
+        embedding_coverage: null,
+        index_size_mb: 0,
+        last_reindex: null,
+      };
+    }
 
     let embeddingCoverage = -1;
     try {
       const vecRow = db
         .prepare(
-          "SELECT COUNT(DISTINCT substr(hash_seq, 1, instr(hash_seq, '_') - 1)) AS cnt FROM vectors_vec",
+          // Filter vector rows by the same collection. vectors_vec.hash_seq is
+          // `<doc_id>_<chunk>`; we'd need to join through documents to scope,
+          // but the ratio is representative enough at this level.
+          "SELECT COUNT(DISTINCT substr(hash_seq, 1, instr(hash_seq, '_') - 1)) AS cnt FROM vectors_vec WHERE substr(hash_seq, 1, instr(hash_seq, '_') - 1) IN (SELECT id FROM documents WHERE active = 1 AND collection = ?)",
         )
-        .get() as { cnt: number } | undefined;
+        .get(collection) as { cnt: number } | undefined;
       const embeddedDocs = vecRow?.cnt ?? 0;
       embeddingCoverage =
         indexedDocs > 0
@@ -378,7 +403,7 @@ export async function computeVaultStats(
   const files = walkMd(vaultPath);
   const { section: vault, fileInfos } = computeVaultSection(vaultPath, files, cfg);
   const freshness = computeFreshness(fileInfos);
-  const index = computeIndexSection(vault.total_notes);
+  const index = computeIndexSection(vault.total_notes, vaultPath);
   const git = computeGitSection(vaultPath);
   console.log(`[vault-stats] vault/freshness/index/git computed in ${Date.now() - t0}ms (${files.length} files)`);
 
