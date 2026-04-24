@@ -448,6 +448,16 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
 
   // Authorization endpoint — POST (form submit)
   if (path === "/oauth/authorize" && req.method === "POST") {
+    // IP-scoped rate limit. Each submitted api_key is validated —
+    // without an upper bound this is a brute-force oracle.
+    const oauthIp = clientIp(req);
+    const oauthLimit = rateLimiter.check(`oauth-authorize:${oauthIp}`, "write");
+    if (!oauthLimit.allowed) {
+      sendJson(res, 429, { error: "rate_limited", retry_after_ms: oauthLimit.retryAfterMs });
+      return true;
+    }
+    rateLimiter.record(`oauth-authorize:${oauthIp}`, "write");
+
     readBody(req).then((body) => {
       const params = new URLSearchParams(body);
       const apiKey = params.get("api_key") ?? "";
@@ -1058,6 +1068,16 @@ const server = createServer(async (req, res) => {
 
   // ── Admin login (POST /admin/login — creates persistent session cookie) ──
   if (url.pathname === "/admin/login" && req.method === "POST") {
+    // IP-scoped rate limit. Without this, this endpoint is a
+    // brute-force oracle for API keys.
+    const ip = clientIp(req);
+    const limit = rateLimiter.check(`admin-login:${ip}`, "write");
+    if (!limit.allowed) {
+      sendJson(res, 429, { error: "rate_limited", retry_after_ms: limit.retryAfterMs });
+      return;
+    }
+    rateLimiter.record(`admin-login:${ip}`, "write");
+
     let body: string;
     try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
     let parsed: any;
@@ -1156,6 +1176,17 @@ const server = createServer(async (req, res) => {
   }
 
   if (url.pathname === "/auth/exchange" && req.method === "GET") {
+    // IP-scoped rate limit. Defence-in-depth: codes are 32 random
+    // hex chars so guessing is infeasible, but we still don't want
+    // to be a free brute-force oracle.
+    const xchgIp = clientIp(req);
+    const xchgLimit = rateLimiter.check(`auth-exchange:${xchgIp}`, "write");
+    if (!xchgLimit.allowed) {
+      sendJson(res, 429, { error: "rate_limited", retry_after_ms: xchgLimit.retryAfterMs });
+      return;
+    }
+    rateLimiter.record(`auth-exchange:${xchgIp}`, "write");
+
     const code = url.searchParams.get("code") ?? "";
     if (!code) { sendJson(res, 400, { error: "code required" }); return; }
     const result = exchangeAuthCode(code, req.headers["user-agent"] ?? null);
@@ -1485,6 +1516,28 @@ const server = createServer(async (req, res) => {
       const userId = restPath.slice("/v1/admin/users/".length);
       if (!userId) { sendJson(res, 400, { error: "user id required" }); return; }
 
+      // Per-vault scope: the target must share at least one
+      // `vault_members` row with a vault the caller is an owner of.
+      // Global `users.role='owner'` alone isn't enough — that would
+      // let one vault's owner delete another vault's member.
+      const db = getDb();
+      const sharedOwnerRow = db
+        .prepare(
+          `SELECT 1
+             FROM vault_members AS caller
+             JOIN vault_members AS target ON caller.vault_id = target.vault_id
+            WHERE caller.user_id = ?
+              AND target.user_id = ?
+              AND caller.role = 'owner'
+            LIMIT 1`,
+        )
+        .get(admin.userId, userId);
+      if (!sharedOwnerRow) {
+        // 404 rather than 403 so we don't leak whether the user exists.
+        sendJson(res, 404, { error: "user not found" });
+        return;
+      }
+
       try {
         const deleted = deleteUser(userId);
         if (!deleted) { sendJson(res, 404, { error: "user not found" }); return; }
@@ -1524,11 +1577,42 @@ const server = createServer(async (req, res) => {
 
       try {
         if (vault) {
-          // P8-B2 vault invite path
+          // P8-B2 vault invite path. Gate by vault ownership: only
+          // someone who is an `owner` in `vault_members` of the
+          // target vault can add new members. Global `users.role`
+          // alone is not enough — without this check any
+          // globally-provisioned owner could add themselves or
+          // anyone else to any vault they don't own.
+          const db = getDb();
+          const targetVault = db
+            .prepare("SELECT id FROM vaults WHERE id = ? OR slug = ? LIMIT 1")
+            .get(vault, vault) as { id: string } | undefined;
+          if (!targetVault) {
+            sendJson(res, 404, { error: "vault not found" });
+            return;
+          }
+          if (!userCanWriteVault(admin.userId, targetVault.id)) {
+            // 404 not 403 so we don't confirm the vault exists.
+            sendJson(res, 404, { error: "vault not found" });
+            return;
+          }
           const vaultRole = role === "owner" || role === "member" || role === "viewer" ? role : "member";
           const result = await inviteUserToVault(email, vault, vaultRole, GROVE_URL);
           sendJson(res, 200, result);
         } else {
+          // Trail invite: caller must own the trail's vault.
+          const db = getDb();
+          const trailRow = db
+            .prepare("SELECT vault_id FROM trails WHERE id = ? LIMIT 1")
+            .get(trail_id) as { vault_id: string } | undefined;
+          if (!trailRow) {
+            sendJson(res, 404, { error: "trail not found" });
+            return;
+          }
+          if (!userCanWriteVault(admin.userId, trailRow.vault_id)) {
+            sendJson(res, 404, { error: "trail not found" });
+            return;
+          }
           const result = await inviteUser(email, trail_id, role ?? "viewer", GROVE_URL);
           sendJson(res, 200, result);
         }
