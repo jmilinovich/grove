@@ -119,6 +119,29 @@ export function userIsVaultMember(userId: string, vaultId: string): boolean {
   return row !== undefined;
 }
 
+export type VaultRole = "owner" | "member" | "viewer";
+
+/**
+ * Return the user's role in a vault, or null if they're not a member.
+ * Write / mutation handlers should accept only `owner|member`; viewers
+ * are strictly read-only.
+ */
+export function userRoleInVault(userId: string, vaultId: string): VaultRole | null {
+  const row = getDb()
+    .prepare("SELECT role FROM vault_members WHERE user_id = ? AND vault_id = ? LIMIT 1")
+    .get(userId, vaultId) as { role: VaultRole } | undefined;
+  return row?.role ?? null;
+}
+
+/**
+ * True when the user can write to / administer the vault.
+ * Owners and members can; viewers cannot.
+ */
+export function userCanWriteVault(userId: string, vaultId: string): boolean {
+  const role = userRoleInVault(userId, vaultId);
+  return role === "owner" || role === "member";
+}
+
 export function lookupById(id: string): VaultRoute | null {
   return byId.get(id) ?? null;
 }
