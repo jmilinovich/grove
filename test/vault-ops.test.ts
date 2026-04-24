@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -87,6 +87,50 @@ describe("startupRecovery with no remote", () => {
     // No remote configured — prior to the fix this rejected with
     // "ambiguous argument 'origin/main..HEAD'" and pm2 restart-looped.
     await expect(startupRecovery(vaultPath)).resolves.toBeUndefined();
+  });
+});
+
+describe("qmdReindex cwd", () => {
+  let vaultPath: string;
+  let stubDir: string;
+  let cwdLogPath: string;
+  let originalPath: string | undefined;
+
+  beforeEach(() => {
+    vaultPath = mkdtempSync(join(tmpdir(), "grove-vault-reindex-"));
+    stubDir = mkdtempSync(join(tmpdir(), "grove-qmd-stub-"));
+    cwdLogPath = join(stubDir, "cwd.log");
+
+    // Stub `qmd` binary: writes its cwd to the log and exits 0. Lets us
+    // assert that qmdReindex spawned qmd with cwd=vaultPath, not /tmp.
+    const stubPath = join(stubDir, "qmd");
+    writeFileSync(stubPath, `#!/usr/bin/env bash\npwd >> "${cwdLogPath}"\n`);
+    chmodSync(stubPath, 0o755);
+
+    originalPath = process.env.PATH;
+    process.env.PATH = `${stubDir}:${process.env.PATH ?? ""}`;
+  });
+
+  afterEach(() => {
+    process.env.PATH = originalPath;
+    rmSync(vaultPath, { recursive: true, force: true });
+    rmSync(stubDir, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  it("invokes qmd with cwd=vaultPath, not /tmp", async () => {
+    // Fresh import to get a clean per-vault reindex coalescing state.
+    vi.resetModules();
+    const { qmdReindex } = await import("../src/vault-ops.js");
+    await qmdReindex(vaultPath);
+
+    const { readFileSync, existsSync } = await import("node:fs");
+    expect(existsSync(cwdLogPath)).toBe(true);
+    const log = readFileSync(cwdLogPath, "utf-8").trim();
+    // macOS resolves /tmp to /private/tmp; vault dirs created via
+    // mkdtempSync in tmpdir() share that prefix, so compare via realpath.
+    const { realpathSync } = await import("node:fs");
+    expect(log).toBe(realpathSync(vaultPath));
   });
 });
 
