@@ -136,7 +136,11 @@ interface ResolvedNote {
   resolved_from?: string;
 }
 
-async function resolveNote(ctx: VaultContext, file: string): Promise<ResolvedNote | null> {
+async function resolveNote(
+  ctx: VaultContext,
+  file: string,
+  opts?: { exact?: boolean },
+): Promise<ResolvedNote | null> {
   // 1. Normalize
   let filePath = file.replace(/^(life\/|qmd:\/\/life\/)/, "");
   if (!filePath.endsWith(".md")) filePath += ".md";
@@ -154,6 +158,12 @@ async function resolveNote(ctx: VaultContext, file: string): Promise<ResolvedNot
   const abs = sanitizePath(ctx.vaultPath, filePath);
   if (!abs) return null;
   if (existsSync(abs)) return readNote(abs, filePath);
+
+  // When `opts.exact` is set (share resolution, direct URL navigation),
+  // skip every fuzzy fallback below. The fallbacks are useful for
+  // wikilink resolution but are a cross-boundary leak vector when the
+  // caller has a specific path they want exactly.
+  if (opts?.exact) return null;
 
   // 3. Case-insensitive full path match (handles Resources/ vs resources/)
   const allNotes = listNotes(ctx.vaultPath, "*");
@@ -461,8 +471,13 @@ export function handleTrailInfo(ctx: VaultContext, trailId: string): TrailInfoRe
  * Fetch a note by path or title. Returns note content, resolved wikilinks, and backlinks.
  * If a trail is provided, applies trail filtering (returns null for hidden notes).
  */
-export async function handleGetNote(ctx: VaultContext, notePath: string, trail?: TrailConfig | null): Promise<NoteResponse | null> {
-  const note = await resolveNote(ctx, notePath);
+export async function handleGetNote(
+  ctx: VaultContext,
+  notePath: string,
+  trail?: TrailConfig | null,
+  opts?: { exact?: boolean },
+): Promise<NoteResponse | null> {
+  const note = await resolveNote(ctx, notePath, opts);
   if (!note) return null;
 
   // Trail filter: if note not visible, return null (404, not 403)

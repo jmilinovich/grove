@@ -7,7 +7,7 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, role TEXT NOT NULL DEFAULT 'member', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
   CREATE TABLE IF NOT EXISTS vaults (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), slug TEXT NOT NULL, display_name TEXT NOT NULL, git_repo_path TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), storage_bytes INTEGER NOT NULL DEFAULT 0, storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600, UNIQUE(owner_id, slug));
   CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL, name TEXT NOT NULL, hashed_token TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL DEFAULT 'read,write', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, expires_at TEXT, session_id TEXT);
-  CREATE TABLE IF NOT EXISTS shared_links (id TEXT PRIMARY KEY, note_path TEXT NOT NULL, created_by TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, max_views INTEGER, view_count INTEGER NOT NULL DEFAULT 0, last_accessed_at TEXT, revoked_by TEXT REFERENCES users(id), revoked_at TEXT, created_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS shared_links (id TEXT PRIMARY KEY, note_path TEXT NOT NULL, vault_id TEXT NOT NULL REFERENCES vaults(id), created_by TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, max_views INTEGER, view_count INTEGER NOT NULL DEFAULT 0, last_accessed_at TEXT, revoked_by TEXT REFERENCES users(id), revoked_at TEXT, created_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS vault_members (user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL REFERENCES vaults(id), role TEXT NOT NULL CHECK(role IN ('owner', 'member', 'viewer')), joined_at TEXT NOT NULL DEFAULT (datetime('now')), last_active_at TEXT, PRIMARY KEY (user_id, vault_id));
 `;
 
@@ -56,7 +56,7 @@ describe("share-a-note links", () => {
   });
 
   it("creates a share link with defaults", () => {
-    const result = createShareLink("Resources/Concepts/taste-graph.md", "user_00000000", "https://api.grove.md");
+    const result = createShareLink("Resources/Concepts/taste-graph.md", "user_00000000", "vault_00000000", "https://api.grove.md");
     expect(result.id).toMatch(/^sh_/);
     expect(result.url).toContain("/@admin/s/");
     expect(result.url).toContain("grove.md");
@@ -72,7 +72,7 @@ describe("share-a-note links", () => {
 
   it("creates a share link with custom TTL and max_views", () => {
     const result = createShareLink(
-      "Journal/2026/2026-04-01.md", "user_00000000", "https://api.grove.md",
+      "Journal/2026/2026-04-01.md", "user_00000000", "vault_00000000", "https://api.grove.md",
       { ttl_days: 1, max_views: 5 },
     );
     const link = getShareLink(result.id);
@@ -85,7 +85,7 @@ describe("share-a-note links", () => {
   });
 
   it("resolves a valid share link and increments view count", () => {
-    const result = createShareLink("Resources/Concepts/test.md", "user_00000000", "https://api.grove.md");
+    const result = createShareLink("Resources/Concepts/test.md", "user_00000000", "vault_00000000", "https://api.grove.md");
 
     const resolved = resolveShareLink(result.id);
     expect(resolved).not.toBeNull();
@@ -106,14 +106,14 @@ describe("share-a-note links", () => {
     const id = "sh_expired";
     const pastDate = new Date(Date.now() - 1000).toISOString();
     db.prepare(
-      "INSERT INTO shared_links (id, note_path, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+      "INSERT INTO shared_links (id, note_path, vault_id, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, 'vault_00000000', ?, ?, ?, 0, ?)",
     ).run(id, "test.md", "user_00000000", pastDate, 100, new Date().toISOString());
 
     expect(resolveShareLink(id)).toBeNull();
   });
 
   it("returns null when max_views is exhausted", () => {
-    const result = createShareLink("test.md", "user_00000000", "https://api.grove.md", { max_views: 2 });
+    const result = createShareLink("test.md", "user_00000000", "vault_00000000", "https://api.grove.md", { max_views: 2 });
 
     // Use up both views
     resolveShareLink(result.id);
@@ -124,15 +124,15 @@ describe("share-a-note links", () => {
   });
 
   it("lists share links for a user", () => {
-    createShareLink("note1.md", "user_00000000", "https://api.grove.md");
-    createShareLink("note2.md", "user_00000000", "https://api.grove.md");
+    createShareLink("note1.md", "user_00000000", "vault_00000000", "https://api.grove.md");
+    createShareLink("note2.md", "user_00000000", "vault_00000000", "https://api.grove.md");
 
     const links = listShareLinks("user_00000000");
     expect(links).toHaveLength(2);
   });
 
   it("deletes a share link", () => {
-    const result = createShareLink("note.md", "user_00000000", "https://api.grove.md");
+    const result = createShareLink("note.md", "user_00000000", "vault_00000000", "https://api.grove.md");
     expect(deleteShareLink(result.id)).toBe(true);
     expect(getShareLink(result.id)).toBeNull();
   });
@@ -142,13 +142,13 @@ describe("share-a-note links", () => {
   });
 
   it("URL uses grove.md domain with canonical /@<handle>/s/<id> shape", () => {
-    const result = createShareLink("test.md", "user_00000000", "https://api.grove.md");
+    const result = createShareLink("test.md", "user_00000000", "vault_00000000", "https://api.grove.md");
     expect(result.url).toMatch(/^https:\/\/grove\.md\/@admin\/s\/sh_/);
   });
 
   it("creates a share link with max_views: null (unlimited) and stores NULL", () => {
     const result = createShareLink(
-      "unlimited.md", "user_00000000", "https://api.grove.md",
+      "unlimited.md", "user_00000000", "vault_00000000", "https://api.grove.md",
       { max_views: null },
     );
     const link = getShareLink(result.id);
@@ -158,7 +158,7 @@ describe("share-a-note links", () => {
 
   it("resolves an unlimited share link repeatedly without view-cap", () => {
     const result = createShareLink(
-      "unlimited.md", "user_00000000", "https://api.grove.md",
+      "unlimited.md", "user_00000000", "vault_00000000", "https://api.grove.md",
       { max_views: null },
     );
     for (let i = 0; i < 50; i++) {
@@ -169,7 +169,7 @@ describe("share-a-note links", () => {
   });
 
   it("stamps last_accessed_at on each successful resolve", () => {
-    const result = createShareLink("accessed.md", "user_00000000", "https://api.grove.md");
+    const result = createShareLink("accessed.md", "user_00000000", "vault_00000000", "https://api.grove.md");
 
     let link = getShareLink(result.id);
     expect(link!.last_accessed_at).toBeNull();
@@ -193,7 +193,7 @@ describe("share-a-note links", () => {
   });
 
   it("revokeShareLink stamps audit columns and prevents subsequent resolve", () => {
-    const result = createShareLink("revoke-me.md", "user_00000000", "https://api.grove.md");
+    const result = createShareLink("revoke-me.md", "user_00000000", "vault_00000000", "https://api.grove.md");
 
     const revoker = "user_00000000";
     expect(revokeShareLink(result.id, revoker)).toBe(true);
@@ -206,7 +206,7 @@ describe("share-a-note links", () => {
   });
 
   it("revokeShareLink is idempotent — second call returns false", () => {
-    const result = createShareLink("revoke-twice.md", "user_00000000", "https://api.grove.md");
+    const result = createShareLink("revoke-twice.md", "user_00000000", "vault_00000000", "https://api.grove.md");
     expect(revokeShareLink(result.id, "user_00000000")).toBe(true);
     expect(revokeShareLink(result.id, "user_00000000")).toBe(false);
   });
@@ -216,9 +216,9 @@ describe("share-a-note links", () => {
   });
 
   it("listShareLinks filters by note_path", () => {
-    createShareLink("a.md", "user_00000000", "https://api.grove.md");
-    createShareLink("b.md", "user_00000000", "https://api.grove.md");
-    createShareLink("a.md", "user_00000000", "https://api.grove.md");
+    createShareLink("a.md", "user_00000000", "vault_00000000", "https://api.grove.md");
+    createShareLink("b.md", "user_00000000", "vault_00000000", "https://api.grove.md");
+    createShareLink("a.md", "user_00000000", "vault_00000000", "https://api.grove.md");
 
     const filtered = listShareLinks("user_00000000", { note_path: "a.md" });
     expect(filtered).toHaveLength(2);
@@ -226,15 +226,15 @@ describe("share-a-note links", () => {
   });
 
   it("listShareLinks excludes revoked & expired by default, includes them with include_expired", () => {
-    const active = createShareLink("active.md", "user_00000000", "https://api.grove.md");
-    const revoked = createShareLink("revoked.md", "user_00000000", "https://api.grove.md");
+    const active = createShareLink("active.md", "user_00000000", "vault_00000000", "https://api.grove.md");
+    const revoked = createShareLink("revoked.md", "user_00000000", "vault_00000000", "https://api.grove.md");
     revokeShareLink(revoked.id, "user_00000000");
 
     // Manually insert an already-expired row
     const db = getDb();
     const pastDate = new Date(Date.now() - 1000).toISOString();
     db.prepare(
-      "INSERT INTO shared_links (id, note_path, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+      "INSERT INTO shared_links (id, note_path, vault_id, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, 'vault_00000000', ?, ?, ?, 0, ?)",
     ).run("sh_expired1", "old.md", "user_00000000", pastDate, 100, new Date().toISOString());
 
     const activeOnly = listShareLinks("user_00000000");
@@ -246,7 +246,7 @@ describe("share-a-note links", () => {
   });
 
   it("listShareLinks excludes view-capped rows by default", () => {
-    const capped = createShareLink("capped.md", "user_00000000", "https://api.grove.md", { max_views: 1 });
+    const capped = createShareLink("capped.md", "user_00000000", "vault_00000000", "https://api.grove.md", { max_views: 1 });
     resolveShareLink(capped.id);
 
     const activeOnly = listShareLinks("user_00000000");
@@ -309,7 +309,7 @@ describe("share-a-note links", () => {
     });
 
     it("returns gone/revoked for revoked links", () => {
-      const r = createShareLink("r.md", "user_00000000", "https://api.grove.md");
+      const r = createShareLink("r.md", "user_00000000", "vault_00000000", "https://api.grove.md");
       revokeShareLink(r.id, "user_00000000");
       const out = resolveSharePublic(r.id);
       expect(out.status).toBe("gone");
@@ -321,7 +321,7 @@ describe("share-a-note links", () => {
       const id = "sh_expired_public";
       const past = new Date(Date.now() - 1000).toISOString();
       db.prepare(
-        "INSERT INTO shared_links (id, note_path, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+        "INSERT INTO shared_links (id, note_path, vault_id, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, 'vault_00000000', ?, ?, ?, 0, ?)",
       ).run(id, "e.md", "user_00000000", past, 100, new Date().toISOString());
 
       const out = resolveSharePublic(id);
@@ -330,7 +330,7 @@ describe("share-a-note links", () => {
     });
 
     it("returns gone/expired for view-capped links", () => {
-      const r = createShareLink("vc.md", "user_00000000", "https://api.grove.md", { max_views: 1 });
+      const r = createShareLink("vc.md", "user_00000000", "vault_00000000", "https://api.grove.md", { max_views: 1 });
       expect(resolveSharePublic(r.id).status).toBe("ok");
       const out = resolveSharePublic(r.id);
       expect(out.status).toBe("gone");
@@ -338,7 +338,7 @@ describe("share-a-note links", () => {
     });
 
     it("returns ok + bumps view_count + stamps last_accessed_at on success", () => {
-      const r = createShareLink("ok.md", "user_00000000", "https://api.grove.md");
+      const r = createShareLink("ok.md", "user_00000000", "vault_00000000", "https://api.grove.md");
       const out = resolveSharePublic(r.id);
       expect(out.status).toBe("ok");
       if (out.status === "ok") {

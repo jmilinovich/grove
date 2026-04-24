@@ -175,6 +175,7 @@ CREATE TABLE IF NOT EXISTS auth_codes (
 CREATE TABLE IF NOT EXISTS shared_links (
   id TEXT PRIMARY KEY,
   note_path TEXT NOT NULL,
+  vault_id TEXT NOT NULL REFERENCES vaults(id),
   created_by TEXT NOT NULL REFERENCES users(id),
   expires_at TEXT NOT NULL,
   max_views INTEGER,
@@ -184,6 +185,8 @@ CREATE TABLE IF NOT EXISTS shared_links (
   revoked_at TEXT,
   created_at TEXT NOT NULL
 );
+-- vault_id index is created in migrateSharedLinksVaultId so pre-P20
+-- databases (without the column yet) don't fail the initial schema exec.
 
 CREATE TABLE IF NOT EXISTS discovery_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,6 +275,7 @@ export function createSchema(): void {
   migrateApiKeySessionId(database);
   migrateUserBio(database);
   migrateSharedLinks(database);
+  migrateSharedLinksVaultId(database);
   migrateMultiVault(database);
   migrateVaultMembersBackfill(database);
   migrateApiKeyVaultId(database);
@@ -517,6 +521,54 @@ function migrateSharedLinks(database: Database.Database): void {
   const fkCheck = database.prepare("PRAGMA foreign_key_check").all();
   if (fkCheck.length > 0) {
     throw new Error(`[db] shared_links migration left dangling FKs: ${JSON.stringify(fkCheck)}`);
+  }
+}
+
+/**
+ * Add `vault_id` to shared_links so share resolution routes to the right
+ * vault. Pre-P20 shares have no vault association at all — the resolver
+ * was serving every share through the proxy's default vault context,
+ * which is how a test-vault share could render a Personal note. Backfill
+ * legacy rows to the creator's earliest `vault_members` entry so their
+ * existing share URLs keep resolving (to whatever vault they almost
+ * certainly came from, which was personal before multi-vault existed).
+ */
+function migrateSharedLinksVaultId(database: Database.Database): void {
+  const cols = database
+    .prepare("PRAGMA table_info(shared_links)")
+    .all() as { name: string }[];
+  if (cols.length === 0) return;
+  if (cols.some((c) => c.name === "vault_id")) return;
+
+  const tx = database.transaction(() => {
+    database.exec("ALTER TABLE shared_links ADD COLUMN vault_id TEXT REFERENCES vaults(id)");
+    // Backfill from the creator's earliest vault membership.
+    database.exec(`
+      UPDATE shared_links
+         SET vault_id = (
+           SELECT vm.vault_id
+             FROM vault_members vm
+            WHERE vm.user_id = shared_links.created_by
+            ORDER BY vm.joined_at ASC
+            LIMIT 1
+         )
+       WHERE vault_id IS NULL
+    `);
+    database.exec(
+      "CREATE INDEX IF NOT EXISTS idx_shared_links_vault ON shared_links(vault_id)",
+    );
+  });
+  tx();
+
+  // Surface any rows we couldn't backfill (creator has no memberships) —
+  // those shares now fail closed (404 on resolve) instead of leaking.
+  const orphans = database
+    .prepare("SELECT COUNT(*) AS n FROM shared_links WHERE vault_id IS NULL")
+    .get() as { n: number };
+  if (orphans.n > 0) {
+    console.warn(
+      `[db] ${orphans.n} shared_links have no backfillable vault_id — those share URLs will 404`,
+    );
   }
 }
 

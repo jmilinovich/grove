@@ -1,16 +1,18 @@
 /**
  * Canonical URL builder for Grove notes.
  *
- * Every external-facing note URL lives at `/@<handle>/<path>` on grove.md.
- * The handle is the owner's `users.username` for the specific vault being
- * served — NOT "the oldest vault in the DB". That distinction matters once
- * more than one vault exists: URLs for vault B must point at B's owner.
+ * Every external-facing note URL lives at `/@<handle>/<vaultSlug>/<path>`
+ * on grove.md. The handle is the owner's `users.username` for the
+ * specific vault being served — NOT "the oldest vault in the DB". That
+ * distinction matters once more than one vault exists: URLs for vault B
+ * must point at B's owner.
  *
- * Future shape (multi-vault, not yet routed by grove-www):
- *   https://grove.md/@<handle>/<vaultSlug>/<path>
- * When grove-www adds `(resident)/[atHandle]/[vaultSlug]/[...path]` for
- * arbitrary notes, flip `buildNoteUrl` to include the slug. Every call site
- * already passes `ctx`, so no caller changes.
+ * Multi-vault shape was gated on grove-www's route support. Now that
+ * `(resident)/[atHandle]/[...path]` detects the slug from `path[0]`,
+ * write / move / resolve responses include the slug so following the
+ * returned URL lands in the right vault. Unscoped `/@<handle>/<path>`
+ * still resolves via the legacy catch-all (falls back to the token's
+ * bound vault), but we stop minting those for new writes.
  */
 
 import { getDb } from "./db.js";
@@ -63,16 +65,36 @@ function encodePath(vaultPath: string): string {
  * from `ctx.vaultId`. Pass it explicitly only when you already know which
  * resident you're building the URL for (e.g., a shared note that belongs
  * to a non-owner).
+ *
+ * Always includes `ctx.vaultSlug` so following the URL routes to the
+ * exact vault the response came from, not "whichever vault the legacy
+ * catch-all guesses" (which for multi-vault users drifts to the
+ * token's bound vault rather than the one that was just written).
  */
 export function noteUrl(ctx: VaultContext, vaultPath: string, handle?: string): string {
   const resident = handle ?? vaultOwnerHandle(ctx);
+  const slug = ctx.vaultSlug;
+  if (slug) {
+    return `${publicBase()}/@${resident}/${slug}/${encodePath(vaultPath)}`;
+  }
   return `${publicBase()}/@${resident}/${encodePath(vaultPath)}`;
 }
 
 /**
  * Build a URL when all you have is the handle (no full ctx).
  * Used by search flows that already resolved the handle upstream.
+ *
+ * Accepts an optional `vaultSlug` so multi-vault callers can anchor the
+ * URL to a specific vault; legacy single-vault callers can still omit
+ * it and get the un-scoped shape.
  */
-export function noteUrlForHandle(handle: string, vaultPath: string): string {
+export function noteUrlForHandle(
+  handle: string,
+  vaultPath: string,
+  vaultSlug?: string,
+): string {
+  if (vaultSlug) {
+    return `${publicBase()}/@${handle}/${vaultSlug}/${encodePath(vaultPath)}`;
+  }
   return `${publicBase()}/@${handle}/${encodePath(vaultPath)}`;
 }

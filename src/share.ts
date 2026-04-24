@@ -13,6 +13,12 @@ import { getUserById } from "./users.js";
 export interface SharedLink {
   id: string;
   note_path: string;
+  /**
+   * Vault this share belongs to. Added post-P20 — pre-migration rows
+   * are backfilled from the creator's earliest `vault_members` row.
+   * Required: share resolution is scoped to this vault's filesystem.
+   */
+  vault_id: string;
   created_by: string;
   expires_at: string;
   max_views: number | null;
@@ -45,10 +51,16 @@ function generateShareId(): string {
  *
  * `max_views`: `undefined` → default 100; `null` → unlimited; `number` → cap.
  * Default TTL is 7 days.
+ *
+ * `vaultId` is required: share resolution looks up the vault to pick
+ * the right filesystem to read from. Without it, every share would
+ * serve through the proxy's default context and fuzzy-match across
+ * vault boundaries.
  */
 export function createShareLink(
   notePath: string,
   createdBy: string,
+  vaultId: string,
   baseUrl: string,
   opts?: { ttl_days?: number; max_views?: number | null },
 ): CreateShareResult {
@@ -60,8 +72,8 @@ export function createShareLink(
   const expiresAt = new Date(now.getTime() + ttlDays * 24 * 60 * 60 * 1000);
 
   db.prepare(
-    "INSERT INTO shared_links (id, note_path, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
-  ).run(id, notePath, createdBy, expiresAt.toISOString(), maxViews, now.toISOString());
+    "INSERT INTO shared_links (id, note_path, vault_id, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+  ).run(id, notePath, vaultId, createdBy, expiresAt.toISOString(), maxViews, now.toISOString());
 
   const owner = getUserById(createdBy);
   const ownerHandle = owner?.username ?? "unknown";
