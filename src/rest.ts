@@ -1120,7 +1120,7 @@ async function executeWriteInMutex(params: {
   const sourceHash = contentHash(serialized);
   recordWrite(relPath, sourceHash, sha, keyName ?? "api");
 
-  qmdReindex(relPath).catch(() => {});
+  qmdReindex(ctx.vaultPath).catch(() => {});
 
   return {
     path: relPath,
@@ -1484,7 +1484,7 @@ export async function handleDeleteNote(
       unlinkSync(srcAbs);
       invalidateFrontmatterCache(srcAbs);
       const commitSha = await gitCommitPaths(ctx.vaultPath, [srcRel], `${who}: delete ${srcRel}`);
-      qmdReindex(srcRel).catch(() => {});
+      qmdReindex(ctx.vaultPath).catch(() => {});
       deleteProvenance(srcRel);
     // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
       return commitSha;
@@ -1540,7 +1540,7 @@ export async function handleDeleteNote(
       [srcRel, archiveRel],
       `${who}: archive ${srcRel}`,
     );
-    qmdReindex(srcRel).catch(() => {});
+    qmdReindex(ctx.vaultPath).catch(() => {});
     // Archive path has new content (added archived_from/archived_at to frontmatter),
     // so we record a fresh source_hash rather than renaming the old provenance.
     deleteProvenance(srcRel);
@@ -1653,7 +1653,7 @@ export async function handleMoveNote(
       `${who}: move ${srcRel} → ${dstRel}`,
     );
 
-    qmdReindex(dstRel).catch(() => {});
+    qmdReindex(ctx.vaultPath).catch(() => {});
     // refreshStats moved to 5-min timer — computing on every write blocks the event loop (CPU-bound graph analysis). See vault-stats.ts startStatsTimer.
 
     // The moved file's own content is unchanged by the move (only its path),

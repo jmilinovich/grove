@@ -173,7 +173,7 @@ export async function wireLinks(
     if (updated !== original) {
       writeFileSync(absPath, updated, "utf-8");
       const sha = await gitCommit(vaultPath, notePath, `discovery: wire links in ${notePath}`);
-      await qmdReindex(notePath);
+      await qmdReindex(vaultPath);
       // Count actual links inserted (compare lengths as proxy)
       result.links_wired = extraction.suggested_links.filter(
         (l) => updated.includes(`[[${l.to_path}|${l.from_text}]]`),
@@ -198,7 +198,7 @@ export async function wireLinks(
     const content = buildNewNoteContent(note);
     writeFileSync(absPath, content, "utf-8");
     const sha = await gitCommit(vaultPath, note.path, `discovery: create ${note.path}`);
-    await qmdReindex(note.path);
+    await qmdReindex(vaultPath);
 
     result.notes_created.push(note.path);
     console.log(`[link] created ${note.path} (${sha})`);
