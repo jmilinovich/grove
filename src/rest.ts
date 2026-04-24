@@ -236,9 +236,11 @@ async function resolveNote(
     if (existsSync(matchAbs)) return readNote(matchAbs, aliasMatch.path, file);
   }
 
-  // 8. BM25 fallback
+  // 8. BM25 fallback — scoped to this vault's QMD collection so the
+  // fallback never resolves a wikilink to a note in a different vault.
+  const collection = ctx.vaultPath.split("/").filter(Boolean).pop() ?? "";
   try {
-    const results = await bm25Search(searchTerm, 3);
+    const results = await bm25Search(searchTerm, 3, collection);
     if (results.length > 0) {
       const resolvedLower = results[0].vault_path.toLowerCase();
       const realNote = allNotes.find((n) => n.path.toLowerCase() === resolvedLower);
@@ -818,7 +820,11 @@ export function handleTrailPreviewTest(
  */
 export async function handleSearch(ctx: VaultContext, query: string, limit: number = 10, trail?: TrailConfig | null, handle?: string): Promise<SearchResult[]> {
   const fetchLimit = trail ? limit * 3 : limit; // over-fetch for trail filtering
-  const results = await hybridSearch(query, fetchLimit);
+  // Derive the QMD collection from the vault's on-disk basename so
+  // multi-vault deployments don't return another vault's notes.
+  // Matches vault-stats.ts's derivation.
+  const collection = ctx.vaultPath.split("/").filter(Boolean).pop() ?? "";
+  const results = await hybridSearch(query, fetchLimit, collection);
 
   const residentHandle = handle ?? vaultOwnerHandle(ctx);
 
