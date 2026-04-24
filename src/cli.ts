@@ -2376,6 +2376,15 @@ async function main() {
     }
     if (command === "init") { result = await cmdInit(flags); emitResult(result, flags); return; }
 
+    // `grove vault regen` is a VPS-local operation (reads DB, rewrites
+    // ecosystem.config.cjs, reloads pm2). It must run without cli.json,
+    // since the box has no remote token and doesn't need one.
+    if (command === "vault" && positional === "regen") {
+      result = await cmdVaultRegen(flags);
+      emitResult(result, flags);
+      return;
+    }
+
     // Vault structure config — local only, reads/writes $VAULT/.grove/config.yaml.
     if (command === "config") {
       const sub = positional || "show";
