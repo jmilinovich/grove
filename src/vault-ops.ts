@@ -359,6 +359,23 @@ export async function startupRecovery(vaultPath: string): Promise<void> {
   }
 
   const { remote, branch } = await getRemoteAndBranch(vaultPath);
+
+  // If the remote-tracking ref doesn't exist (vault has no remote, or branch
+  // was never pushed), there's nothing to compare HEAD against — skip the
+  // unpushed-commits check instead of crashing the startup path. Left
+  // unguarded, `git log origin/main..HEAD` aborts with "ambiguous argument"
+  // and pm2 restart-loops the server. See project_stale_mcp_session.md.
+  try {
+    await exec(
+      "git",
+      ["rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/${branch}`],
+      vaultPath,
+    );
+  } catch {
+    console.log(`[vault-ops] no remote-tracking ref ${remote}/${branch} — skipping unpushed-commits check`);
+    return;
+  }
+
   const unpushed = await exec(
     "git",
     ["log", `${remote}/${branch}..HEAD`, "--oneline"],
