@@ -1515,6 +1515,47 @@ async function cmdVaultCreate(
   }
 }
 
+async function cmdVaultRegen(
+  flags: Record<string, string | boolean>,
+): Promise<CmdResult> {
+  const dryRun = flags["dry-run"] === true;
+  const prune = flags.prune === true;
+  const skipReload = flags["skip-reload"] === true || dryRun;
+
+  const { regenerateEcosystem } = await import("./vault-provision.js");
+  const result = await regenerateEcosystem({
+    skipWrite: dryRun,
+    skipReload,
+    prune: prune && !dryRun,
+  });
+
+  return {
+    ok: true,
+    ecosystem_path: result.ecosystemPath,
+    expected_apps: result.expectedApps,
+    current_apps: result.currentApps,
+    orphans: result.orphans,
+    pruned: result.pruned,
+    wrote: result.wrote,
+    reloaded: result.reloaded,
+    _fmt: () => {
+      const lines: string[] = [];
+      lines.push(`ecosystem_path: ${result.ecosystemPath}`);
+      lines.push(`expected apps:  ${result.expectedApps.join(", ") || "(none)"}`);
+      lines.push(`current apps:   ${result.currentApps.join(", ") || "(none)"}`);
+      if (result.orphans.length > 0) {
+        lines.push(`orphans:        ${result.orphans.join(", ")}  ${prune ? "(pruned)" : "(pass --prune to delete)"}`);
+      } else {
+        lines.push(`orphans:        (none)`);
+      }
+      lines.push(`wrote config:   ${result.wrote}`);
+      lines.push(`reloaded pm2:   ${result.reloaded}`);
+      if (result.pruned.length > 0) lines.push(`pruned:         ${result.pruned.join(", ")}`);
+      return lines.join("\n");
+    },
+  };
+}
+
 // ── Vault encryption (remote, via /v1/admin/vault API) ─────────
 
 async function cmdVaultStatus(config: Config): Promise<CmdResult> {
@@ -1991,10 +2032,15 @@ export const HELP: Record<string, CmdHelp> = {
     exit_codes: EXIT_CODES,
   },
   vault: {
-    usage: "grove vault [status|encrypt|unlock|lock] [--json]",
-    description: "Encryption lifecycle. Passphrase is read from stdin (interactive) or GROVE_VAULT_PASSPHRASE env var.",
-    flags: ["--json    JSON output"],
-    json_schema: "{ok, encrypted, unlocked, last_unlocked_at} | {ok, locked|unlocked|encrypted: true}",
+    usage: "grove vault [status|encrypt|unlock|lock|create|regen] [--json]",
+    description: "Encryption lifecycle, vault provisioning, and ecosystem config regen.",
+    flags: [
+      "--json         JSON output",
+      "--prune        (regen) pm2-delete apps no longer in the generated config",
+      "--skip-reload  (regen) write the file but skip `pm2 reload`",
+      "--dry-run      (regen) print the plan without writing or reloading",
+    ],
+    json_schema: "encryption: {ok, encrypted, unlocked, last_unlocked_at} | regen: {ok, ecosystem_path, expected_apps, current_apps, orphans, pruned, wrote, reloaded}",
     exit_codes: EXIT_CODES,
     examples: [
       "grove vault status",
@@ -2002,6 +2048,8 @@ export const HELP: Record<string, CmdHelp> = {
       "grove vault unlock",
       "grove vault lock",
       "GROVE_VAULT_PASSPHRASE=... grove vault unlock --json",
+      "grove vault regen --dry-run",
+      "sudo grove vault regen --prune",
     ],
   },
   sync: {
@@ -2415,8 +2463,11 @@ async function main() {
           result = await cmdVaultCreate(slugArg, flags);
           break;
         }
+        case "regen":
+          result = await cmdVaultRegen(flags);
+          break;
         default:
-          throw new CliError("bad_request", `Unknown vault subcommand: ${sub}\nUsage: grove vault [status|encrypt|unlock|lock|create]`, 1);
+          throw new CliError("bad_request", `Unknown vault subcommand: ${sub}\nUsage: grove vault [status|encrypt|unlock|lock|create|regen]`, 1);
       }
       emitResult(result, flags);
       return;

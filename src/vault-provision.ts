@@ -76,6 +76,10 @@ export interface Effects {
   reloadPm2(ecosystemPath: string): void;
   /** Poll the new server's /health until {ok: true} or timeout. */
   waitForHealth(port: number, timeoutMs: number): Promise<void>;
+  /** List all app names currently registered with PM2. */
+  listPm2Apps(): string[];
+  /** `sudo pm2 delete <name>` — used to prune apps no longer in the ecosystem. */
+  deletePm2App(name: string): void;
 }
 
 export const defaultEffects: Effects = {
@@ -122,6 +126,14 @@ export const defaultEffects: Effects = {
       await new Promise((r) => setTimeout(r, 1_000));
     }
     throw new ProvisionError("health_failed", `grove-server on :${port} never became healthy`);
+  },
+  listPm2Apps(): string[] {
+    const raw = execSync("sudo pm2 jlist", { encoding: "utf8" });
+    const list = JSON.parse(raw) as Array<{ name?: string }>;
+    return list.map((p) => p.name ?? "").filter(Boolean);
+  },
+  deletePm2App(name: string): void {
+    execSync(`sudo pm2 delete ${name}`, { stdio: "inherit" });
   },
 };
 
@@ -271,4 +283,81 @@ export async function provisionVault(
     connectorUrl: `${connectorBaseUrl}/v/${input.slug}/mcp`,
     ecosystemPath,
   };
+}
+
+export interface RegenOptions extends EcosystemOptions {
+  ecosystemPath?: string;
+  effects?: Effects;
+  /** Skip rewriting the ecosystem file. Useful for --dry-run. */
+  skipWrite?: boolean;
+  /** Skip `sudo pm2 reload`. */
+  skipReload?: boolean;
+  /** Also `pm2 delete` any app present in PM2 but not in the regenerated config. */
+  prune?: boolean;
+}
+
+export interface RegenResult {
+  ecosystemPath: string;
+  expectedApps: string[];
+  currentApps: string[];
+  orphans: string[];
+  pruned: string[];
+  wrote: boolean;
+  reloaded: boolean;
+}
+
+/**
+ * Regenerate `ecosystem.config.cjs` from the current `vaults` table and,
+ * optionally, reload PM2 and prune orphan apps.
+ *
+ * Why this exists: `generateEcosystemConfig` evolves (e.g. P8 dropped
+ * `qmd-server` once qmd 2.1 removed `qmd serve`), but the file on disk
+ * only refreshes when `provisionVault` runs. A VPS provisioned before a
+ * generator change carries the stale config indefinitely — and `pm2
+ * reload` never deletes apps that disappear from the config, so a
+ * removed process stays crash-looping forever. `--prune` closes that gap.
+ */
+export async function regenerateEcosystem(
+  opts: RegenOptions = {},
+): Promise<RegenResult> {
+  const effects = opts.effects ?? defaultEffects;
+  const ecosystemPath = opts.ecosystemPath ?? "/root/grove/ecosystem.config.cjs";
+  const db = getDb();
+  const vaults = readProvisionedVaults(db);
+  const content = generateEcosystemConfig(vaults, opts);
+
+  const expectedApps = extractAppNames(content);
+  const currentApps = effects.listPm2Apps();
+  const orphans = currentApps.filter((n) => !expectedApps.includes(n));
+
+  const wrote = !opts.skipWrite;
+  if (wrote) effects.writeEcosystem(ecosystemPath, content);
+
+  const reloaded = wrote && !opts.skipReload;
+  if (reloaded) {
+    try {
+      effects.reloadPm2(ecosystemPath);
+    } catch (err) {
+      throw new ProvisionError("reload_failed", `pm2 reload failed: ${(err as Error).message}`);
+    }
+  }
+
+  const pruned: string[] = [];
+  if (opts.prune && orphans.length > 0) {
+    for (const name of orphans) {
+      effects.deletePm2App(name);
+      pruned.push(name);
+    }
+  }
+
+  return { ecosystemPath, expectedApps, currentApps, orphans, pruned, wrote, reloaded };
+}
+
+/** Parse the generated CJS and return the ordered list of `apps[].name`. */
+function extractAppNames(generated: string): string[] {
+  const names: string[] = [];
+  const re = /"name":\s*"([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(generated)) !== null) names.push(m[1]);
+  return names;
 }

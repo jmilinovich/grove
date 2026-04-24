@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { resetDb, getDb, createSchema } from "../src/db.js";
 import {
   provisionVault,
+  regenerateEcosystem,
   validateSlug,
   nextAvailablePorts,
   ProvisionError,
@@ -18,6 +19,8 @@ const noopEffects: Effects = {
   writeEcosystem: () => {},
   reloadPm2: () => {},
   waitForHealth: async () => {},
+  listPm2Apps: () => [],
+  deletePm2App: () => {},
 };
 
 describe("vault-provision (P8-A4)", () => {
@@ -188,6 +191,105 @@ describe("vault-provision (P8-A4)", () => {
       );
       expect(reloaded).toBe(true);
       expect(polledPort).toBe(8191);
+    });
+  });
+
+  describe("regenerateEcosystem", () => {
+    it("reports stale apps and expected apps from current vault state", async () => {
+      const effects: Effects = {
+        ...noopEffects,
+        listPm2Apps: () => [
+          "grove-proxy",
+          "grove-server-personal",
+          "grove-discovery-personal",
+          "qmd-server", // stale — not in current generator output
+        ],
+      };
+
+      const result = await regenerateEcosystem({
+        skipWrite: true,
+        skipReload: true,
+        effects,
+      });
+
+      expect(result.expectedApps).toEqual([
+        "grove-proxy",
+        "grove-server-personal",
+        "grove-discovery-personal",
+      ]);
+      expect(result.orphans).toEqual(["qmd-server"]);
+      expect(result.wrote).toBe(false);
+      expect(result.reloaded).toBe(false);
+      expect(result.pruned).toEqual([]);
+    });
+
+    it("writes + reloads by default", async () => {
+      let wrote = "";
+      let reloaded = "";
+      const effects: Effects = {
+        ...noopEffects,
+        writeEcosystem: (path) => {
+          wrote = path;
+        },
+        reloadPm2: (path) => {
+          reloaded = path;
+        },
+      };
+
+      const result = await regenerateEcosystem({ effects });
+      expect(result.wrote).toBe(true);
+      expect(result.reloaded).toBe(true);
+      expect(wrote).toBe("/root/grove/ecosystem.config.cjs");
+      expect(reloaded).toBe("/root/grove/ecosystem.config.cjs");
+    });
+
+    it("prunes orphan apps when --prune is passed", async () => {
+      const deleted: string[] = [];
+      const effects: Effects = {
+        ...noopEffects,
+        listPm2Apps: () => [
+          "grove-proxy",
+          "grove-server-personal",
+          "grove-discovery-personal",
+          "qmd-server",
+          "some-other-zombie",
+        ],
+        deletePm2App: (name) => {
+          deleted.push(name);
+        },
+      };
+
+      const result = await regenerateEcosystem({
+        prune: true,
+        skipWrite: true,
+        skipReload: true,
+        effects,
+      });
+
+      expect(result.orphans.sort()).toEqual(["qmd-server", "some-other-zombie"]);
+      expect(result.pruned.sort()).toEqual(["qmd-server", "some-other-zombie"]);
+      expect(deleted.sort()).toEqual(["qmd-server", "some-other-zombie"]);
+    });
+
+    it("does not prune by default", async () => {
+      const deleted: string[] = [];
+      const effects: Effects = {
+        ...noopEffects,
+        listPm2Apps: () => ["grove-proxy", "grove-server-personal", "grove-discovery-personal", "qmd-server"],
+        deletePm2App: (name) => {
+          deleted.push(name);
+        },
+      };
+
+      const result = await regenerateEcosystem({
+        skipWrite: true,
+        skipReload: true,
+        effects,
+      });
+
+      expect(result.orphans).toEqual(["qmd-server"]);
+      expect(result.pruned).toEqual([]);
+      expect(deleted).toEqual([]);
     });
   });
 });
