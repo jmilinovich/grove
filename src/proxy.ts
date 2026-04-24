@@ -2018,7 +2018,21 @@ const server = createServer(async (req, res) => {
     const trailInfoMatch = restPath.match(/^\/v1\/trails\/([^/]+)\/info$/);
     if (trailInfoMatch && req.method === "GET") {
       const trailId = decodeURIComponent(trailInfoMatch[1]);
-      const info = handleTrailInfo(restCtx, trailId);
+      // Scope to the TRAIL'S vault — not `restCtx` (which is the
+      // proxy's default on this unauthenticated path). Otherwise the
+      // trail's note_count is computed over the wrong vault's
+      // filesystem and the trail-page preview shows the wrong
+      // content.
+      const db = getDb();
+      const trailRow = db
+        .prepare("SELECT vault_id FROM trails WHERE id = ? LIMIT 1")
+        .get(trailId) as { vault_id: string } | undefined;
+      let infoCtx: VaultContext = restCtx;
+      if (trailRow?.vault_id) {
+        const trailVault = lookupVaultById(trailRow.vault_id);
+        if (trailVault) infoCtx = contextFromRoute(trailVault);
+      }
+      const info = handleTrailInfo(infoCtx, trailId);
       if (!info) {
         sendJson(res, 404, { error: "trail not found" });
         return;
