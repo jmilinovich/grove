@@ -1409,6 +1409,28 @@ const server = createServer(async (req, res) => {
     restPath = vaultV1Match[2]!;
     restCtx = contextFromRoute(route);
     restIsVaultScoped = true;
+  } else if (restPath.startsWith("/v1/")) {
+    // Legacy `/v1/*` paths don't carry a vault slug. The previous
+    // shape left `restCtx = defaultVaultContext()`, which reads from
+    // the proxy's `$GROVE_VAULT` — that served every token's reads
+    // from the proxy's primary vault regardless of which vault the
+    // token actually bound to. A token for vault B calling
+    // `/v1/notes/x.md` got vault A's (primary's) content.
+    //
+    // Look up the Bearer token tentatively (handlers still do their
+    // own full auth below — this just resolves the right ctx) and
+    // route to its vault when we can. Fallback to default only when
+    // there's no parseable bearer (e.g. public endpoints like
+    // `/v1/share/:id`, `/v1/residents/:handle`, `/v1/trails/:id/info`).
+    const authHeader = req.headers.authorization;
+    const authToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    const authKey = authToken ? validateToken(authToken) : null;
+    if (authKey?.vault_id) {
+      const boundVault = lookupVaultById(authKey.vault_id);
+      if (boundVault) {
+        restCtx = contextFromRoute(boundVault);
+      }
+    }
   }
   if (restPath.startsWith("/v1/")) {
     const REST_CORS_ORIGIN = process.env.GROVE_WWW_ORIGIN ?? "https://grove.md";
