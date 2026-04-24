@@ -29,7 +29,7 @@ import { validatePath, validateNote, parseNote, serializeNote, contentHash } fro
 import { loadVaultConfig, entityFolders } from "./vault-config.js";
 import { filterByTrail, trailAllowsWrite, getTrailPublicInfo, getTrailConfig, type TrailConfig, type NoteMetadata } from "./trails.js";
 import { getStats } from "./vault-stats.js";
-import { analyzeGraph, computeDigest } from "./vault-graph.js";
+import { computeDigest } from "./vault-graph.js";
 import { searchMetrics, metrics } from "./metrics.js";
 import { WriteQueue } from "./write-queue.js";
 import { embedFile } from "./embed-single.js";
@@ -937,9 +937,9 @@ export function handleStats(
 
 // ── Status endpoints (vault_status modes via REST) ─────────────────
 
-export type StatusMode = "health" | "history" | "diagnostics" | "graph" | "digest";
+export type StatusMode = "health" | "history" | "diagnostics" | "digest";
 
-export const VALID_STATUS_MODES = new Set<StatusMode>(["health", "history", "diagnostics", "graph", "digest"]);
+export const VALID_STATUS_MODES = new Set<StatusMode>(["health", "history", "diagnostics", "digest"]);
 
 /**
  * Health: doc count, freshness, lifecycle, folder/type breakdown.
@@ -1049,15 +1049,6 @@ export function handleStatusDiagnostics(ctx: VaultContext): Record<string, unkno
     missing_frontmatter: { count: issues.missing_frontmatter.length, notes: issues.missing_frontmatter.slice(0, 20) },
     stale_inbox: { count: issues.stale_inbox.length, notes: issues.stale_inbox },
   };
-}
-
-/**
- * Graph: wikilink graph analysis — most connected, bridges, clusters, orphans.
- */
-export async function handleStatusGraph(ctx: VaultContext): Promise<Record<string, unknown>> {
-  const stats = getStats(ctx.vaultPath);
-  if (stats) return stats.graph as unknown as Record<string, unknown>;
-  return await analyzeGraph(ctx.vaultPath) as unknown as Record<string, unknown>;
 }
 
 /**
