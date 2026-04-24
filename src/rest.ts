@@ -96,40 +96,7 @@ export async function flushWriteQueue(): Promise<void> {
   );
 }
 
-/**
- * Resolve the handle (users.username) for the vault owner.
- *
- * Grove is single-tenant today — every public URL is scoped to one resident.
- * Used as the fallback when a caller hasn't supplied an explicit handle.
- * Returns "unknown" when no user row exists (fresh test databases).
- */
-function getVaultOwnerHandle(): string {
-  try {
-    const db = getDb();
-    const row = db
-      .prepare(
-        "SELECT u.username FROM vaults v JOIN users u ON u.id = v.owner_id ORDER BY v.created_at ASC LIMIT 1",
-      )
-      .get() as { username: string | null } | undefined;
-    if (row?.username) return row.username;
-    const fallback = db
-      .prepare("SELECT username FROM users WHERE role = 'owner' LIMIT 1")
-      .get() as { username: string | null } | undefined;
-    return fallback?.username ?? "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-/**
- * Encode a vault path as a canonical `/@<handle>/<path>` URL.
- * Every segment is URL-encoded; slashes are preserved.
- */
-function noteUrl(vaultPath: string, handle: string): string {
-  const stripped = vaultPath.replace(/\.md$/, "");
-  const encoded = stripped.split("/").map(encodeURIComponent).join("/");
-  return `https://grove.md/@${handle}/${encoded}`;
-}
+import { noteUrl, vaultOwnerHandle } from "./url.js";
 
 // ── Path traversal guard (same as server.ts) ────────────────────────
 
@@ -473,13 +440,12 @@ export function handleTrailInfo(ctx: VaultContext, trailId: string): TrailInfoRe
     }).length;
   }
 
-  // Trails don't carry an explicit owner column — Grove is single-resident
-  // today, so the vault owner is the trail's effective owner. The legacy
-  // `/trails/:slug` page uses this to 301 to `/@<handle>/trails/:slug`
-  // (P16-3). `getVaultOwnerHandle()` returns "unknown" on empty databases;
-  // normalize that to null so the client can skip the redirect rather than
-  // hit `/@unknown`.
-  const rawOwner = getVaultOwnerHandle();
+  // Trails don't carry an explicit owner column — the vault's owner is the
+  // trail's effective owner. The legacy `/trails/:slug` page uses this to
+  // 301 to `/@<handle>/trails/:slug` (P16-3). `vaultOwnerHandle(ctx)`
+  // returns "unknown" on empty databases; normalize that to null so the
+  // client can skip the redirect rather than hit `/@unknown`.
+  const rawOwner = vaultOwnerHandle(ctx);
   const ownerHandle = rawOwner === "unknown" ? null : rawOwner;
 
   return {
@@ -839,7 +805,7 @@ export async function handleSearch(ctx: VaultContext, query: string, limit: numb
   const fetchLimit = trail ? limit * 3 : limit; // over-fetch for trail filtering
   const results = await hybridSearch(query, fetchLimit);
 
-  const residentHandle = handle ?? getVaultOwnerHandle();
+  const residentHandle = handle ?? vaultOwnerHandle(ctx);
 
   // Resolve QMD's lowercase-kebab paths to real filesystem paths.
   // QMD index stores e.g. "resources/concepts/meditation-mindfulness.md"
@@ -860,7 +826,7 @@ export async function handleSearch(ctx: VaultContext, query: string, limit: numb
       score: r.rrf_score,
       vault_path: r.vault_path,
       real_path: realPath,
-      url: noteUrl(realPath, residentHandle),
+      url: noteUrl(ctx, realPath, residentHandle),
     };
   });
 
@@ -1141,7 +1107,7 @@ async function executeWriteInMutex(params: {
     source_hash: sourceHash,
     content_hash: sourceHash,
     commit: sha,
-    url: noteUrl(relPath, handle ?? getVaultOwnerHandle()),
+    url: noteUrl(ctx, relPath, handle),
   };
 }
 
@@ -1710,7 +1676,7 @@ export async function handleMoveNote(
     commit: result.commit,
     source_hash: result.source_hash,
     content_hash: result.content_hash,
-    url: noteUrl(dstRel, options.handle ?? getVaultOwnerHandle()),
+    url: noteUrl(ctx, dstRel, options.handle),
   };
 }
 

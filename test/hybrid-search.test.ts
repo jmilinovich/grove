@@ -241,3 +241,42 @@ describe("formatResults (exported) — image metadata", () => {
     expect(output).not.toContain("![thumbnail]");
   });
 });
+
+// ── URL shape: /@<handle>/<path> (regression for missing-handle bug) ─
+
+describe("formatResults (exported) — URL shape", () => {
+  it("scopes URLs to /@<handle>/<path> when handle is supplied", () => {
+    const output = realFormatResults(
+      [
+        {
+          vault_path: "Resources/Recipes/Chicken Rice Broccoli.md",
+          title: "Chicken Rice Broccoli",
+          rrf_score: 0.9,
+          snippet: "weeknight dinner",
+          sources: ["bm25"],
+        },
+      ],
+      undefined,
+      "alice",
+    );
+    expect(output).toContain(
+      "(https://grove.md/@alice/Resources/Recipes/Chicken%20Rice%20Broccoli)",
+    );
+  });
+
+  it("emits an unscoped URL only when no handle is supplied (test/legacy)", () => {
+    // Production callers in server.ts always pass a handle. This guards the
+    // fallback so unit tests don't need a DB.
+    const output = realFormatResults([
+      {
+        vault_path: "a/b.md",
+        title: "Note",
+        rrf_score: 0.5,
+        snippet: "",
+        sources: ["bm25"],
+      },
+    ]);
+    expect(output).toContain("(https://grove.md/a/b)");
+    expect(output).not.toContain("/@");
+  });
+});
