@@ -62,7 +62,7 @@ import {
   handleGetNote, handleSearch, handleListNotes, handleStats, handleWriteNote,
   handleDeleteNote, handleMoveNote,
   handleStatusHealth, handleStatusHistory, handleStatusDiagnostics,
-  handleStatusGraph, handleStatusDigest, handleTrailInfo,
+  handleStatusDigest, handleTrailInfo,
   handleResidentProfile,
   handleTrailPreview, handleTrailPreviewTest,
   VALID_STATUS_MODES,
@@ -2411,9 +2411,6 @@ const server = createServer(async (req, res) => {
           }
           case "diagnostics":
             result = handleStatusDiagnostics(restCtx, );
-            break;
-          case "graph":
-            result = await handleStatusGraph(restCtx, );
             break;
           case "digest":
             result = await handleStatusDigest(restCtx, );
