@@ -443,7 +443,7 @@ describe("getTrailPublicInfo + getTrailConfig", () => {
   });
 
   it("returns trail public info after creation", () => {
-    const { trail } = createTrail({ name: "AI Research", description: "Shared AI notes" });
+    const { trail } = createTrail({ name: "AI Research", description: "Shared AI notes", vault_id: "vault_00000000" });
     const info = getTrailPublicInfo(trail.id);
     expect(info).not.toBeNull();
     expect(info!.name).toBe("AI Research");
@@ -453,7 +453,7 @@ describe("getTrailPublicInfo + getTrailConfig", () => {
   });
 
   it("returns null for disabled trail", () => {
-    const { trail } = createTrail({ name: "Disabled Trail" });
+    const { trail } = createTrail({ name: "Disabled Trail", vault_id: "vault_00000000" });
     disableTrail(trail.id);
     const info = getTrailPublicInfo(trail.id);
     expect(info).not.toBeNull();
@@ -465,6 +465,7 @@ describe("getTrailPublicInfo + getTrailConfig", () => {
       name: "Scoped Trail",
       allow_paths: ["Resources/"],
       deny_tags: ["private"],
+      vault_id: "vault_00000000",
     });
     const config = getTrailConfig(trail.id);
     expect(config).not.toBeNull();

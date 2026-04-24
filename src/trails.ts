@@ -94,11 +94,20 @@ export function createTrail(opts: {
   deny_paths?: string[];
   rate_limit_reads?: number;
   rate_limit_writes?: number;
+  /**
+   * Vault the trail belongs to. Pre-P20 this was hard-coded to the
+   * string `"life"` — the result was that every trail row was
+   * assigned to a non-existent vault id, so per-vault trail filtering
+   * (shipped in grove#53) silently returned zero rows. Callers must
+   * now pass the routed vault's id.
+   */
+  vault_id: string;
 }): { trail: TrailConfig; token: string } {
   const db = getDb();
 
-  // Create a read-only API key for this trail
-  const keyResult = createKey(`trail:${opts.name}`, ["read"], "life");
+  // Create a read-only API key for this trail, bound to the same
+  // vault as the trail itself.
+  const keyResult = createKey(`trail:${opts.name}`, ["read"], opts.vault_id);
 
   const trailId = generateTrailId();
   const now = new Date().toISOString();
@@ -115,7 +124,7 @@ export function createTrail(opts: {
 
   db.prepare(
     "INSERT INTO trails (id, vault_id, name, description, enabled, config_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-  ).run(trailId, "life", opts.name, opts.description ?? "", 1, configJson, now, now);
+  ).run(trailId, opts.vault_id, opts.name, opts.description ?? "", 1, configJson, now, now);
 
   db.prepare(
     "INSERT INTO trail_grants (id, trail_id, grantee_type, grantee_id, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -288,20 +297,22 @@ export function filterByTrail(trail: TrailConfig, note: NoteMetadata): boolean {
 
 /**
  * Check if a trail allows writes to a given path.
- * Trail must have rate_limit_writes > 0 and path must be within allow_paths.
+ * Trail must have rate_limit_writes > 0, path must match allow_paths if
+ * specified, AND path must not match deny_paths. The original shape
+ * short-circuited on allow_paths and never consulted deny_paths when
+ * both were set — a trail like `allow=Resources/, deny=Resources/Private/`
+ * would let writes into the denied subtree.
  */
 export function trailAllowsWrite(trail: TrailConfig, path: string): boolean {
   if (trail.rate_limit_writes <= 0) return false;
 
-  // If allow_paths specified, path must match
-  if (trail.allow_paths.length > 0) {
-    return trail.allow_paths.some((prefix) => path.startsWith(prefix));
-  }
+  const allowed =
+    trail.allow_paths.length === 0 ||
+    trail.allow_paths.some((prefix) => path.startsWith(prefix));
+  if (!allowed) return false;
 
-  // If deny_paths specified, path must not match
-  if (trail.deny_paths.length > 0) {
-    return !trail.deny_paths.some((prefix) => path.startsWith(prefix));
-  }
+  const denied = trail.deny_paths.some((prefix) => path.startsWith(prefix));
+  if (denied) return false;
 
   return true;
 }

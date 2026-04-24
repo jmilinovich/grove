@@ -1723,7 +1723,18 @@ const server = createServer(async (req, res) => {
 
       const shareId = decodeURIComponent(adminShareDeleteMatch[1]!);
       const existing = getShareLink(shareId);
+      // 404 for both "missing" and "not yours" so we don't leak share
+      // existence. Revoke authority is: the creator of the share, or a
+      // member of the vault the share belongs to.
       if (!existing) { sendJson(res, 404, { error: "share not found" }); return; }
+      const callerOwns = existing.created_by === admin.userId;
+      const callerHasVaultMembership = existing.vault_id
+        ? userIsVaultMember(admin.userId, existing.vault_id)
+        : false;
+      if (!callerOwns && !callerHasVaultMembership) {
+        sendJson(res, 404, { error: "share not found" });
+        return;
+      }
       if (existing.revoked_at !== null) {
         sendJson(res, 409, { error: "already_revoked", revoked_at: existing.revoked_at, revoked_by: existing.revoked_by });
         return;
@@ -2599,6 +2610,11 @@ const server = createServer(async (req, res) => {
       }
 
       if (parsed.action === "create" && parsed.name) {
+        // Bind the new trail (and its read key) to the request's vault.
+        // When the caller arrived via `/v/<slug>/v1/admin/trails`,
+        // `restCtx.vaultId` is that vault. On the legacy unscoped
+        // path, we still fall back to the proxy's default so the
+        // legacy CLI flow keeps working.
         const result = createTrail({
           name: parsed.name,
           description: parsed.description,
@@ -2610,6 +2626,7 @@ const server = createServer(async (req, res) => {
           deny_paths: parsed.deny_paths,
           rate_limit_reads: parsed.rate_limit_reads,
           rate_limit_writes: parsed.rate_limit_writes,
+          vault_id: restCtx.vaultId,
         });
         res.writeHead(200, restHeaders);
         res.end(JSON.stringify({ trail: result.trail, token: result.token }));
