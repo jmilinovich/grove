@@ -395,11 +395,11 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
 
   // Authorization endpoint — shows a simple page to paste your API key
   if (path === "/oauth/authorize" && req.method === "GET") {
-    const clientId = url.searchParams.get("client_id") ?? "";
-    const redirectUri = url.searchParams.get("redirect_uri") ?? "";
-    const state = url.searchParams.get("state") ?? "";
-    const codeChallenge = url.searchParams.get("code_challenge") ?? "";
-    const codeChallengeMethod = url.searchParams.get("code_challenge_method") ?? "";
+    const clientId = htmlEscape(url.searchParams.get("client_id") ?? "");
+    const redirectUri = htmlEscape(url.searchParams.get("redirect_uri") ?? "");
+    const state = htmlEscape(url.searchParams.get("state") ?? "");
+    const codeChallenge = htmlEscape(url.searchParams.get("code_challenge") ?? "");
+    const codeChallengeMethod = htmlEscape(url.searchParams.get("code_challenge_method") ?? "");
 
     const html = `<!DOCTYPE html>
 <html><head><title>Grove &mdash; Authorize</title>
@@ -651,7 +651,23 @@ function proxyToQmd(req: IncomingMessage, res: ServerResponse) {
   req.pipe(proxyReq);
 }
 
+/** HTML-escape for safe interpolation into attributes/text. */
+function htmlEscape(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function verifyPage(token: string, email: string, csrf: string, redirect: string = ""): string {
+  // All four values may be attacker-controlled (magic-link query params,
+  // posted form values). Escape before interpolating into attributes.
+  const tokenEsc = htmlEscape(token);
+  const emailEsc = htmlEscape(email);
+  const csrfEsc = htmlEscape(csrf);
+  const redirectEsc = htmlEscape(redirect);
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Grove — Confirm Sign In</title>
@@ -668,12 +684,12 @@ function verifyPage(token: string, email: string, csrf: string, redirect: string
 </style></head><body>
 <div class="card">
   <h1>Grove</h1>
-  <p>Sign in as <span class="email">${email}</span></p>
+  <p>Sign in as <span class="email">${emailEsc}</span></p>
   <form method="POST" action="/auth/verify">
-    <input type="hidden" name="token" value="${token}">
-    <input type="hidden" name="email" value="${email}">
-    <input type="hidden" name="csrf" value="${csrf}">
-    <input type="hidden" name="redirect" value="${redirect}">
+    <input type="hidden" name="token" value="${tokenEsc}">
+    <input type="hidden" name="email" value="${emailEsc}">
+    <input type="hidden" name="csrf" value="${csrfEsc}">
+    <input type="hidden" name="redirect" value="${redirectEsc}">
     <button type="submit">Confirm Sign In</button>
   </form>
 </div>
@@ -1112,8 +1128,19 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // If redirect to grove.md, use auth code flow
-    if (redirect && redirect.startsWith("https://grove.md")) {
+    // If redirect to grove.md, use auth code flow. `startsWith` alone
+    // permits e.g. `https://grove.md.evil.com/...` — parse the URL and
+    // compare the host exactly so the auth code never leaks off-origin.
+    let redirectsToGroveMd = false;
+    if (redirect) {
+      try {
+        const parsed = new URL(redirect);
+        redirectsToGroveMd = parsed.protocol === "https:" && parsed.host === "grove.md";
+      } catch {
+        redirectsToGroveMd = false;
+      }
+    }
+    if (redirectsToGroveMd) {
       const code = createAuthCode(result.user.id);
       const sep = redirect.includes("?") ? "&" : "?";
       res.writeHead(302, { "Location": `${redirect}${sep}code=${code}` });
@@ -1434,7 +1461,11 @@ const server = createServer(async (req, res) => {
     // POST /v1/admin/invite — invite a user to a trail
     if (restPath === "/v1/admin/invite" && req.method === "POST") {
       const admin = adminAuth(req);
-      if (!admin) { sendJson(res, 401, { error: "unauthorized" }); return; }
+      // `admin` is always a truthy object (AdminAuthResult). The correct
+      // unauthenticated check is `!admin.ok` — the typo gated nothing
+      // and made this endpoint fully unauthenticated. Anyone could
+      // POST arbitrary invites (including role=owner for any vault).
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       let body: string;
       try { body = await readBody(req); } catch {
