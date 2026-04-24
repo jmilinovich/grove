@@ -81,8 +81,13 @@ function ftsVaultPath(filepath: string): string {
 
 /**
  * BM25 search via FTS5 directly against QMD's SQLite index.
+ *
+ * When `collection` is provided, restricts matches to
+ * `documents.collection = ?` so multi-vault deployments don't return
+ * another vault's notes. Legacy single-vault callers omit it and get
+ * the old global behavior.
  */
-function bm25Search(query: string, n: number): SearchResult[] {
+function bm25Search(query: string, n: number, collection?: string): SearchResult[] {
   const db = getDb();
 
   // Escape FTS5 special characters
@@ -93,17 +98,25 @@ function bm25Search(query: string, n: number): SearchResult[] {
   // Prefix matching with OR for broad recall — FTS5 rank handles relevance
   const ftsQuery = terms.length > 1 ? terms.map(t => `${t}*`).join(" OR ") : sanitized;
 
-  const rows = db
-    .prepare(
-      `SELECT f.filepath, f.title, rank,
-              substr(f.body, 1, 200) as snippet
-       FROM documents_fts f
-       JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
-       WHERE documents_fts MATCH ?
-       ORDER BY rank
-       LIMIT ?`
-    )
-    .all(ftsQuery, n * 2) as { filepath: string; title: string; rank: number; snippet: string }[];
+  const collectionClause = collection ? "AND d.collection = ?" : "";
+  const stmt = db.prepare(
+    `SELECT f.filepath, f.title, rank,
+            substr(f.body, 1, 200) as snippet
+     FROM documents_fts f
+     JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
+     ${collectionClause}
+     WHERE documents_fts MATCH ?
+     ORDER BY rank
+     LIMIT ?`
+  );
+  const rows = (collection
+    ? stmt.all(collection, ftsQuery, n * 2)
+    : stmt.all(ftsQuery, n * 2)) as {
+    filepath: string;
+    title: string;
+    rank: number;
+    snippet: string;
+  }[];
 
   const results: SearchResult[] = [];
   const seen = new Set<string>();
@@ -140,8 +153,10 @@ function bm25Search(query: string, n: number): SearchResult[] {
 /**
  * Title-only FTS5 search — matches query terms against note titles.
  * Catches concept notes that vector search misses due to semantic gap.
+ *
+ * `collection` restricts matches to the given QMD collection (vault).
  */
-function titleSearch(query: string, n: number): SearchResult[] {
+function titleSearch(query: string, n: number, collection?: string): SearchResult[] {
   const db = getDb();
 
   const sanitized = query.replace(/['"%()\-]/g, " ").trim();
@@ -169,17 +184,25 @@ function titleSearch(query: string, n: number): SearchResult[] {
 
   // 2. FTS5 title search
   const titleQuery = terms.map(t => `title:${t}*`).join(" OR ");
-  const rows = db
-    .prepare(
-      `SELECT f.filepath, f.title, rank,
-              substr(f.body, 1, 200) as snippet
-       FROM documents_fts f
-       JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
-       WHERE documents_fts MATCH ?
-       ORDER BY rank
-       LIMIT ?`
-    )
-    .all(titleQuery, n * 2) as { filepath: string; title: string; rank: number; snippet: string }[];
+  const collectionClause = collection ? "AND d.collection = ?" : "";
+  const stmt = db.prepare(
+    `SELECT f.filepath, f.title, rank,
+            substr(f.body, 1, 200) as snippet
+     FROM documents_fts f
+     JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
+     ${collectionClause}
+     WHERE documents_fts MATCH ?
+     ORDER BY rank
+     LIMIT ?`
+  );
+  const rows = (collection
+    ? stmt.all(collection, titleQuery, n * 2)
+    : stmt.all(titleQuery, n * 2)) as {
+    filepath: string;
+    title: string;
+    rank: number;
+    snippet: string;
+  }[];
 
   const results: SearchResult[] = [];
   const seen = new Set<string>();
@@ -296,8 +319,13 @@ export function closeDb(): void {
 
 /**
  * Vector search: embed query via TEI, then cosine search via sqlite-vec.
+ *
+ * When `collection` is provided, drops rows whose doc belongs to a
+ * different collection after we hydrate them. sqlite-vec doesn't let
+ * us pre-filter on a joined column, so we oversample more and filter
+ * in JS.
  */
-async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
+async function vectorSearch(query: string, n: number, collection?: string): Promise<SearchResult[]> {
   const queryVec = await embedQuery(query);
 
   // Pack float32 vector into a little-endian buffer
@@ -308,12 +336,15 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
 
   const db = getDb();
 
-  // Oversample aggressively to allow re-ranking after dedup
+  // Oversample aggressively to allow re-ranking after dedup. When
+  // filtering by collection we need a bigger window because rows
+  // from other collections will be discarded.
+  const oversample = collection ? n * 20 : n * 5;
   const rows = db
     .prepare(
       `SELECT hash_seq, distance FROM vectors_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?`
     )
-    .all(buf, n * 5) as { hash_seq: string; distance: number }[];
+    .all(buf, oversample) as { hash_seq: string; distance: number }[];
 
   const candidates: SearchResult[] = [];
   const seenFiles = new Set<string>();
@@ -325,6 +356,7 @@ async function vectorSearch(query: string, n: number): Promise<SearchResult[]> {
       .prepare("SELECT path, title, collection FROM documents WHERE hash = ? AND active = 1")
       .get(docHash) as { path: string; title: string; collection: string } | undefined;
     if (!doc) continue;
+    if (collection && doc.collection !== collection) continue;
 
     const cleanTitle = stripWikilinks(doc.title);
     if (seenFiles.has(doc.path)) continue;
@@ -406,10 +438,14 @@ function rrfFuse(
  * Hybrid search: BM25 + vector with RRF fusion.
  * Runs both backends in parallel. Falls back to BM25-only if vector
  * search fails (TEI down, vec0 missing, etc.).
+ *
+ * `collection` restricts matches to a single QMD collection (vault).
+ * Omit it for single-vault callers that want the global index.
  */
 export async function hybridSearch(
   query: string,
-  limit: number = 10
+  limit: number = 10,
+  collection?: string,
 ): Promise<HybridResult[]> {
   assertUnlocked();
   const searchStart = Date.now();
@@ -417,12 +453,12 @@ export async function hybridSearch(
 
   let bm25: SearchResult[] = [];
   try {
-    bm25 = bm25Search(query, oversample);
+    bm25 = bm25Search(query, oversample, collection);
   } catch (err) {
     console.error(`[hybrid] BM25 search failed: ${(err as Error).message}`);
   }
 
-  const vec = await vectorSearch(query, oversample).catch((err) => {
+  const vec = await vectorSearch(query, oversample, collection).catch((err) => {
     console.error(`[hybrid] vector search failed, falling back to BM25-only: ${err.message}`);
     return null;
   });
@@ -443,7 +479,7 @@ export async function hybridSearch(
   // Title search — fast FTS5 title-only match for concept note discovery
   let titles: SearchResult[] = [];
   try {
-    titles = titleSearch(query, oversample);
+    titles = titleSearch(query, oversample, collection);
   } catch (err) {
     console.error(`[hybrid] title search failed: ${(err as Error).message}`);
   }
