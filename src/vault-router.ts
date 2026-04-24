@@ -102,6 +102,23 @@ export function lookupBySlug(slug: string): VaultRoute | null {
   return bySlug.get(slug) ?? null;
 }
 
+/**
+ * Does `user_id` have a `vault_members` row for `vault_id`?
+ *
+ * Used by the REST auth check at `/v/<slug>/v1/*` so a single user-session
+ * API key (minted by grove-www on login and bound to one vault via the
+ * legacy `api_keys.vault_id` column) can also reach the user's OTHER
+ * owned/member vaults without forcing a per-vault key mint on every
+ * navigation. The key's `user_id` is the source of truth; `vault_members`
+ * is the source of authorization.
+ */
+export function userIsVaultMember(userId: string, vaultId: string): boolean {
+  const row = getDb()
+    .prepare("SELECT 1 FROM vault_members WHERE user_id = ? AND vault_id = ? LIMIT 1")
+    .get(userId, vaultId);
+  return row !== undefined;
+}
+
 export function lookupById(id: string): VaultRoute | null {
   return byId.get(id) ?? null;
 }
