@@ -101,32 +101,43 @@ function revoke(id: string) {
 }
 
 // -- CLI --
-const args = process.argv.slice(2);
-const command = args[0];
+// Guarded so this block only runs when keys.ts is the entry point (i.e.
+// `npm run keys ...`). Without the guard, importing `hashToken` or
+// `createKey` from this module printed the usage line into the
+// importer's stdout at load time — polluting proxy startup logs and the
+// JSON output of any CLI command that transitively imported it.
+import { pathToFileURL } from "node:url";
+const isEntryPoint =
+  !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
-if (command === "create") {
-  const nameIdx = args.indexOf("--name");
-  const name = nameIdx >= 0 ? args[nameIdx + 1] : undefined;
-  if (!name) {
-    console.error("Usage: grove keys create --name <name> [--scopes read,write] [--vault life]");
-    process.exit(1);
+if (isEntryPoint) {
+  const args = process.argv.slice(2);
+  const command = args[0];
+
+  if (command === "create") {
+    const nameIdx = args.indexOf("--name");
+    const name = nameIdx >= 0 ? args[nameIdx + 1] : undefined;
+    if (!name) {
+      console.error("Usage: grove keys create --name <name> [--scopes read,write] [--vault life]");
+      process.exit(1);
+    }
+    const scopesIdx = args.indexOf("--scopes");
+    const scopes = scopesIdx >= 0 ? args[scopesIdx + 1] : "read,write";
+    const vaultIdx = args.indexOf("--vault");
+    const vault = vaultIdx >= 0 ? args[vaultIdx + 1] : "life";
+    create(name, scopes, vault);
+  } else if (command === "list") {
+    list();
+  } else if (command === "revoke") {
+    const id = args[1];
+    if (!id) {
+      console.error("Usage: grove keys revoke <key-id>");
+      process.exit(1);
+    }
+    revoke(id);
+  } else {
+    console.log("Usage: grove keys <create|list|revoke>");
   }
-  const scopesIdx = args.indexOf("--scopes");
-  const scopes = scopesIdx >= 0 ? args[scopesIdx + 1] : "read,write";
-  const vaultIdx = args.indexOf("--vault");
-  const vault = vaultIdx >= 0 ? args[vaultIdx + 1] : "life";
-  create(name, scopes, vault);
-} else if (command === "list") {
-  list();
-} else if (command === "revoke") {
-  const id = args[1];
-  if (!id) {
-    console.error("Usage: grove keys revoke <key-id>");
-    process.exit(1);
-  }
-  revoke(id);
-} else if (command) {
-  console.log("Usage: grove keys <create|list|revoke>");
 }
 
 // -- Programmatic API (used by proxy /keys endpoint) --
