@@ -469,9 +469,42 @@ async function cmdRead(config: Config, file: string): Promise<CmdResult> {
 
 async function cmdList(config: Config, pattern: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
   if (!pattern) throw new CliError("bad_request", "Usage: grove list <glob-pattern> [--aliases]", 1);
-  const data = await restGet(config, `/v1/list?prefix=${encodeURIComponent(pattern)}`);
-  const entries = data.entries ?? [];
+  // The REST `/v1/list?prefix=` endpoint filters by folder prefix,
+  // not glob. Users typing `grove list "*.md"` or `"**/*.md"`
+  // previously got zero results because `prefix=*.md` matched no
+  // path. Split the glob on the first wildcard and send the
+  // literal prefix; the REST list returns every note under it and
+  // we filter the (small) result set client-side against the full
+  // pattern.
+  const wildcardIdx = pattern.search(/[*?[{]/);
+  let prefix = wildcardIdx === -1 ? pattern : pattern.slice(0, wildcardIdx);
+  // Strip trailing slash: REST handler adds one when prefix is non-empty.
+  if (prefix.endsWith("/")) prefix = prefix.slice(0, -1);
+  const data = await restGet(config, `/v1/list?prefix=${encodeURIComponent(prefix)}`);
+  let entries = data.entries ?? [];
+  if (wildcardIdx !== -1) {
+    const globRe = globToRegExp(pattern);
+    entries = entries.filter((e: { path: string }) => globRe.test(e.path));
+  }
   return { ok: true, entries, count: entries.length, _fmt: formatList };
+}
+
+/**
+ * Tiny glob → RegExp for the CLI's list pattern. Supports `*`, `**`,
+ * `?`, and escapes everything else. Good enough for local-path
+ * filtering; we don't need the full bash shell spec.
+ */
+function globToRegExp(glob: string): RegExp {
+  // Escape regex metachars first (but leave glob metachars alone
+  // so we can transform them below).
+  let re = glob.replace(/[.+^$(){}|\\]/g, "\\$&");
+  // `**` → any sequence (including slashes); `*` → no slash; `?` → any single char.
+  re = re
+    .replace(/\*\*/g, "\x00") // placeholder
+    .replace(/\*/g, "[^/]*")
+    .replace(/\x00/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp("^" + re + "$");
 }
 
 async function cmdWrite(config: Config, path: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
