@@ -34,8 +34,9 @@
     "test:eval": "tsx scripts/eval-vector-search.ts",
     "iterate": "tsx scripts/iterate.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run typecheck && npm run check:invariants && npm test",
     "check:plan": "tsx scripts/check-plan-drift.ts",
+    "check:invariants": "tsx scripts/check-invariants.ts",
     "ship": "tsx scripts/ship.ts"
   },
   "devDependencies": {
