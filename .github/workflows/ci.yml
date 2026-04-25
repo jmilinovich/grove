@@ -240,15 +240,23 @@ jobs:
             echo "::warning::GROVE_SMOKE_TOKEN not set — skipping post-deploy smoke. Add the secret to enable."
             exit 0
           fi
-          # A known note in test-vault. GET returns { url, content, ... }.
-          # The URL must be slugged `/test-vault/` — anything else means
-          # the per-vault server is minting URLs against the wrong slug
-          # (regression of PR #66).
-          RESP=$(curl -sfS -H "Authorization: Bearer $TOKEN" \
-            "https://api.grove.md/v/test-vault/v1/notes/Resources%2FConcepts%2Fhello-world.md")
+          # Write a dated smoke note to test-vault. PUT response includes
+          # { url, ... }. The URL must start with /@jm/test-vault/ — any
+          # other slug means a per-vault process is minting URLs against
+          # the wrong env (regression of PR #66: GROVE_VAULT_SLUG unset,
+          # silent fallback to "personal"). Read-only endpoints don't
+          # reliably include the url field today, so we use write — the
+          # cost is one cheap Inbox note per deploy, path is dated so
+          # writes don't collide.
+          DATE=$(date -u +%Y%m%dT%H%M%S)
+          RESP=$(curl -sfS -X PUT \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"frontmatter\":{\"type\":\"note\",\"tags\":[\"smoke\"],\"aliases\":[\"Smoke $DATE\"]},\"content\":\"Post-deploy smoke. sha=${GITHUB_SHA}\"}" \
+            "https://api.grove.md/v/test-vault/v1/notes/Inbox%2Fsmoke-${DATE}.md")
           if ! echo "$RESP" | grep -q '"url":"https://grove.md/@jm/test-vault/'; then
-            echo "::error::vault-slug invariant violated — test-vault URL is not /@jm/test-vault/"
+            echo "::error::vault-slug invariant violated — test-vault write URL is not /@jm/test-vault/"
             echo "response: $RESP" | head -c 400
             exit 1
           fi
-          echo "[smoke] test-vault URL slug ok"
+          echo "[smoke] test-vault write URL slug ok: $(echo "$RESP" | grep -oE '"url":"[^"]+"')"
