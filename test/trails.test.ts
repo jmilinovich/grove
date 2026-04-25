@@ -38,80 +38,46 @@ describe("filterByTrail", () => {
     expect(filterByTrail(trail, { path: "anything.md", type: "concept", tags: ["ai"] })).toBe(true);
   });
 
-  // ── Tag filtering ──
+  // ── Single-filter matrix ────────────────────────────────────────
+  // Each row: trail config × note × expected outcome. Covers the
+  // four filter axes (allow/deny × tags/types/paths) with the
+  // canonical pass/reject/no-data variants. Adding a new case is
+  // a one-line addition — easier to scan than 14 separate `it`s.
 
-  it("allow_tags: passes if note has matching tag", () => {
-    const trail = makeTrail({ allow_tags: ["ai", "ml"] });
-    expect(filterByTrail(trail, { path: "a.md", tags: ["ai", "cooking"] })).toBe(true);
-  });
+  const cases: [string, Partial<TrailConfig>, NoteMetadata, boolean][] = [
+    ["allow_tags: passes if note has matching tag",
+      { allow_tags: ["ai", "ml"] }, { path: "a.md", tags: ["ai", "cooking"] }, true],
+    ["allow_tags: rejects if note has no matching tag",
+      { allow_tags: ["ai", "ml"] }, { path: "a.md", tags: ["cooking"] }, false],
+    ["allow_tags: rejects if note has no tags",
+      { allow_tags: ["ai"] }, { path: "a.md" }, false],
+    ["deny_tags: rejects note with denied tag",
+      { deny_tags: ["private"] }, { path: "a.md", tags: ["private", "journal"] }, false],
+    ["deny_tags: allows note without denied tags",
+      { deny_tags: ["private"] }, { path: "a.md", tags: ["public"] }, true],
+    ["allow_types: passes if type matches",
+      { allow_types: ["concept", "person"] }, { path: "a.md", type: "concept" }, true],
+    ["allow_types: rejects if type doesn't match",
+      { allow_types: ["concept"] }, { path: "a.md", type: "journal" }, false],
+    ["allow_types: rejects if note has no type",
+      { allow_types: ["concept"] }, { path: "a.md" }, false],
+    ["deny_types: rejects if type is denied",
+      { deny_types: ["journal"] }, { path: "a.md", type: "journal" }, false],
+    ["deny_types: allows if type is not denied",
+      { deny_types: ["journal"] }, { path: "a.md", type: "concept" }, true],
+    ["allow_paths: passes if path starts with allowed prefix",
+      { allow_paths: ["Resources/Concepts/", "Resources/People/"] },
+      { path: "Resources/Concepts/Taste Graph.md" }, true],
+    ["allow_paths: rejects if path doesn't match",
+      { allow_paths: ["Resources/Concepts/"] }, { path: "Journal/2026/2026-04-01.md" }, false],
+    ["deny_paths: rejects if path matches denied prefix",
+      { deny_paths: ["Journal/", "Areas/Finances/"] }, { path: "Journal/2026/entry.md" }, false],
+    ["deny_paths: allows if path doesn't match denied prefix",
+      { deny_paths: ["Journal/"] }, { path: "Resources/Concepts/AI.md" }, true],
+  ];
 
-  it("allow_tags: rejects if note has no matching tag", () => {
-    const trail = makeTrail({ allow_tags: ["ai", "ml"] });
-    expect(filterByTrail(trail, { path: "a.md", tags: ["cooking"] })).toBe(false);
-  });
-
-  it("allow_tags: rejects if note has no tags", () => {
-    const trail = makeTrail({ allow_tags: ["ai"] });
-    expect(filterByTrail(trail, { path: "a.md" })).toBe(false);
-  });
-
-  it("deny_tags: rejects note with denied tag", () => {
-    const trail = makeTrail({ deny_tags: ["private"] });
-    expect(filterByTrail(trail, { path: "a.md", tags: ["private", "journal"] })).toBe(false);
-  });
-
-  it("deny_tags: allows note without denied tags", () => {
-    const trail = makeTrail({ deny_tags: ["private"] });
-    expect(filterByTrail(trail, { path: "a.md", tags: ["public"] })).toBe(true);
-  });
-
-  // ── Type filtering ──
-
-  it("allow_types: passes if type matches", () => {
-    const trail = makeTrail({ allow_types: ["concept", "person"] });
-    expect(filterByTrail(trail, { path: "a.md", type: "concept" })).toBe(true);
-  });
-
-  it("allow_types: rejects if type doesn't match", () => {
-    const trail = makeTrail({ allow_types: ["concept"] });
-    expect(filterByTrail(trail, { path: "a.md", type: "journal" })).toBe(false);
-  });
-
-  it("allow_types: rejects if note has no type", () => {
-    const trail = makeTrail({ allow_types: ["concept"] });
-    expect(filterByTrail(trail, { path: "a.md" })).toBe(false);
-  });
-
-  it("deny_types: rejects if type is denied", () => {
-    const trail = makeTrail({ deny_types: ["journal"] });
-    expect(filterByTrail(trail, { path: "a.md", type: "journal" })).toBe(false);
-  });
-
-  it("deny_types: allows if type is not denied", () => {
-    const trail = makeTrail({ deny_types: ["journal"] });
-    expect(filterByTrail(trail, { path: "a.md", type: "concept" })).toBe(true);
-  });
-
-  // ── Path filtering ──
-
-  it("allow_paths: passes if path starts with allowed prefix", () => {
-    const trail = makeTrail({ allow_paths: ["Resources/Concepts/", "Resources/People/"] });
-    expect(filterByTrail(trail, { path: "Resources/Concepts/Taste Graph.md" })).toBe(true);
-  });
-
-  it("allow_paths: rejects if path doesn't match", () => {
-    const trail = makeTrail({ allow_paths: ["Resources/Concepts/"] });
-    expect(filterByTrail(trail, { path: "Journal/2026/2026-04-01.md" })).toBe(false);
-  });
-
-  it("deny_paths: rejects if path matches denied prefix", () => {
-    const trail = makeTrail({ deny_paths: ["Journal/", "Areas/Finances/"] });
-    expect(filterByTrail(trail, { path: "Journal/2026/entry.md" })).toBe(false);
-  });
-
-  it("deny_paths: allows if path doesn't match denied prefix", () => {
-    const trail = makeTrail({ deny_paths: ["Journal/"] });
-    expect(filterByTrail(trail, { path: "Resources/Concepts/AI.md" })).toBe(true);
+  it.each(cases)("%s", (_label, overrides, note, expected) => {
+    expect(filterByTrail(makeTrail(overrides), note)).toBe(expected);
   });
 
   // ── Combined filters (AND logic) ──
