@@ -204,12 +204,20 @@ describe("auth", () => {
       const before = db.prepare("SELECT last_login_at FROM users WHERE id = 'user_00000000'").get() as any;
       expect(before.last_login_at).toBeNull();
 
-      createSession("user_00000000");
+      // Pin time so the assertion doesn't depend on wall-clock noise on a busy CI runner.
+      vi.useFakeTimers();
+      try {
+        const fixed = new Date("2026-04-01T12:00:00Z");
+        vi.setSystemTime(fixed);
+        createSession("user_00000000");
 
-      const after = db.prepare("SELECT last_login_at FROM users WHERE id = 'user_00000000'").get() as any;
-      expect(after.last_login_at).not.toBeNull();
-      const loginTime = new Date(after.last_login_at).getTime();
-      expect(Math.abs(loginTime - Date.now())).toBeLessThan(5000);
+        const after = db.prepare("SELECT last_login_at FROM users WHERE id = 'user_00000000'").get() as any;
+        expect(after.last_login_at).not.toBeNull();
+        const loginTime = new Date(after.last_login_at).getTime();
+        expect(loginTime).toBe(fixed.getTime());
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("rejects expired session", () => {
