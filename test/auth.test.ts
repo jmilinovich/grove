@@ -147,44 +147,25 @@ describe("auth", () => {
       expect(link.used_at).not.toBeNull();
     });
 
-    it("rejects already-used link", () => {
+    // Rejection contract — each row defines a single deny reason.
+    // (label, link's stored email, expires offset ms, used? , email passed to verifyMagicLink)
+    const denyCases: [string, string, number, boolean, string][] = [
+      ["already-used link", "admin@example.com", 900_000, true, "admin@example.com"],
+      ["expired link", "admin@example.com", -1000, false, "admin@example.com"],
+      ["wrong email", "admin@example.com", 900_000, false, "other@example.com"],
+      ["unknown user", "nobody@example.com", 900_000, false, "nobody@example.com"],
+    ];
+
+    it.each(denyCases)("rejects %s", (label, storedEmail, expiresOffsetMs, used, callerEmail) => {
       const db = getDb();
       const token = randomBytes(32).toString("hex");
+      const expires_at = new Date(Date.now() + expiresOffsetMs).toISOString();
+      const usedAt = used ? new Date().toISOString() : null;
       db.prepare(
         "INSERT INTO magic_links (id, email, token_hash, expires_at, used_at) VALUES (?, ?, ?, ?, ?)"
-      ).run("ml_used", "admin@example.com", hashToken(token), new Date(Date.now() + 900_000).toISOString(), new Date().toISOString());
+      ).run(`ml_deny_${label.replace(/\s+/g, "_")}`, storedEmail, hashToken(token), expires_at, usedAt);
 
-      expect(verifyMagicLink(token, "admin@example.com")).toBeNull();
-    });
-
-    it("rejects expired link", () => {
-      const db = getDb();
-      const token = randomBytes(32).toString("hex");
-      db.prepare(
-        "INSERT INTO magic_links (id, email, token_hash, expires_at) VALUES (?, ?, ?, ?)"
-      ).run("ml_expired", "admin@example.com", hashToken(token), new Date(Date.now() - 1000).toISOString());
-
-      expect(verifyMagicLink(token, "admin@example.com")).toBeNull();
-    });
-
-    it("rejects wrong email", () => {
-      const db = getDb();
-      const token = randomBytes(32).toString("hex");
-      db.prepare(
-        "INSERT INTO magic_links (id, email, token_hash, expires_at) VALUES (?, ?, ?, ?)"
-      ).run("ml_wrong", "admin@example.com", hashToken(token), new Date(Date.now() + 900_000).toISOString());
-
-      expect(verifyMagicLink(token, "other@example.com")).toBeNull();
-    });
-
-    it("returns null when user doesn't exist", () => {
-      const db = getDb();
-      const token = randomBytes(32).toString("hex");
-      db.prepare(
-        "INSERT INTO magic_links (id, email, token_hash, expires_at) VALUES (?, ?, ?, ?)"
-      ).run("ml_nouser", "nobody@example.com", hashToken(token), new Date(Date.now() + 900_000).toISOString());
-
-      expect(verifyMagicLink(token, "nobody@example.com")).toBeNull();
+      expect(verifyMagicLink(token, callerEmail)).toBeNull();
     });
   });
 
