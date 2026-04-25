@@ -531,18 +531,22 @@ export async function hybridSearch(
  * Without it, URLs are built from the QMD index path which may not resolve on case-sensitive filesystems.
  *
  * `handle` scopes result URLs to `/@<handle>/...` — the owner's username for
- * whichever vault this server is bound to. Omitting it is only safe in tests
- * that don't assert on URL shape; production callers in server.ts always
- * supply it.
+ * whichever vault this server is bound to. `vaultSlug` further scopes the URL
+ * to `/@<handle>/<slug>/<path>` so a multi-vault user clicking a search result
+ * lands in the vault the search ran against, not whatever vault grove-www's
+ * legacy catch-all picks from the bound session key. Omitting either is only
+ * safe in tests; production callers in server.ts always supply both.
  */
 export function formatResults(
   results: HybridResult[],
   resolveRealPath?: (vaultPath: string, title: string) => string,
   handle?: string,
+  vaultSlug?: string,
 ): string {
   if (results.length === 0) return "No results found.";
   const base = process.env.GROVE_PUBLIC_BASE_URL ?? "https://grove.md";
-  const scope = handle ? `/@${handle}` : "";
+  const slugSegment = handle && vaultSlug ? `/${vaultSlug}` : "";
+  const scope = handle ? `/@${handle}${slugSegment}` : "";
   return results
     .map(
       (r) => {

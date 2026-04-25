@@ -389,7 +389,12 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
       }
 
       const handle = vaultOwnerHandle(SERVER_VAULT_CONTEXT);
-      const formatted = formatResults(filtered, resolveRealPath, handle);
+      const formatted = formatResults(
+        filtered,
+        resolveRealPath,
+        handle,
+        SERVER_VAULT_CONTEXT.vaultSlug,
+      );
       const filteredCount = activeTrail ? `\n\n[filtered_count: ${filtered.length}/${totalFound}]` : "";
       return { content: [{ type: "text" as const, text: (formatted || "No results found.") + filteredCount }] };
     },
