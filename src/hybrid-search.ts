@@ -403,7 +403,7 @@ async function vectorSearch(query: string, n: number, collection?: string): Prom
 /**
  * RRF fusion: merge two ranked lists
  */
-function rrfFuse(
+export function rrfFuse(
   lists: { results: SearchResult[]; weight: number; label: string }[],
   n: number,
   k = 20
