@@ -345,48 +345,32 @@ describe("isValidHandle (P16-1)", () => {
     resetDb();
   });
 
-  it("accepts valid handles", () => {
-    expect(isValidHandle("jm").valid).toBe(true);
-    expect(isValidHandle("j-doe").valid).toBe(true);
-    expect(isValidHandle("j_doe_2").valid).toBe(true);
-    expect(isValidHandle("a").valid).toBe(true);
-    expect(isValidHandle("abc123").valid).toBe(true);
+  // Shape contract — independent of any DB seed.
+  const validHandles = ["jm", "j-doe", "j_doe_2", "a", "abc123", "a".repeat(30)];
+  it.each(validHandles)("accepts %s", (h) => {
+    expect(isValidHandle(h).valid).toBe(true);
   });
 
-  it("rejects reserved handles", () => {
-    const reserved = ["admin", "api", "v1", "login", "logout", "signup", "dashboard", "profile", "keys", "images", "home", "trails", "s", "u", "me", "settings", "help", "about", "docs", "support", "privacy", "terms", "well-known", "auth"];
-    for (const r of reserved) {
-      expect(isValidHandle(r).valid).toBe(false);
-    }
+  const invalidShapes: [string, unknown][] = [
+    ["uppercase", "J"],
+    ["mixed case", "Jsmith"],
+    ["leading dash", "-jm"],
+    ["leading underscore", "_jm"],
+    ["@ sign", "j@m"],
+    ["dot", "j.m"],
+    ["space", "j m"],
+    ["31 chars", "a".repeat(31)],
+    ["empty string", ""],
+    ["undefined", undefined],
+  ];
+  it.each(invalidShapes)("rejects %s", (_label, h) => {
+    // @ts-expect-error — undefined is part of the runtime-guard contract
+    expect(isValidHandle(h).valid).toBe(false);
   });
 
-  it("rejects uppercase or mixed-case handles", () => {
-    expect(isValidHandle("J").valid).toBe(false);
-    expect(isValidHandle("Jsmith").valid).toBe(false);
-  });
-
-  it("rejects handles starting with non-alphanumeric", () => {
-    expect(isValidHandle("-jm").valid).toBe(false);
-    expect(isValidHandle("_jm").valid).toBe(false);
-  });
-
-  it("rejects invalid characters", () => {
-    expect(isValidHandle("j@m").valid).toBe(false);
-    expect(isValidHandle("j.m").valid).toBe(false);
-    expect(isValidHandle("j m").valid).toBe(false);
-  });
-
-  it("rejects handles over 30 chars", () => {
-    const thirtyOne = "a".repeat(31);
-    expect(isValidHandle(thirtyOne).valid).toBe(false);
-    const thirty = "a".repeat(30);
-    expect(isValidHandle(thirty).valid).toBe(true);
-  });
-
-  it("rejects empty or non-string handles", () => {
-    expect(isValidHandle("").valid).toBe(false);
-    // @ts-expect-error — runtime guard for non-strings
-    expect(isValidHandle(undefined).valid).toBe(false);
+  const RESERVED = ["admin", "api", "v1", "login", "logout", "signup", "dashboard", "profile", "keys", "images", "home", "trails", "s", "u", "me", "settings", "help", "about", "docs", "support", "privacy", "terms", "well-known", "auth"];
+  it.each(RESERVED)("rejects reserved handle: %s", (r) => {
+    expect(isValidHandle(r).valid).toBe(false);
   });
 
   it("rejects handles taken by another user", () => {
