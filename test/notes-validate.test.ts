@@ -301,36 +301,20 @@ describe("serializeNote", () => {
 // ── inferTags ───────────────────────────────────────────────────────
 
 describe("inferTags", () => {
-  it("infers #journal for Journal/ path", () => {
-    const tags = inferTags("Journal/2026/2026-04-01.md", { type: "journal" });
-    expect(tags).toContain("journal");
-  });
+  // Path-driven default tag rules. Each row is (description, path, type,
+  // tags that must be inferred). Adding a new path → tag mapping is one line.
+  const pathRules: [string, string, string, string[]][] = [
+    ["Journal/", "Journal/2026/2026-04-01.md", "journal", ["journal"]],
+    ["Resources/People/", "Resources/People/John-Milinovich.md", "person", ["person"]],
+    ["Resources/Concepts/", "Resources/Concepts/taste-graph.md", "concept", ["concept"]],
+    ["Resources/Recipes/", "Resources/Recipes/pasta.md", "recipe", ["recipe"]],
+    ["Areas/Health/", "Areas/Health/sleep.md", "concept", ["health", "private"]],
+    ["Areas/Finances/", "Areas/Finances/budget.md", "concept", ["finances", "private"]],
+  ];
 
-  it("infers #person for Resources/People/ path", () => {
-    const tags = inferTags("Resources/People/John-Milinovich.md", { type: "person" });
-    expect(tags).toContain("person");
-  });
-
-  it("infers #concept for Resources/Concepts/ path", () => {
-    const tags = inferTags("Resources/Concepts/taste-graph.md", { type: "concept" });
-    expect(tags).toContain("concept");
-  });
-
-  it("infers #recipe for Resources/Recipes/ path", () => {
-    const tags = inferTags("Resources/Recipes/pasta.md", { type: "recipe" });
-    expect(tags).toContain("recipe");
-  });
-
-  it("infers #health and #private for Areas/Health/ path", () => {
-    const tags = inferTags("Areas/Health/sleep.md", { type: "concept" });
-    expect(tags).toContain("health");
-    expect(tags).toContain("private");
-  });
-
-  it("infers #finances and #private for Areas/Finances/ path", () => {
-    const tags = inferTags("Areas/Finances/budget.md", { type: "concept" });
-    expect(tags).toContain("finances");
-    expect(tags).toContain("private");
+  it.each(pathRules)("infers tags for %s path", (_label, path, type, expected) => {
+    const tags = inferTags(path, { type });
+    for (const t of expected) expect(tags).toContain(t);
   });
 
   it("infers #private from frontmatter private: true", () => {
