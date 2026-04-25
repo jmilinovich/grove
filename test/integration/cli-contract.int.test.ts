@@ -52,7 +52,10 @@ describe("CLI contract: errors", () => {
 
   it("404 → exit 4 (not-found class) with envelope", async () => {
     const r = await h.runCli(["read", "missing.md", "--format", "json"]);
-    expect([1, 4]).toContain(r.exit); // legacy CliError still uses 1; new contract wants 4
+    // exitCodeFor in src/cli.ts maps the legacy `not_found` CliError to exit
+    // code 4. If this fails, src/cli.ts:exitCodeFor regressed and started
+    // returning 1 again — fix the regression rather than widening the test.
+    expect(r.exit).toBe(4);
     const env = JSON.parse(r.stdout);
     expect(env.ok).toBe(false);
     expect(typeof env.error.code).toBe("string");

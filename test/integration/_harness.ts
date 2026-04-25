@@ -8,6 +8,25 @@
  *   expect(r.exit).toBe(0);
  *   expect(JSON.parse(r.stdout).ok).toBe(true);
  *   await h.close();
+ *
+ * ── In-process migration plan ──
+ * `npx tsx` cold-start dominates the four integration test files
+ * (~22s of total test time). The audit recommends invoking the CLI
+ * in-process: import a programmatic `runCli(argv, env)` from
+ * src/cli.ts that returns { exit, stdout, stderr } without calling
+ * process.exit, then keep one subprocess test as a "binary boots"
+ * smoke.
+ *
+ * The blocker is that src/cli.ts:main() reads process.argv directly
+ * and sprinkles process.exit(...) throughout. Refactoring to return
+ * a result envelope is a bigger change than a single PR — it touches
+ * every command path. Until that lands, we eat the subprocess cost.
+ *
+ * If you're picking this up: extract main() into runCli(argv) that
+ * captures stdout/stderr writes and returns the exit code instead
+ * of calling process.exit. The subprocess path stays for the
+ * "binary boots" smoke. Expect the migration to cut int-test wall
+ * time by ~20s.
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
