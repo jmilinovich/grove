@@ -27,7 +27,7 @@
 
 import type { IncomingMessage } from "node:http";
 import { validateSession, getSessionFromCookie } from "./auth.js";
-import { hashToken, isExpired, type StoredKey } from "./keys.js";
+import { hashToken, isExpired, updateLastUsed, type StoredKey } from "./keys.js";
 import { getUserRole } from "./users.js";
 import { getDb } from "./db.js";
 import { userRoleInVault } from "./vault-router.js";
@@ -44,6 +44,11 @@ function validateToken(token: string): StoredKey | null {
   const key = db.prepare("SELECT * FROM api_keys WHERE hashed_token = ?").get(hash) as StoredKey | null;
   if (!key) return null;
   if (isExpired(key)) return null;
+  // PR #70 intent — bump last_used_at on every authenticated request.
+  // proxy.ts validateToken already does this; the admin-auth fallback
+  // path was missed, so bearer-authenticated admin calls left the key
+  // looking idle in the dashboard.
+  updateLastUsed(key.id);
   return key;
 }
 
