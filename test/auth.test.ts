@@ -7,23 +7,8 @@ import Database from "better-sqlite3";
 
 /**
  * Auth tests work against a fresh SQLite database per test.
- * We create the db directly (bypassing the getDb singleton) and seed it.
- * Auth functions also use getDb(), so we must ensure it opens the same db.
- *
- * Since DB_PATH in db.ts is a module-level constant captured at import time,
- * we must set GROVE_DB_PATH before the FIRST import of db.ts. To work around
- * this, we set GROVE_DB_PATH in a common parent dir, and the tests create
- * the db file directly in the same location.
+ * Each beforeEach calls resetDb() + createSchema() and truncates seed tables.
  */
-
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
-  CREATE TABLE IF NOT EXISTS vaults (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), slug TEXT NOT NULL, display_name TEXT NOT NULL, git_repo_path TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), storage_bytes INTEGER NOT NULL DEFAULT 0, storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600, UNIQUE(owner_id, slug));
-  CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL, name TEXT NOT NULL, hashed_token TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL DEFAULT 'read,write', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, expires_at TEXT, session_id TEXT);
-  CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, absolute_expires_at TEXT NOT NULL, last_used_at TEXT, user_agent TEXT);
-  CREATE TABLE IF NOT EXISTS magic_links (id TEXT PRIMARY KEY, email TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, used_at TEXT);
-  CREATE TABLE IF NOT EXISTS auth_codes (id TEXT PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, used_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
-`;
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -36,7 +21,7 @@ const TEST_DB_PATH = join(TEST_DIR, "grove.db");
 process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
 // Import after setting env var so the singleton uses our test db
-import { getDb, resetDb } from "../src/db.js";
+import { getDb, resetDb, createSchema } from "../src/db.js";
 import {
   requestMagicLink,
   verifyMagicLink,
@@ -54,16 +39,20 @@ describe("auth", () => {
   beforeEach(() => {
     // Ensure clean state — reset the singleton and recreate schema + seed
     resetDb();
+    createSchema();
     const db = getDb();
-    db.exec(SCHEMA);
 
-    // Truncate all auth-related tables
+    // Truncate all auth-related tables (FK off so the canonical schema's
+    // additional child tables don't block deletion of users/vaults)
+    db.pragma("foreign_keys = OFF");
     db.exec("DELETE FROM auth_codes");
     db.exec("DELETE FROM magic_links");
     db.exec("DELETE FROM sessions");
     db.exec("DELETE FROM api_keys");
+    db.exec("DELETE FROM vault_members");
     db.exec("DELETE FROM vaults");
     db.exec("DELETE FROM users");
+    db.pragma("foreign_keys = ON");
 
     // Seed admin user
     db.prepare("INSERT INTO users (id, username, email) VALUES (?, ?, ?)").run(
