@@ -2,14 +2,13 @@ import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import Database from "better-sqlite3";
 
 // Set GROVE_DB_PATH before importing db/crypto so the singleton uses our temp db.
 const TEST_DIR = mkdtempSync(join(tmpdir(), "grove-crypto-suite-"));
 const TEST_DB_PATH = join(TEST_DIR, "grove.db");
 process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
-import { getDb, resetDb } from "../src/db.js";
+import { getDb, resetDb, createSchema } from "../src/db.js";
 import {
   deriveKey,
   generateVaultKey,
@@ -32,42 +31,15 @@ import {
   setKeyCacheTtl,
 } from "../src/crypto.js";
 
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE,
-    role TEXT NOT NULL DEFAULT 'viewer',
-    created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT
-  );
-  CREATE TABLE IF NOT EXISTS vaults (
-    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id),
-    slug TEXT NOT NULL, display_name TEXT NOT NULL, git_repo_path TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    storage_bytes INTEGER NOT NULL DEFAULT 0,
-    storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600,
-    UNIQUE(owner_id, slug)
-  );
-  CREATE TABLE IF NOT EXISTS vault_keys (
-    vault_id TEXT PRIMARY KEY REFERENCES vaults(id),
-    encrypted_key BLOB NOT NULL,
-    key_salt BLOB NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    last_unlocked_at TEXT
-  );
-`;
-
 function seed(): void {
   resetDb();
   if (existsSync(TEST_DB_PATH)) rmSync(TEST_DB_PATH, { force: true });
-  const raw = new Database(TEST_DB_PATH);
-  raw.pragma("journal_mode = WAL");
-  raw.pragma("foreign_keys = ON");
-  raw.exec(SCHEMA);
-  raw.prepare("INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)")
+  createSchema();
+  const db = getDb();
+  db.prepare("INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)")
     .run("user_1", "alice", "alice@example.com", "owner");
-  raw.prepare("INSERT INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)")
+  db.prepare("INSERT INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)")
     .run("vault_1", "user_1", "life", "Life", "/tmp/vault");
-  raw.close();
-  getDb(); // re-open singleton against the new file
 }
 
 beforeEach(() => {
