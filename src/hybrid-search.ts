@@ -80,6 +80,21 @@ function ftsVaultPath(filepath: string): string {
 }
 
 /**
+ * QMD's `documents_fts.filepath` is `<collection>/<rel>` for every vault,
+ * not just the legacy "life" one. When the caller knows the collection
+ * (because we filtered FTS / vec by it) strip exactly that prefix so the
+ * returned vault_path is rooted at the vault, regardless of vault name.
+ */
+function stripCollectionPrefix(filepath: string, collection: string): string {
+  if (collection) {
+    const prefix = `${collection}/`;
+    if (filepath.startsWith(prefix)) return filepath.slice(prefix.length);
+  }
+  // Backwards-compat: legacy single-vault rows had the literal "life/" prefix.
+  return filepath.startsWith("life/") ? filepath.slice(5) : filepath;
+}
+
+/**
  * BM25 search via FTS5 directly against QMD's SQLite index.
  *
  * When `collection` is provided, restricts matches to
@@ -172,7 +187,12 @@ function titleSearch(query: string, n: number, collection?: string): SearchResul
   for (const [alias, entry] of aliasIndex) {
     // Only match if the full alias appears in the query (case-insensitive)
     if (alias.length >= 3 && queryLower.includes(alias)) {
-      const vaultPath = entry.filepath.startsWith("life/") ? entry.filepath.slice(5) : entry.filepath;
+      // Cross-vault leak guard: alias index is global across collections,
+      // but a caller scoped to one collection must never see another
+      // vault's alias hits. The FTS5 / vec backends already filter; this
+      // closes the alias-only path.
+      if (collection && entry.collection !== collection) continue;
+      const vaultPath = stripCollectionPrefix(entry.filepath, entry.collection);
       aliasHits.push({
         title: entry.title,
         vault_path: vaultPath,
@@ -228,11 +248,23 @@ function titleSearch(query: string, n: number, collection?: string): SearchResul
   return results;
 }
 
-// --- Alias index: maps lowercase alias → { title, file } ---
+// --- Alias index: maps lowercase alias → { title, filepath, collection } ---
+//
+// Process-global. Multi-vault deployments share one QMD index file, so each
+// entry MUST carry its source collection — callers that constrain results
+// to a single vault drop foreign-collection matches at lookup time. Without
+// this, vault A receiving a query that happens to contain an alias defined
+// in vault B leaks B's note title + path into A's response.
 
-let _aliasIndex: Map<string, { title: string; filepath: string }> | null = null;
+interface AliasEntry {
+  title: string;
+  filepath: string;
+  collection: string;
+}
 
-function getAliasIndex(): Map<string, { title: string; filepath: string }> {
+let _aliasIndex: Map<string, AliasEntry> | null = null;
+
+function getAliasIndex(): Map<string, AliasEntry> {
   if (_aliasIndex) return _aliasIndex;
 
   const db = getDb();
@@ -245,7 +277,7 @@ function getAliasIndex(): Map<string, { title: string; filepath: string }> {
     )
     .all() as { path: string; title: string; collection: string; doc: string }[];
 
-  const index = new Map<string, { title: string; filepath: string }>();
+  const index = new Map<string, AliasEntry>();
 
   for (const row of rows) {
     // Parse aliases from YAML frontmatter (handles both quoted and unquoted)
@@ -260,7 +292,14 @@ function getAliasIndex(): Map<string, { title: string; filepath: string }> {
       .filter(a => a.length > 0);
 
     for (const alias of aliases) {
-      index.set(alias.toLowerCase(), { title: cleanTitle, filepath: `life/${row.path}` });
+      index.set(alias.toLowerCase(), {
+        title: cleanTitle,
+        // QMD's documents_fts.filepath uses `<collection>/<rel>`, so we
+        // use the same shape here. Callers that know their collection
+        // strip exactly that prefix in stripCollectionPrefix below.
+        filepath: `${row.collection}/${row.path}`,
+        collection: row.collection,
+      });
     }
   }
 
@@ -499,6 +538,9 @@ export async function hybridSearch(
   const injected = new Set<string>();
   for (const [alias, entry] of aliasIndex) {
     if (alias.length >= 3 && queryLower.includes(alias) && !injected.has(entry.title)) {
+      // Same cross-vault guard as titleSearch: skip alias hits whose
+      // source collection doesn't match the caller's scope.
+      if (collection && entry.collection !== collection) continue;
       injected.add(entry.title);
       // If already in results, boost to top 3; if missing, inject
       const idx = fused.findIndex(r => r.title === entry.title);
@@ -507,7 +549,7 @@ export async function hybridSearch(
         const [item] = fused.splice(idx, 1);
         fused.splice(Math.min(2, fused.length), 0, item);
       } else if (idx === -1) {
-        const vaultPath = entry.filepath.startsWith("life/") ? entry.filepath.slice(5) : entry.filepath;
+        const vaultPath = stripCollectionPrefix(entry.filepath, entry.collection);
         fused.splice(Math.min(2, fused.length), 0, {
           title: entry.title,
           vault_path: vaultPath,

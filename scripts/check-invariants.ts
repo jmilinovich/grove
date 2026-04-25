@@ -44,7 +44,7 @@ const INVARIANTS: Invariant[] = [
       'src/rest.ts:65:    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
       'src/rest.ts:1793:let vaultIdResolver: VaultIdResolver = () => process.env.GROVE_VAULT_ID ?? "life";',
       'src/discovery.ts:57:    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
-      'src/server.ts:91:  vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
+      'src/server.ts:99:  vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
     ],
   },
 ];
