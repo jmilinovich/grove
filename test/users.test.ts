@@ -25,19 +25,13 @@ import {
 } from "../src/users.js";
 import { createSession, getSessionIdFromToken } from "../src/auth.js";
 import { createKey } from "../src/keys.js";
+import { seedAdminVault } from "./_helpers/seed.js";
 
 describe("user roles", () => {
   beforeEach(() => {
     resetDb();
     createSchema();
-    // Seed admin user (mirrors runMigration fresh-install path)
-    const db = getDb();
-    db.prepare("INSERT OR IGNORE INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(
-      "user_00000000", "admin", "admin@grove.local", "owner",
-    );
-    db.prepare("INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)").run(
-      "vault_00000000", "user_00000000", "life", "Life", "/tmp/life",
-    );
+    seedAdminVault({ email: "admin@grove.local" });
   });
 
   afterEach(() => {
@@ -163,12 +157,7 @@ describe("profile (P15-1)", () => {
     // across test cases when the underlying SQLite file is reused.
     const db = getDb();
     db.exec("DELETE FROM vault_members; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;");
-    db.prepare("INSERT OR IGNORE INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(
-      "user_00000000", "admin", "admin@grove.local", "owner",
-    );
-    db.prepare("INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)").run(
-      "vault_00000000", "user_00000000", "life", "Life", "/tmp/life",
-    );
+    seedAdminVault({ email: "admin@grove.local" });
   });
 
   afterEach(() => {
