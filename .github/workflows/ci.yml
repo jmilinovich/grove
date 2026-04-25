@@ -28,6 +28,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
+      - run: npm run check:invariants
       - run: npm test
 
   plan-drift:
@@ -209,3 +210,45 @@ jobs:
         env:
           CONFIRM_SCHEMA_CHANGE: ${{ github.event.inputs.confirm_schema_change || 'false' }}
           HEALTH_URL: https://api.grove.md/health
+
+  # Post-deploy prod smoke. Runs AFTER deploy succeeds; gates nothing
+  # (prod is already live by the time this runs). Catches regressions
+  # the deploy health-check can't — specifically, URL-slug / vault-
+  # isolation bugs like PR #66, which are invisible to /health but
+  # corrupt every URL the API emits. Fails the run if the slug check
+  # fails so the merge commit shows red, which pages via the usual
+  # CI notification path.
+  #
+  # Needs a bearer token scoped to the test-vault; set
+  # `GROVE_SMOKE_TOKEN` in repo secrets. If unset the job is a no-op
+  # so the first merge after this lands doesn't go red.
+  smoke-prod:
+    needs: deploy
+    if: |
+      success() &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Vault-slug invariant against prod
+        env:
+          TOKEN: ${{ secrets.GROVE_SMOKE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::warning::GROVE_SMOKE_TOKEN not set — skipping post-deploy smoke. Add the secret to enable."
+            exit 0
+          fi
+          # A known note in test-vault. GET returns { url, content, ... }.
+          # The URL must be slugged `/test-vault/` — anything else means
+          # the per-vault server is minting URLs against the wrong slug
+          # (regression of PR #66).
+          RESP=$(curl -sfS -H "Authorization: Bearer $TOKEN" \
+            "https://api.grove.md/v/test-vault/v1/notes/Resources%2FConcepts%2Fhello-world.md")
+          if ! echo "$RESP" | grep -q '"url":"https://grove.md/@jm/test-vault/'; then
+            echo "::error::vault-slug invariant violated — test-vault URL is not /@jm/test-vault/"
+            echo "response: $RESP" | head -c 400
+            exit 1
+          fi
+          echo "[smoke] test-vault URL slug ok"
