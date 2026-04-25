@@ -18,20 +18,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { IncomingMessage } from "node:http";
 
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, role TEXT NOT NULL DEFAULT 'viewer', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
-  CREATE TABLE IF NOT EXISTS vaults (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), slug TEXT NOT NULL, display_name TEXT NOT NULL, git_repo_path TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), storage_bytes INTEGER NOT NULL DEFAULT 0, storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600, UNIQUE(owner_id, slug));
-  CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL, name TEXT NOT NULL, hashed_token TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL DEFAULT 'read,write', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, expires_at TEXT, session_id TEXT);
-  CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, absolute_expires_at TEXT NOT NULL, last_used_at TEXT, user_agent TEXT);
-  CREATE TABLE IF NOT EXISTS magic_links (id TEXT PRIMARY KEY, email TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, used_at TEXT);
-  CREATE TABLE IF NOT EXISTS vault_members (user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL REFERENCES vaults(id), role TEXT NOT NULL CHECK(role IN ('owner', 'member', 'viewer')), joined_at TEXT NOT NULL DEFAULT (datetime('now')), last_active_at TEXT, PRIMARY KEY (user_id, vault_id));
-`;
-
 const TEST_DIR = mkdtempSync(join(tmpdir(), "grove-admin-auth-"));
 const TEST_DB_PATH = join(TEST_DIR, "grove.db");
 process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
-import { getDb, resetDb } from "../src/db.js";
+import { getDb, resetDb, createSchema } from "../src/db.js";
 import { createKey } from "../src/keys.js";
 import { adminAuth } from "../src/admin-auth.js";
 
@@ -46,13 +37,15 @@ function fakeReq(opts: { authorization?: string; cookie?: string } = {}): Incomi
 }
 
 function seedDb() {
+  createSchema();
   const db = getDb();
-  db.exec(SCHEMA);
+  db.pragma("foreign_keys = OFF");
   db.exec("DELETE FROM vault_members");
   db.exec("DELETE FROM sessions");
   db.exec("DELETE FROM api_keys");
   db.exec("DELETE FROM vaults");
   db.exec("DELETE FROM users");
+  db.pragma("foreign_keys = ON");
 
   // Two tenants. `alice` owns vault A and is a global owner. `bob` owns
   // vault B and is also a global owner. `mallory` is a global owner with

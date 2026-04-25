@@ -3,30 +3,18 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, role TEXT NOT NULL DEFAULT 'viewer', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
-  CREATE TABLE IF NOT EXISTS vaults (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), slug TEXT NOT NULL, display_name TEXT NOT NULL, git_repo_path TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), storage_bytes INTEGER NOT NULL DEFAULT 0, storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600, UNIQUE(owner_id, slug));
-  CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL, name TEXT NOT NULL, hashed_token TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL DEFAULT 'read,write', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, expires_at TEXT, session_id TEXT);
-  CREATE TABLE IF NOT EXISTS trails (id TEXT PRIMARY KEY, vault_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')));
-  CREATE TABLE IF NOT EXISTS trail_grants (id TEXT PRIMARY KEY, trail_id TEXT NOT NULL REFERENCES trails(id) ON DELETE CASCADE, grantee_type TEXT NOT NULL, grantee_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
-  CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, absolute_expires_at TEXT NOT NULL, last_used_at TEXT, user_agent TEXT);
-  CREATE TABLE IF NOT EXISTS magic_links (id TEXT PRIMARY KEY, email TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), expires_at TEXT NOT NULL, used_at TEXT);
-  CREATE TABLE IF NOT EXISTS handle_history (handle TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), released_at TEXT NOT NULL);
-  CREATE TABLE IF NOT EXISTS vault_members (user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL REFERENCES vaults(id), role TEXT NOT NULL CHECK(role IN ('owner', 'member', 'viewer')), joined_at TEXT NOT NULL DEFAULT (datetime('now')), last_active_at TEXT, PRIMARY KEY (user_id, vault_id));
-`;
-
 const TEST_DIR = mkdtempSync(join(tmpdir(), "grove-users-admin-"));
 const TEST_DB_PATH = join(TEST_DIR, "grove.db");
 process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
-import { getDb, resetDb } from "../src/db.js";
+import { getDb, resetDb, createSchema } from "../src/db.js";
 import { createUser, deleteUser, listUsersWithMeta } from "../src/users.js";
 import { createKey } from "../src/keys.js";
 
 function seedDb() {
+  createSchema();
   const db = getDb();
-  db.exec(SCHEMA);
-
+  db.pragma("foreign_keys = OFF");
   db.exec("DELETE FROM vault_members");
   db.exec("DELETE FROM trail_grants");
   db.exec("DELETE FROM trails");
@@ -34,6 +22,7 @@ function seedDb() {
   db.exec("DELETE FROM api_keys");
   db.exec("DELETE FROM vaults");
   db.exec("DELETE FROM users");
+  db.pragma("foreign_keys = ON");
 
   // Seed admin user and vault
   db.prepare("INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(

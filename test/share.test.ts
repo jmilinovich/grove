@@ -3,19 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const SCHEMA = `
-  CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, role TEXT NOT NULL DEFAULT 'member', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
-  CREATE TABLE IF NOT EXISTS vaults (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), slug TEXT NOT NULL, display_name TEXT NOT NULL, git_repo_path TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), storage_bytes INTEGER NOT NULL DEFAULT 0, storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600, UNIQUE(owner_id, slug));
-  CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL, name TEXT NOT NULL, hashed_token TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL DEFAULT 'read,write', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, expires_at TEXT, session_id TEXT);
-  CREATE TABLE IF NOT EXISTS shared_links (id TEXT PRIMARY KEY, note_path TEXT NOT NULL, vault_id TEXT NOT NULL REFERENCES vaults(id), created_by TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL, max_views INTEGER, view_count INTEGER NOT NULL DEFAULT 0, last_accessed_at TEXT, revoked_by TEXT REFERENCES users(id), revoked_at TEXT, created_at TEXT NOT NULL);
-  CREATE TABLE IF NOT EXISTS vault_members (user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL REFERENCES vaults(id), role TEXT NOT NULL CHECK(role IN ('owner', 'member', 'viewer')), joined_at TEXT NOT NULL DEFAULT (datetime('now')), last_active_at TEXT, PRIMARY KEY (user_id, vault_id));
-`;
-
 const TEST_DIR = mkdtempSync(join(tmpdir(), "grove-share-test-"));
 const TEST_DB_PATH = join(TEST_DIR, "grove.db");
 process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
-import { getDb, resetDb } from "../src/db.js";
+import { getDb, resetDb, createSchema } from "../src/db.js";
 import {
   createShareLink,
   resolveShareLink,
@@ -29,13 +21,15 @@ import {
 } from "../src/share.js";
 
 function seedDb() {
+  createSchema();
   const db = getDb();
-  db.exec(SCHEMA);
+  db.pragma("foreign_keys = OFF");
   db.exec("DELETE FROM vault_members");
   db.exec("DELETE FROM shared_links");
   db.exec("DELETE FROM api_keys");
   db.exec("DELETE FROM vaults");
   db.exec("DELETE FROM users");
+  db.pragma("foreign_keys = ON");
 
   db.prepare("INSERT INTO users (id, username, email) VALUES (?, ?, ?)").run(
     "user_00000000", "admin", "admin@example.com",
