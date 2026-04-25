@@ -1,8 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stripWikilinks, formatResults as realFormatResults } from "../src/hybrid-search.js";
-
-// ── RRF Fusion logic ────────────────────────────────────────────────
-// Re-implement the pure rrfFuse function for testing since it's not exported.
+import { stripWikilinks, formatResults, rrfFuse } from "../src/hybrid-search.js";
 
 interface SearchResult {
   title: string;
@@ -20,36 +17,7 @@ interface HybridResult {
   sources: string[];
 }
 
-function rrfFuse(
-  lists: { results: SearchResult[]; weight: number; label: string }[],
-  n: number,
-  k = 60,
-): HybridResult[] {
-  const scores: Record<string, number> = {};
-  const meta: Record<string, SearchResult> = {};
-  const sources: Record<string, Set<string>> = {};
-
-  for (const { results, weight, label } of lists) {
-    for (let rank = 0; rank < results.length; rank++) {
-      const key = results[rank].vault_path;
-      scores[key] = (scores[key] ?? 0) + weight / (k + rank);
-      if (!meta[key]) meta[key] = results[rank];
-      if (!sources[key]) sources[key] = new Set();
-      sources[key].add(label);
-    }
-  }
-
-  return Object.keys(scores)
-    .sort((a, b) => scores[b] - scores[a])
-    .slice(0, n)
-    .map((key) => ({
-      title: meta[key].title,
-      vault_path: meta[key].vault_path,
-      rrf_score: Math.round(scores[key] * 10000) / 10000,
-      snippet: meta[key].snippet,
-      sources: [...(sources[key] ?? [])],
-    }));
-}
+// ── RRF fusion (exported) ────────────────────────────────────────────
 
 describe("rrfFuse", () => {
   const bm25Results: SearchResult[] = [
@@ -73,12 +41,10 @@ describe("rrfFuse", () => {
       10,
     );
 
-    // Both A and B appear in both lists, so they should score higher
     const files = fused.map((r) => r.vault_path);
     expect(files).toContain("a.md");
     expect(files).toContain("b.md");
 
-    // A and B should have both sources
     const aResult = fused.find((r) => r.vault_path === "a.md")!;
     expect(aResult.sources).toContain("bm25");
     expect(aResult.sources).toContain("vector");
@@ -114,15 +80,12 @@ describe("rrfFuse", () => {
       10,
     );
 
-    // B is rank 0 in vec, rank 1 in bm25 => highest dual score
-    // D only appears in vec => lower score
     const bScore = fused.find((r) => r.vault_path === "b.md")!.rrf_score;
     const dScore = fused.find((r) => r.vault_path === "d.md")!.rrf_score;
     expect(bScore).toBeGreaterThan(dScore);
   });
 
   it("applies weight correctly", () => {
-    // Same results, but heavily weight bm25
     const heavyBm25 = rrfFuse(
       [
         { results: bm25Results, weight: 10.0, label: "bm25" },
@@ -130,8 +93,6 @@ describe("rrfFuse", () => {
       ],
       10,
     );
-
-    // With heavy bm25 weight, A (rank 0 in bm25) should come first
     expect(heavyBm25[0].vault_path).toBe("a.md");
   });
 
@@ -170,20 +131,9 @@ describe("stripWikilinks", () => {
   });
 });
 
-// ── formatResults ───────────────────────────────────────────────────
+// ── formatResults (exported) ────────────────────────────────────────
 
 describe("formatResults", () => {
-  // Re-implement the pure formatResults function
-  function formatResults(results: HybridResult[]): string {
-    if (results.length === 0) return "No results found.";
-    return results
-      .map(
-        (r) =>
-          `**${r.title}** (${r.vault_path}, score: ${r.rrf_score})\n${r.snippet ?? ""}`,
-      )
-      .join("\n\n---\n\n");
-  }
-
   it("returns 'No results found.' for empty array", () => {
     expect(formatResults([])).toBe("No results found.");
   });
@@ -207,13 +157,9 @@ describe("formatResults", () => {
     expect(output).toContain("---");
     expect(output.split("---")).toHaveLength(2);
   });
-});
 
-// ── Image metadata enrichment (P14-3) ───────────────────────────────
-
-describe("formatResults (exported) — image metadata", () => {
   it("includes thumbnail_url as markdown image when present", () => {
-    const output = realFormatResults([
+    const output = formatResults([
       {
         vault_path: "resources/images/arch-diagram.md",
         title: "Architecture Diagram",
@@ -229,7 +175,7 @@ describe("formatResults (exported) — image metadata", () => {
   });
 
   it("omits thumbnail markdown when thumbnail_url is absent", () => {
-    const output = realFormatResults([
+    const output = formatResults([
       {
         vault_path: "resources/concepts/agent.md",
         title: "Agent",
@@ -240,13 +186,9 @@ describe("formatResults (exported) — image metadata", () => {
     ]);
     expect(output).not.toContain("![thumbnail]");
   });
-});
 
-// ── URL shape: /@<handle>/<path> (regression for missing-handle bug) ─
-
-describe("formatResults (exported) — URL shape", () => {
   it("scopes URLs to /@<handle>/<path> when handle is supplied", () => {
-    const output = realFormatResults(
+    const output = formatResults(
       [
         {
           vault_path: "Resources/Recipes/Chicken Rice Broccoli.md",
@@ -267,7 +209,7 @@ describe("formatResults (exported) — URL shape", () => {
   it("emits an unscoped URL only when no handle is supplied (test/legacy)", () => {
     // Production callers in server.ts always pass a handle. This guards the
     // fallback so unit tests don't need a DB.
-    const output = realFormatResults([
+    const output = formatResults([
       {
         vault_path: "a/b.md",
         title: "Note",
