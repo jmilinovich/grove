@@ -267,7 +267,7 @@ function logMcp(keyName: string, sessionId: string | undefined, tool: string, ar
 }
 
 /** Extract a readable summary from an MCP response for logging */
-function summarizeMcpResponse(response: unknown): unknown {
+export function summarizeMcpResponse(response: unknown): unknown {
   if (!response || typeof response !== "object") return response;
   const r = response as Record<string, unknown>;
   // tools/call response: { result: { content: [{ type, text }] } }

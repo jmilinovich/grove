@@ -213,30 +213,75 @@ describe("parseArgs ingest flags", () => {
   });
 });
 
-// ── HELP: ingest entry ───────────────────────────────────────────
+// ── HELP: per-command entries (ingest, vault, delete, move) ───────
+// Per-command HELP shape contract — same for each command, parametrized.
+// Each row asserts: the HELP entry exists with expected usage/description/
+// json_schema bits, declares the listed flags, and that printCommandHelp
+// renders the listed substrings.
 
-describe("HELP ingest", () => {
-  it("has an ingest help entry", () => {
-    expect(HELP.ingest).toBeDefined();
+interface HelpExpectations {
+  usageContains: string[];
+  descriptionMatches?: RegExp;
+  jsonSchemaMatches: RegExp;
+  flagSubstrings?: string[];
+  exampleSubstring?: string;
+  printContains: string[];
+}
+
+const HELP_CASES: [string, HelpExpectations][] = [
+  ["ingest", {
+    usageContains: ["grove ingest"],
+    descriptionMatches: /Import/,
+    jsonSchemaMatches: /imported/,
+    flagSubstrings: ["dry-run"],
+    printContains: ["grove ingest", "dry-run", "Examples:"],
+  }],
+  ["vault", {
+    usageContains: ["grove vault", "status", "encrypt", "unlock", "lock"],
+    descriptionMatches: /encrypt/i,
+    jsonSchemaMatches: /encrypted/,
+    exampleSubstring: "GROVE_VAULT_PASSPHRASE",
+    printContains: ["grove vault", "Examples:", "GROVE_VAULT_PASSPHRASE"],
+  }],
+  ["delete", {
+    usageContains: ["grove delete"],
+    jsonSchemaMatches: /action.*archived.*deleted/s,
+    flagSubstrings: ["--hard", "--yes"],
+    printContains: ["grove delete", "--hard", "Examples:"],
+  }],
+  ["move", {
+    usageContains: ["grove move", "<from>", "<to>"],
+    jsonSchemaMatches: /links_updated/,
+    printContains: ["grove move", "Examples:"],
+  }],
+];
+
+describe.each(HELP_CASES)("HELP %s", (cmd, expectations) => {
+  it("entry meets the per-command shape contract", () => {
+    const help = HELP[cmd];
+    expect(help, `HELP.${cmd}`).toBeDefined();
+    for (const fragment of expectations.usageContains) {
+      expect(help.usage).toContain(fragment);
+    }
+    if (expectations.descriptionMatches) {
+      expect(help.description).toMatch(expectations.descriptionMatches);
+    }
+    expect(help.json_schema).toMatch(expectations.jsonSchemaMatches);
+    expect(help.exit_codes).toContain("0=success");
+    if (expectations.flagSubstrings) {
+      const flags = help.flags?.join("\n") ?? "";
+      for (const f of expectations.flagSubstrings) expect(flags).toContain(f);
+    }
+    if (expectations.exampleSubstring) {
+      expect(help.examples?.some((e) => e.includes(expectations.exampleSubstring!))).toBe(true);
+    }
   });
 
-  it("ingest help has required fields", () => {
-    expect(HELP.ingest.usage).toContain("grove ingest");
-    expect(HELP.ingest.description).toContain("Import");
-    expect(HELP.ingest.json_schema).toContain("imported");
-    expect(HELP.ingest.exit_codes).toContain("0=success");
-  });
-
-  it("ingest help includes --dry-run flag", () => {
-    expect(HELP.ingest.flags).toBeDefined();
-    expect(HELP.ingest.flags!.some((f) => f.includes("dry-run"))).toBe(true);
-  });
-
-  it("printCommandHelp renders ingest", () => {
-    const out = printCommandHelp("ingest");
-    expect(out).toContain("grove ingest");
-    expect(out).toContain("dry-run");
-    expect(out).toContain("Examples:");
+  it("printCommandHelp renders the entry", () => {
+    const out = printCommandHelp(cmd);
+    for (const fragment of expectations.printContains) {
+      expect(out).toContain(fragment);
+    }
   });
 });
 
@@ -287,38 +332,6 @@ describe("parseArgs vault", () => {
     expect(result.command).toBe("vault");
     expect(result.positional).toBe("status");
     expect(result.flags.json).toBe(true);
-  });
-});
-
-// ── HELP: vault entry ────────────────────────────────────────────
-
-describe("HELP vault", () => {
-  it("has a vault help entry", () => {
-    expect(HELP.vault).toBeDefined();
-  });
-
-  it("vault help has required fields", () => {
-    expect(HELP.vault.usage).toContain("grove vault");
-    expect(HELP.vault.description).toMatch(/encrypt/i);
-    expect(HELP.vault.json_schema).toContain("encrypted");
-    expect(HELP.vault.exit_codes).toContain("0=success");
-  });
-
-  it("vault help lists all four subcommands in usage", () => {
-    for (const sub of ["status", "encrypt", "unlock", "lock"]) {
-      expect(HELP.vault.usage).toContain(sub);
-    }
-  });
-
-  it("vault help includes an example using GROVE_VAULT_PASSPHRASE env", () => {
-    expect(HELP.vault.examples?.some((e) => e.includes("GROVE_VAULT_PASSPHRASE"))).toBe(true);
-  });
-
-  it("printCommandHelp renders vault", () => {
-    const out = printCommandHelp("vault");
-    expect(out).toContain("grove vault");
-    expect(out).toContain("Examples:");
-    expect(out).toContain("GROVE_VAULT_PASSPHRASE");
   });
 });
 
@@ -447,49 +460,3 @@ describe("validateDeleteFlags", () => {
   });
 });
 
-// ── HELP: delete / move entries ──────────────────────────────────
-
-describe("HELP delete", () => {
-  it("has a delete help entry with required fields", () => {
-    expect(HELP.delete).toBeDefined();
-    expect(HELP.delete.usage).toContain("grove delete");
-    expect(HELP.delete.description).toBeTruthy();
-    expect(HELP.delete.json_schema).toMatch(/action/);
-    expect(HELP.delete.exit_codes).toContain("0=success");
-  });
-
-  it("documents --hard and --yes flags", () => {
-    const flags = HELP.delete.flags?.join("\n") ?? "";
-    expect(flags).toMatch(/--hard/);
-    expect(flags).toMatch(/--yes/);
-  });
-
-  it("json_schema covers both archived and deleted actions", () => {
-    expect(HELP.delete.json_schema).toMatch(/archived/);
-    expect(HELP.delete.json_schema).toMatch(/deleted/);
-  });
-
-  it("printCommandHelp renders delete", () => {
-    const out = printCommandHelp("delete");
-    expect(out).toContain("grove delete");
-    expect(out).toContain("--hard");
-    expect(out).toContain("Examples:");
-  });
-});
-
-describe("HELP move", () => {
-  it("has a move help entry with required fields", () => {
-    expect(HELP.move).toBeDefined();
-    expect(HELP.move.usage).toContain("grove move");
-    expect(HELP.move.usage).toMatch(/<from>/);
-    expect(HELP.move.usage).toMatch(/<to>/);
-    expect(HELP.move.json_schema).toMatch(/links_updated/);
-    expect(HELP.move.exit_codes).toContain("0=success");
-  });
-
-  it("printCommandHelp renders move", () => {
-    const out = printCommandHelp("move");
-    expect(out).toContain("grove move");
-    expect(out).toContain("Examples:");
-  });
-});
