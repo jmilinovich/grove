@@ -23,6 +23,7 @@ process.env.GROVE_DB_PATH = TEST_DB_PATH;
 import { getDb, resetDb, createSchema } from "../src/db.js";
 import { createUser, changeUserHandle } from "../src/users.js";
 import { auditUserAction } from "../src/logger.js";
+import { seedAdminVault } from "./_helpers/seed.js";
 
 function seed() {
   resetDb();
@@ -31,12 +32,7 @@ function seed() {
   db.exec(
     "DELETE FROM vault_members; DELETE FROM handle_history; DELETE FROM vault_members; DELETE FROM api_keys; DELETE FROM sessions; DELETE FROM trail_grants; DELETE FROM trails; DELETE FROM vaults; DELETE FROM users;",
   );
-  db.prepare("INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)").run(
-    "user_00000000", "admin-owner", "admin@grove.local", "owner",
-  );
-  db.prepare("INSERT INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)").run(
-    "vault_00000000", "user_00000000", "life", "Life", "/tmp/life",
-  );
+  seedAdminVault({ username: "admin-owner", email: "admin@grove.local" });
 }
 
 describe("changeUserHandle return value (P16-5)", () => {
