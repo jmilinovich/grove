@@ -202,6 +202,7 @@ function validateToken(token: string): StoredKey | null {
   const key = db.prepare("SELECT * FROM api_keys WHERE hashed_token = ?").get(hash) as StoredKey | null;
   if (!key) return null;
   if (isExpired(key)) return null;
+  updateLastUsed(key.id);
   return key;
 }
 
