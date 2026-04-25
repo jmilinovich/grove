@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import Database from "better-sqlite3";
+
+const TEST_DIR_KEYS = mkdtempSync(join(tmpdir(), "grove-keys-test-"));
+process.env.GROVE_DB_PATH = join(TEST_DIR_KEYS, "grove.db");
 
 import { hashToken } from "../src/keys.js";
+import { getDb, resetDb, createSchema } from "../src/db.js";
 
 describe("keys module — import side effects", () => {
   it("does not write to stdout or stderr on import", async () => {
@@ -47,14 +50,7 @@ describe("hashToken", () => {
 // Tests that keys are created with user_id and that filtering by user works.
 
 describe("user-scoped keys", () => {
-  let tempDir: string;
-  let db: Database.Database;
-
-  const SCHEMA = `
-    CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT UNIQUE, email TEXT UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')), last_login_at TEXT);
-    CREATE TABLE IF NOT EXISTS vaults (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), slug TEXT NOT NULL, display_name TEXT NOT NULL, git_repo_path TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), storage_bytes INTEGER NOT NULL DEFAULT 0, storage_quota_bytes INTEGER NOT NULL DEFAULT 104857600, UNIQUE(owner_id, slug));
-    CREATE TABLE IF NOT EXISTS api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), vault_id TEXT NOT NULL, name TEXT NOT NULL, hashed_token TEXT NOT NULL UNIQUE, scopes TEXT NOT NULL DEFAULT 'read,write', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, expires_at TEXT, session_id TEXT);
-  `;
+  let db: ReturnType<typeof getDb>;
 
   function insertUser(id: string, username: string, email: string) {
     db.prepare("INSERT INTO users (id, username, email) VALUES (?, ?, ?)").run(id, username, email);
@@ -68,11 +64,14 @@ describe("user-scoped keys", () => {
   }
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), "grove-keys-test-"));
-    db = new Database(join(tempDir, "grove.db"));
-    db.pragma("journal_mode = WAL");
+    resetDb();
+    createSchema();
+    db = getDb();
+    db.pragma("foreign_keys = OFF");
+    db.exec("DELETE FROM api_keys");
+    db.exec("DELETE FROM vaults");
+    db.exec("DELETE FROM users");
     db.pragma("foreign_keys = ON");
-    db.exec(SCHEMA);
 
     // Owner user + vault
     insertUser("user_00000000", "admin", "admin@grove.local");
@@ -85,8 +84,7 @@ describe("user-scoped keys", () => {
   });
 
   afterEach(() => {
-    db.close();
-    rmSync(tempDir, { recursive: true, force: true });
+    resetDb();
   });
 
   it("key is created with the specified user_id", () => {
