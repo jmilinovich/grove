@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -168,22 +168,26 @@ describe("share-a-note links", () => {
     let link = getShareLink(result.id);
     expect(link!.last_accessed_at).toBeNull();
 
-    const resolved1 = resolveShareLink(result.id);
-    expect(resolved1!.last_accessed_at).toBeTruthy();
-    const firstStamp = resolved1!.last_accessed_at!;
+    // Pin time so the two stamps are deterministically distinct without a real spin.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-04-01T00:00:00Z"));
+      const resolved1 = resolveShareLink(result.id);
+      expect(resolved1!.last_accessed_at).toBeTruthy();
+      const firstStamp = resolved1!.last_accessed_at!;
 
-    // Small gap so the second stamp is strictly later than the first.
-    const sleepUntil = Date.now() + 10;
-    while (Date.now() < sleepUntil) { /* spin */ }
+      vi.setSystemTime(new Date("2026-04-01T00:00:00.500Z"));
+      const resolved2 = resolveShareLink(result.id);
+      expect(resolved2!.last_accessed_at).toBeTruthy();
+      expect(new Date(resolved2!.last_accessed_at!).getTime()).toBeGreaterThanOrEqual(
+        new Date(firstStamp).getTime(),
+      );
 
-    const resolved2 = resolveShareLink(result.id);
-    expect(resolved2!.last_accessed_at).toBeTruthy();
-    expect(new Date(resolved2!.last_accessed_at!).getTime()).toBeGreaterThanOrEqual(
-      new Date(firstStamp).getTime(),
-    );
-
-    link = getShareLink(result.id);
-    expect(link!.last_accessed_at).toBe(resolved2!.last_accessed_at);
+      link = getShareLink(result.id);
+      expect(link!.last_accessed_at).toBe(resolved2!.last_accessed_at);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("revokeShareLink stamps audit columns and prevents subsequent resolve", () => {
