@@ -366,3 +366,88 @@ describe("discovery digest helpers", () => {
     expect(discoveryQueueDepth()).toBe(2);
   });
 });
+
+// ── Cross-vault scoping ────────────────────────────────────────────
+// Regression coverage for the security/audit-2026-04-26 sweep: every
+// discovery_queue / discovery_results read must filter by vault_id.
+// Without it, a multi-vault deployment leaks vault A's note paths into
+// vault B's `vault_status mode=discovery` and inflates B's stats.
+describe("discovery queue/results vault scoping", () => {
+  let tempDir: string;
+  const VAULT_A = "vault_aaaaaaaa";
+  const VAULT_B = "vault_bbbbbbbb";
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "grove-discovery-vault-"));
+    process.env.GROVE_DB_PATH = join(tempDir, "grove.db");
+    resetDb();
+    createSchema();
+  });
+
+  afterEach(() => {
+    closeDb();
+    delete process.env.GROVE_DB_PATH;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("getRecentExtractions only returns this vault's entries", () => {
+    enqueueDiscovery("a-note.md", "write", VAULT_A);
+    enqueueDiscovery("b-note.md", "write", VAULT_B);
+
+    const aEntry = dequeueDiscovery(VAULT_A)!;
+    markDiscoveryDone(aEntry.id);
+    const bEntry = dequeueDiscovery(VAULT_B)!;
+    markDiscoveryDone(bEntry.id);
+
+    const aPaths = getRecentExtractions(20, VAULT_A).map((e) => e.path);
+    const bPaths = getRecentExtractions(20, VAULT_B).map((e) => e.path);
+    expect(aPaths).toEqual(["a-note.md"]);
+    expect(bPaths).toEqual(["b-note.md"]);
+  });
+
+  it("discoveryQueueDepth scopes to vault", () => {
+    enqueueDiscovery("a1.md", "write", VAULT_A);
+    enqueueDiscovery("a2.md", "write", VAULT_A);
+    enqueueDiscovery("b1.md", "write", VAULT_B);
+
+    expect(discoveryQueueDepth(VAULT_A)).toBe(2);
+    expect(discoveryQueueDepth(VAULT_B)).toBe(1);
+  });
+
+  it("getLastProcessedAt scopes to vault", () => {
+    enqueueDiscovery("a.md", "write", VAULT_A);
+    const aEntry = dequeueDiscovery(VAULT_A)!;
+    markDiscoveryDone(aEntry.id);
+
+    expect(getLastProcessedAt(VAULT_A)).toBeTruthy();
+    expect(getLastProcessedAt(VAULT_B)).toBeNull();
+  });
+
+  it("getNewConceptsCreated does not leak across vaults", () => {
+    insertDiscoveryResult(
+      "ra1", "Journal/a.md", "Resources/Concepts/topic-a.md",
+      0.85, "mentioned", VAULT_A,
+    );
+    insertDiscoveryResult(
+      "rb1", "Journal/b.md", "Resources/Concepts/topic-b.md",
+      0.85, "mentioned", VAULT_B,
+    );
+
+    const aConcepts = getNewConceptsCreated(20, "Resources/Concepts/", VAULT_A);
+    const bConcepts = getNewConceptsCreated(20, "Resources/Concepts/", VAULT_B);
+
+    expect(aConcepts.map((c) => c.path)).toEqual(["Resources/Concepts/topic-a.md"]);
+    expect(bConcepts.map((c) => c.path)).toEqual(["Resources/Concepts/topic-b.md"]);
+  });
+
+  it("getSurprisingConnections does not leak across vaults", () => {
+    insertDiscoveryResult("a1", "a-src.md", "a-tgt.md", 0.9, "related", VAULT_A);
+    insertDiscoveryResult("b1", "b-src.md", "b-tgt.md", 0.95, "related", VAULT_B);
+
+    const aConn = getSurprisingConnections(10, VAULT_A);
+    const bConn = getSurprisingConnections(10, VAULT_B);
+
+    expect(aConn.map((c) => c.source)).toEqual(["a-src.md"]);
+    expect(bConn.map((c) => c.source)).toEqual(["b-src.md"]);
+  });
+});

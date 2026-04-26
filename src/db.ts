@@ -993,12 +993,19 @@ export function requeueDiscovery(id: number): boolean {
   return result.changes > 0;
 }
 
-/** Count pending entries in the queue. */
-export function discoveryQueueDepth(): number {
+/**
+ * Count pending entries in the queue.
+ *
+ * Scoped to `vaultId` so per-vault status surfaces (MCP `vault_status`,
+ * REST `/v1/health`) report only their own queue depth.
+ */
+export function discoveryQueueDepth(vaultId: string = resolveVaultIdFromEnv()): number {
   const database = getDb();
   const row = database
-    .prepare("SELECT COUNT(*) as count FROM discovery_queue WHERE status = 'pending'")
-    .get() as { count: number };
+    .prepare(
+      "SELECT COUNT(*) as count FROM discovery_queue WHERE status = 'pending' AND vault_id = ?",
+    )
+    .get(vaultId) as { count: number };
   return row.count;
 }
 
@@ -1014,41 +1021,71 @@ export interface DiscoveryResultRow {
   dismissed_at: string | null;
 }
 
-/** Insert a discovery result. */
+/**
+ * Insert a discovery result.
+ *
+ * `vaultId` scopes the row so two vaults' workers — both writing into the
+ * shared grove.db — don't pile entries into a single global pool. Without
+ * it, vault A's `vault_status mode=discovery` would surface vault B's
+ * note paths.
+ */
 export function insertDiscoveryResult(
   id: string,
   sourcePath: string,
   targetPath: string,
   similarity: number,
   relationship: string,
+  vaultId: string = resolveVaultIdFromEnv(),
 ): void {
   const database = getDb();
   database
     .prepare(
-      "INSERT INTO discovery_results (id, source_path, target_path, similarity, relationship) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO discovery_results (id, source_path, target_path, similarity, relationship, vault_id) VALUES (?, ?, ?, ?, ?, ?)",
     )
-    .run(id, sourcePath, targetPath, similarity, relationship);
+    .run(id, sourcePath, targetPath, similarity, relationship, vaultId);
 }
 
-/** Clear undismissed results for a source path (before re-processing). */
-export function clearUndismissedResults(sourcePath: string): void {
+/**
+ * Clear undismissed results for a source path (before re-processing).
+ *
+ * Scoped to `vaultId` so re-processing a path in vault A doesn't wipe a
+ * same-named path's results in vault B.
+ */
+export function clearUndismissedResults(
+  sourcePath: string,
+  vaultId: string = resolveVaultIdFromEnv(),
+): void {
   const database = getDb();
   database
-    .prepare("DELETE FROM discovery_results WHERE source_path = ? AND dismissed_at IS NULL")
-    .run(sourcePath);
+    .prepare(
+      "DELETE FROM discovery_results WHERE source_path = ? AND vault_id = ? AND dismissed_at IS NULL",
+    )
+    .run(sourcePath, vaultId);
 }
 
-/** Get discovery results, optionally filtered by source path. */
-export function getDiscoveryResults(sourcePath?: string): DiscoveryResultRow[] {
+/**
+ * Get discovery results, optionally filtered by source path.
+ *
+ * Always scoped to `vaultId` so multi-vault deployments don't leak
+ * results across vaults.
+ */
+export function getDiscoveryResults(
+  sourcePath?: string,
+  vaultId: string = resolveVaultIdFromEnv(),
+): DiscoveryResultRow[] {
   const database = getDb();
   if (sourcePath) {
     return database
-      .prepare("SELECT * FROM discovery_results WHERE source_path = ? ORDER BY similarity DESC")
-      .all(sourcePath) as DiscoveryResultRow[];
+      .prepare(
+        "SELECT * FROM discovery_results WHERE source_path = ? AND vault_id = ? ORDER BY similarity DESC",
+      )
+      .all(sourcePath, vaultId) as DiscoveryResultRow[];
   }
   return database
-    .prepare("SELECT * FROM discovery_results ORDER BY created_at DESC, similarity DESC")
-    .all() as DiscoveryResultRow[];
+    .prepare(
+      "SELECT * FROM discovery_results WHERE vault_id = ? ORDER BY created_at DESC, similarity DESC",
+    )
+    .all(vaultId) as DiscoveryResultRow[];
 }
 
 /** Dismiss a discovery result (soft delete). */
@@ -1067,18 +1104,26 @@ export interface RecentExtraction {
   trigger: string;
 }
 
-/** Get recently processed queue entries (most recent first). */
-export function getRecentExtractions(limit = 20): RecentExtraction[] {
+/**
+ * Get recently processed queue entries (most recent first).
+ *
+ * Scoped to `vaultId` so the per-vault MCP server's `vault_status
+ * mode=discovery` only surfaces its own vault's processed paths.
+ */
+export function getRecentExtractions(
+  limit = 20,
+  vaultId: string = resolveVaultIdFromEnv(),
+): RecentExtraction[] {
   const database = getDb();
   return database
     .prepare(
       `SELECT path, processed_at, trigger
        FROM discovery_queue
-       WHERE status = 'done' AND processed_at IS NOT NULL
+       WHERE status = 'done' AND processed_at IS NOT NULL AND vault_id = ?
        ORDER BY processed_at DESC
        LIMIT ?`,
     )
-    .all(limit) as RecentExtraction[];
+    .all(vaultId, limit) as RecentExtraction[];
 }
 
 export interface NewConceptCreated {
@@ -1097,6 +1142,7 @@ export interface NewConceptCreated {
 export function getNewConceptsCreated(
   limit = 20,
   conceptPrefix = "Resources/Concepts/",
+  vaultId: string = resolveVaultIdFromEnv(),
 ): NewConceptCreated[] {
   const database = getDb();
   return database
@@ -1104,11 +1150,12 @@ export function getNewConceptsCreated(
       `SELECT DISTINCT target_path AS path, created_at, source_path AS triggered_by
        FROM discovery_results
        WHERE target_path LIKE ?
+         AND vault_id = ?
          AND dismissed_at IS NULL
        ORDER BY created_at DESC
        LIMIT ?`,
     )
-    .all(`${conceptPrefix}%`, limit) as NewConceptCreated[];
+    .all(`${conceptPrefix}%`, vaultId, limit) as NewConceptCreated[];
 }
 
 export interface SurprisingConnection {
@@ -1118,17 +1165,20 @@ export interface SurprisingConnection {
 }
 
 /** Get top surprising connections (highest similarity, undismissed). */
-export function getSurprisingConnections(limit = 10): SurprisingConnection[] {
+export function getSurprisingConnections(
+  limit = 10,
+  vaultId: string = resolveVaultIdFromEnv(),
+): SurprisingConnection[] {
   const database = getDb();
   return database
     .prepare(
       `SELECT source_path AS source, target_path AS target, similarity
        FROM discovery_results
-       WHERE dismissed_at IS NULL
+       WHERE vault_id = ? AND dismissed_at IS NULL
        ORDER BY similarity DESC
        LIMIT ?`,
     )
-    .all(limit) as SurprisingConnection[];
+    .all(vaultId, limit) as SurprisingConnection[];
 }
 
 // ── Graph health flags helpers ───────────────────────────────────
@@ -1209,16 +1259,23 @@ export function resolveHealthFlag(id: string): boolean {
   return result.changes > 0;
 }
 
-/** Get the most recent processed_at timestamp. */
-export function getLastProcessedAt(): string | null {
+/**
+ * Get the most recent processed_at timestamp.
+ *
+ * Scoped to `vaultId` so per-vault health reporting reflects the right
+ * worker's freshness instead of the busiest neighbor's.
+ */
+export function getLastProcessedAt(
+  vaultId: string = resolveVaultIdFromEnv(),
+): string | null {
   const database = getDb();
   const row = database
     .prepare(
       `SELECT processed_at FROM discovery_queue
-       WHERE status = 'done' AND processed_at IS NOT NULL
+       WHERE status = 'done' AND processed_at IS NOT NULL AND vault_id = ?
        ORDER BY processed_at DESC LIMIT 1`,
     )
-    .get() as { processed_at: string } | undefined;
+    .get(vaultId) as { processed_at: string } | undefined;
   return row?.processed_at ?? null;
 }
 

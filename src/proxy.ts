@@ -2941,6 +2941,22 @@ const server = createServer(async (req, res) => {
       }
 
       if (parsed.action === "update" && parsed.id) {
+        // When the request arrived on `/v/<slug>/v1/admin/trails`, the
+        // owner is authenticated against `restCtx.vaultId` only — they
+        // must not be able to mutate trails belonging to another vault.
+        // Pre-check the row's vault_id and 404 (not 403) on mismatch so
+        // we don't leak the existence of cross-vault trail ids.
+        if (restIsVaultScoped) {
+          const db = getDb();
+          const trailRow = db
+            .prepare("SELECT vault_id FROM trails WHERE id = ? LIMIT 1")
+            .get(parsed.id) as { vault_id: string } | undefined;
+          if (!trailRow || trailRow.vault_id !== restCtx.vaultId) {
+            res.writeHead(404, restHeaders);
+            res.end(JSON.stringify({ error: "trail not found" }));
+            return;
+          }
+        }
         const { id, action, ...updates } = parsed;
         // Authority is per-vault — `id` must belong to the request's vault.
         // Without this check, an owner of vault A could pass a trail id from
@@ -2967,7 +2983,11 @@ const server = createServer(async (req, res) => {
       }
 
       if (parsed.action === "delete" && parsed.id) {
-        // Same per-vault authority check as update — see above.
+        // Same per-vault authority check as update — PR #86 made this
+        // unconditional (no `if (restIsVaultScoped)` wrapper) since
+        // restCtx.vaultId is set for both URL-scoped and token-scoped
+        // requests. Without this check, vault A's owner could delete
+        // vault B's trails (DoS against B's consumers).
         const trailRow = getDb()
           .prepare("SELECT vault_id FROM trails WHERE id = ? LIMIT 1")
           .get(parsed.id) as { vault_id: string } | undefined;
@@ -3049,7 +3069,10 @@ const server = createServer(async (req, res) => {
         return;
       }
       const trailId = decodeURIComponent(trailUsageMatch[1]!);
-      const trails = loadTrails();
+      // Scope the lookup to trails owned by this URL's vault. Without it
+      // a vault A owner with admin auth could read vault B's trail
+      // metadata (name + request counts) by guessing trail ids.
+      const trails = loadTrails(restIsVaultScoped ? restCtx.vaultId : undefined);
       const trail = trails.find((t) => t.id === trailId);
       if (!trail) {
         res.writeHead(404, restHeaders);
