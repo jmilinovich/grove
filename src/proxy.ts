@@ -216,6 +216,70 @@ function isVaultOwner(userId: string): boolean {
   return vault?.owner_id === userId;
 }
 
+/**
+ * Resolve and authorize the vault id a `/keys` mint request should bind
+ * to. Pulled out of the proxy handler so it's unit-testable without
+ * booting the HTTP server.
+ *
+ *   - `vault`: explicit vault id from the request body. Treated as the
+ *     authoritative request — caller MUST be a `vault_members` row.
+ *   - `vault_slug`: alternative explicit form (slug → id lookup). Same
+ *     rule: membership required.
+ *   - Neither: fall back to the caller's earliest membership, then to
+ *     the legacy "life" sentinel. No external authorization needed —
+ *     by construction the caller is a member of any vault we'd
+ *     pick here.
+ *
+ * Outcomes:
+ *   - { kind: "ok", vaultId } — proceed.
+ *   - { kind: "deny" } — caller asked for a vault they don't belong
+ *     to, or for a slug that doesn't resolve. 404 to the network so
+ *     we don't confirm a non-member's guessed vault exists.
+ *
+ * SECURITY: the request shape `{ action: "create", vault_slug: "X" }`
+ * was previously a vault-bypass: any signed-in user could mint a key
+ * bound to ANY vault, and the proxy's `directlyBound` short-circuit
+ * (proxy.ts ~L1418, vault-router.decideRoute) then granted that key
+ * full read/write access to the target vault on every subsequent
+ * request — without ever consulting `vault_members`. This helper is
+ * the gate that makes `directlyBound` only reachable for keys whose
+ * owner was a member of the bound vault at mint time.
+ */
+export type ResolveMintVaultResult =
+  | { kind: "ok"; vaultId: string }
+  | { kind: "deny" };
+
+export function resolveMintVaultId(
+  userId: string,
+  body: { vault?: unknown; vault_slug?: unknown },
+): ResolveMintVaultResult {
+  const db = getDb();
+
+  if (typeof body.vault === "string" && body.vault.length > 0) {
+    if (!userIsVaultMember(userId, body.vault)) return { kind: "deny" };
+    return { kind: "ok", vaultId: body.vault };
+  }
+
+  if (typeof body.vault_slug === "string" && body.vault_slug.length > 0) {
+    const row = db
+      .prepare("SELECT id FROM vaults WHERE slug = ? LIMIT 1")
+      .get(body.vault_slug) as { id: string } | undefined;
+    if (!row?.id) return { kind: "deny" };
+    if (!userIsVaultMember(userId, row.id)) return { kind: "deny" };
+    return { kind: "ok", vaultId: row.id };
+  }
+
+  const membership = db
+    .prepare(
+      `SELECT vault_id FROM vault_members
+         WHERE user_id = ?
+         ORDER BY joined_at ASC
+         LIMIT 1`,
+    )
+    .get(userId) as { vault_id: string } | undefined;
+  return { kind: "ok", vaultId: membership?.vault_id ?? "life" };
+}
+
 /** Pick a vault for admin vault operations — either an explicit override or the admin's sole vault. */
 function resolveAdminVaultId(userId: string, override?: string): string | null {
   const db = getDb();
@@ -1273,29 +1337,24 @@ const server = createServer(async (req, res) => {
       // has no session and stores null.
       const sessionToken = getSessionFromCookie(req);
       const linkedSessionId = sessionToken ? getSessionIdFromToken(sessionToken) : null;
-      // Pick the bound vault: explicit `vault` (id) > `vault_slug`
-      // (resolved) > caller's earliest membership > legacy "life"
-      // sentinel. Grove-www sends `vault_slug` when the key is minted
-      // from a specific vault's `/dashboard/access/keys` page so the
-      // key binds to that vault instead of the user's primary.
-      let boundVaultId: string = parsed.vault ?? "";
-      if (!boundVaultId && typeof parsed.vault_slug === "string" && parsed.vault_slug.length > 0) {
-        const row = getDb()
-          .prepare("SELECT id FROM vaults WHERE slug = ? LIMIT 1")
-          .get(parsed.vault_slug) as { id: string } | undefined;
-        if (row?.id) boundVaultId = row.id;
+
+      // Pick + authorize the bound vault. See `resolveMintVaultId` for
+      // the security rationale — an explicit `vault` / `vault_slug`
+      // requires `vault_members` membership, otherwise mint is denied
+      // (otherwise `directlyBound` at L~1418 grants the key full
+      // access to a vault the caller never belonged to).
+      const mintDecision = resolveMintVaultId(admin.userId, parsed);
+      if (mintDecision.kind === "deny") {
+        // 404 (not 403) so a non-member can't enumerate vaults.
+        structuredLog("warn", "keys.mint_denied", rid, {
+          user_id: admin.userId,
+          requested_vault: typeof parsed.vault === "string" ? parsed.vault : null,
+          requested_vault_slug: typeof parsed.vault_slug === "string" ? parsed.vault_slug : null,
+        });
+        sendJson(res, 404, { error: "vault not found" });
+        return;
       }
-      if (!boundVaultId) {
-        const membership = getDb()
-          .prepare(
-            `SELECT vault_id FROM vault_members
-               WHERE user_id = ?
-               ORDER BY joined_at ASC
-               LIMIT 1`,
-          )
-          .get(admin.userId) as { vault_id: string } | undefined;
-        boundVaultId = membership?.vault_id ?? "life";
-      }
+      const boundVaultId = mintDecision.vaultId;
       const result = createKey(
         parsed.name,
         parsed.scopes ?? ["read", "write"],
@@ -2273,8 +2332,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // Vault lock gate — data endpoints return 503 when vault is encrypted + locked
-    if (isVaultLocked(restKey.vault_id)) {
+    // Vault lock gate — data endpoints return 503 when vault is encrypted + locked.
+    // Check the REQUEST's target vault (`restCtx.vaultId`), not the
+    // token's bound vault: a session key bound to vault A reaching
+    // `/v/<slug-of-B>/v1/notes/*` was previously gated on vault A's
+    // lock state, so reads/writes against locked vault B silently
+    // bypassed the lock gate.
+    if (isVaultLocked(restCtx.vaultId)) {
       sendLocked(res);
       return;
     }
