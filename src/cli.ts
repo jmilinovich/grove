@@ -261,6 +261,9 @@ const BOOLEAN_FLAGS = new Set([
   "redact",
   // Phase 11: lifecycle
   "hard",
+  // ingest
+  "recursive",
+  "r",
 ]);
 
 export function parseArgs(argv: string[]): { command: string; positional: string; positionals: string[]; flags: Record<string, string | boolean> } {
@@ -899,19 +902,42 @@ function loadIngestTypePaths(): Record<string, string> {
   }
 }
 
-async function cmdIngest(config: Config, dir: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
-  if (!dir) throw new CliError("bad_request", "Usage: grove ingest <dir> [--dry-run]", 1);
-  const dryRun = !!flags["dry-run"];
+export function walkIngestSources(
+  dir: string,
+  recursive: boolean,
+): Array<{ name: string; absPath: string }> {
+  const out: Array<{ name: string; absPath: string }> = [];
+  const entries = readdirSync(dir, { withFileTypes: true });
+  for (const e of entries) {
+    if (e.name.startsWith(".")) continue; // skip dotfiles + dotdirs (.git, .obsidian)
+    const full = join(dir, e.name);
+    if (e.isDirectory()) {
+      if (recursive) out.push(...walkIngestSources(full, true));
+      continue;
+    }
+    if (e.isFile() && (e.name.endsWith(".md") || e.name.endsWith(".txt"))) {
+      out.push({ name: e.name, absPath: full });
+    }
+  }
+  return out;
+}
 
-  // Verify dir exists and has .md files
-  let dirEntries: { isFile(): boolean; name: string }[];
+async function cmdIngest(config: Config, dir: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
+  if (!dir) throw new CliError("bad_request", "Usage: grove ingest <dir> [--recursive] [--dry-run]", 1);
+  const dryRun = !!flags["dry-run"];
+  const recursive = !!flags.recursive || !!flags.r;
+
+  // Verify dir exists and has .md/.txt files (recursing into subfolders if requested).
+  let mdFiles: Array<{ name: string; absPath: string }>;
   try {
-    dirEntries = readdirSync(dir, { withFileTypes: true }) as unknown as { isFile(): boolean; name: string }[];
+    mdFiles = walkIngestSources(dir, recursive);
   } catch {
     throw new CliError("bad_request", `Cannot read directory: ${dir}`, 1);
   }
-  const mdFiles = dirEntries.filter((e) => e.isFile() && (e.name.endsWith(".md") || e.name.endsWith(".txt")));
-  if (mdFiles.length === 0) throw new CliError("bad_request", `No .md or .txt files found in ${dir}`, 1);
+  if (mdFiles.length === 0) {
+    const where = recursive ? `${dir} (or any subdirectory)` : dir;
+    throw new CliError("bad_request", `No .md or .txt files found in ${where}`, 1);
+  }
 
   // Parse each file and determine target path
   interface IngestCandidate {
@@ -932,7 +958,7 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
   }
 
   for (const entry of mdFiles) {
-    const raw = readFileSync(join(dir, entry.name), "utf-8");
+    const raw = readFileSync(entry.absPath, "utf-8");
     const { frontmatter, content } = parseNote(raw);
     const type = typeof frontmatter.type === "string" ? frontmatter.type : undefined;
     const prefix = type && typePaths[type] ? typePaths[type] : defaultPrefix;
@@ -2093,12 +2119,16 @@ export const HELP: Record<string, CmdHelp> = {
     exit_codes: EXIT_CODES,
   },
   ingest: {
-    usage: "grove ingest <dir> [--dry-run] [--json]",
-    description: "Import .md or .txt files into the vault (.txt is renamed to .md). Deduplicates by title against existing notes. Creates a snapshot before starting.",
-    flags: ["--dry-run  Show what would be imported", "--json     JSON output"],
+    usage: "grove ingest <dir> [--recursive] [--dry-run] [--json]",
+    description: "Import .md or .txt files into the vault (.txt is renamed to .md). Deduplicates by title against existing notes. Creates a snapshot before starting. Pass --recursive (or -r) to include nested subdirectories.",
+    flags: [
+      "--recursive  Walk subdirectories (alias: -r)",
+      "--dry-run    Show what would be imported",
+      "--json       JSON output",
+    ],
     json_schema: "{ok, action, imported, failed, skipped, enqueued, total, results: [{path, status}]}",
     exit_codes: EXIT_CODES,
-    examples: ["grove ingest ./import/", "grove ingest ./export/ --dry-run"],
+    examples: ["grove ingest ./import/", "grove ingest ./vault --recursive", "grove ingest ./export/ --dry-run"],
   },
   bookmarks: {
     usage: "grove bookmarks [--count N] [--json]",
