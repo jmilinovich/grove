@@ -1,5 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { parseArgs, CliError, validateDeleteFlags } from "../src/cli.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parseArgs, CliError, validateDeleteFlags, walkIngestSources } from "../src/cli.js";
 
 // HELP / printCommandHelp tests live in test/cli/help.test.ts.
 
@@ -153,6 +156,76 @@ describe("parseArgs ingest flags", () => {
   it("parses ingest with --json", () => {
     const result = parseArgs(["ingest", "./import/", "--json"]);
     expect(result.flags.json).toBe(true);
+  });
+
+  it("parses ingest with --recursive (positional comes first)", () => {
+    const result = parseArgs(["ingest", "./import/", "--recursive"]);
+    expect(result.command).toBe("ingest");
+    expect(result.positional).toBe("./import/");
+    expect(result.flags.recursive).toBe(true);
+  });
+
+  it("parses ingest with --recursive before the directory (boolean, doesn't consume next arg)", () => {
+    const result = parseArgs(["ingest", "--recursive", "./import/"]);
+    expect(result.command).toBe("ingest");
+    expect(result.positional).toBe("./import/");
+    expect(result.flags.recursive).toBe(true);
+  });
+
+  it("parses ingest with -r short flag", () => {
+    const result = parseArgs(["ingest", "-r", "./import/"]);
+    expect(result.command).toBe("ingest");
+    expect(result.positional).toBe("./import/");
+    expect(result.flags.r).toBe(true);
+  });
+});
+
+// ── walkIngestSources: recursion behavior ─────────────────────────
+
+describe("walkIngestSources", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "grove-ingest-"));
+    writeFileSync(join(tmp, "top.md"), "# top\n");
+    writeFileSync(join(tmp, "skip.txt"), "txt is also picked up");
+    writeFileSync(join(tmp, "ignore.json"), "{}");
+    mkdirSync(join(tmp, "nested"));
+    writeFileSync(join(tmp, "nested", "child.md"), "# child\n");
+    mkdirSync(join(tmp, "nested", "deeper"));
+    writeFileSync(join(tmp, "nested", "deeper", "grandchild.md"), "# grand\n");
+    // dotdirs (.git, .obsidian) must be skipped even in recursive mode
+    mkdirSync(join(tmp, ".obsidian"));
+    writeFileSync(join(tmp, ".obsidian", "config.md"), "should not appear");
+  });
+
+  afterEach(() => {
+    try { rmSync(tmp, { recursive: true, force: true }); } catch {}
+  });
+
+  it("returns only top-level files when recursive=false", () => {
+    const out = walkIngestSources(tmp, false);
+    const names = out.map((e) => e.name).sort();
+    expect(names).toEqual(["skip.txt", "top.md"]);
+  });
+
+  it("walks nested directories when recursive=true", () => {
+    const out = walkIngestSources(tmp, true);
+    const names = out.map((e) => e.name).sort();
+    expect(names).toEqual(["child.md", "grandchild.md", "skip.txt", "top.md"]);
+  });
+
+  it("absPath points at the actual file on disk in nested mode", () => {
+    const out = walkIngestSources(tmp, true);
+    const child = out.find((e) => e.name === "child.md");
+    expect(child).toBeDefined();
+    expect(child!.absPath).toBe(join(tmp, "nested", "child.md"));
+  });
+
+  it("skips dotfiles and dotdirs even when recursive", () => {
+    const out = walkIngestSources(tmp, true);
+    const names = out.map((e) => e.name);
+    expect(names).not.toContain("config.md");
   });
 });
 
