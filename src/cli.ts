@@ -2747,6 +2747,21 @@ async function main() {
       const plan = !!flags.plan || !apply; // default to plan if neither set
       // Route to existing commands, treating --plan as --dry-run.
       if (plan && !apply) flags["dry-run"] = true;
+      // Validate inputs at the dispatcher so the error message refers to
+      // the command the user actually typed. Without this, `grove import`
+      // (no args) falls through to cmdIngest which throws
+      // "Usage: grove ingest <dir>..." — a contradiction that reads as
+      // "import doesn't exist, use ingest." First-time users (e.g. Sumon
+      // on 2026-04-28) interpreted that as a broken CLI.
+      if ((source === "fs" || source === "sources") && !positional) {
+        throw new CliError(
+          "bad_request",
+          source === "fs"
+            ? "Usage: grove import <dir> --source=fs [--apply] [--recursive]"
+            : "Usage: grove import <dir> --source=sources [--apply]",
+          1,
+        );
+      }
       switch (source) {
         case "fs":        result = await cmdIngest(config, positional, flags); break;
         case "sources":   result = await cmdSync(config, positional, flags); break;
