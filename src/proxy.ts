@@ -2197,14 +2197,24 @@ const server = createServer(async (req, res) => {
     // Resolve trail for this key (null = owner, full access)
     const restTrail = resolveTrail(restKey.id);
 
-    // GET /v1/whoami — return identity for the current token
+    // GET /v1/whoami — return identity for the current token. Includes
+    // resolved vault slug + owner email so destructive CLI flows (ingest,
+    // bulk write) can show the user exactly what they're about to write to
+    // before they hit enter. Without this, a token swap silently routes a
+    // local-source ingest to the wrong vault — incident 2026-04-28.
     if (restPath === "/v1/whoami" && req.method === "GET") {
+      const vaultRow = getDb().prepare(
+        "SELECT v.id, v.slug, v.display_name, u.email AS owner_email FROM vaults v LEFT JOIN users u ON u.id = v.owner_id WHERE v.id = ?",
+      ).get(restKey.vault_id) as { id: string; slug: string; display_name: string; owner_email: string | null } | undefined;
       res.writeHead(200, restHeaders);
       res.end(JSON.stringify({
         key_id: restKey.id,
         key_name: restKey.name,
         scopes: restKey.scopes.split(",").filter(Boolean),
         vault_id: restKey.vault_id,
+        vault_slug: vaultRow?.slug ?? null,
+        vault_name: vaultRow?.display_name ?? null,
+        owner_email: vaultRow?.owner_email ?? null,
         trail: restTrail ? { id: restTrail.id, name: restTrail.name } : null,
       }));
       return;

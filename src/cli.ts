@@ -773,7 +773,11 @@ async function cmdWhoami(config: Config): Promise<CmdResult> {
       const lines: string[] = [];
       lines.push(`Key:    ${data.key_name ?? data.key_id}`);
       lines.push(`Scopes: ${(data.scopes ?? []).join(", ") || "(none)"}`);
-      lines.push(`Vault:  ${data.vault_id ?? "-"}`);
+      const vaultLabel = data.vault_slug
+        ? `${data.vault_slug}${data.vault_name ? ` (${data.vault_name})` : ""} [${data.vault_id}]`
+        : (data.vault_id ?? "-");
+      lines.push(`Vault:  ${vaultLabel}`);
+      if (data.owner_email) lines.push(`Owner:  ${data.owner_email}`);
       if (data.trail) lines.push(`Trail:  ${data.trail.name} (${data.trail.id})`);
       return lines.join("\n");
     },
@@ -923,9 +927,10 @@ export function walkIngestSources(
 }
 
 async function cmdIngest(config: Config, dir: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
-  if (!dir) throw new CliError("bad_request", "Usage: grove ingest <dir> [--recursive] [--dry-run]", 1);
+  if (!dir) throw new CliError("bad_request", "Usage: grove ingest <dir> [--recursive] [--dry-run] [--yes]", 1);
   const dryRun = !!flags["dry-run"];
   const recursive = !!flags.recursive || !!flags.r;
+  const skipConfirm = !!flags.yes || !!flags.y;
 
   // Verify dir exists and has .md/.txt files (recursing into subfolders if requested).
   let mdFiles: Array<{ name: string; absPath: string }>;
@@ -1027,6 +1032,49 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
         return lines.join("\n");
       },
     };
+  }
+
+  // Pre-flight: show the operator exactly which vault is about to receive
+  // these notes and require confirmation. A token swap silently routes a
+  // local-source ingest to the wrong vault — incident 2026-04-28 leaked
+  // 13 personal journals into a freshly-onboarded user's vault. The cost
+  // of one prompt is small; the cost of a bad write is unrecoverable.
+  if (toImport.length > 0) {
+    let identity: any = {};
+    try { identity = await restGet(config, "/v1/whoami"); } catch { /* fall through with empty identity */ }
+    const vaultLabel = identity.vault_slug
+      ? `${identity.vault_slug}${identity.vault_name ? ` (${identity.vault_name})` : ""}`
+      : (identity.vault_id ?? "(unknown vault)");
+    process.stderr.write(`\nAbout to write ${toImport.length} note${toImport.length === 1 ? "" : "s"} to:\n`);
+    process.stderr.write(`  Server: ${config.server}\n`);
+    process.stderr.write(`  Vault:  ${vaultLabel}\n`);
+    if (identity.owner_email) process.stderr.write(`  Owner:  ${identity.owner_email}\n`);
+    process.stderr.write(`  Source: ${dir}\n`);
+    const sampleCount = Math.min(3, toImport.length);
+    process.stderr.write(`  Sample targets:\n`);
+    for (let i = 0; i < sampleCount; i++) process.stderr.write(`    ${toImport[i].targetPath}\n`);
+    if (toImport.length > sampleCount) process.stderr.write(`    … and ${toImport.length - sampleCount} more\n`);
+    process.stderr.write("\n");
+
+    if (!skipConfirm) {
+      if (!process.stdin.isTTY) {
+        throw new CliError(
+          "bad_request",
+          "ingest requires confirmation; pass --yes to skip the prompt in non-interactive contexts",
+          1,
+        );
+      }
+      process.stderr.write("Continue? (y/N) ");
+      const answer = await new Promise<string>((resolve) => {
+        let buf = "";
+        const onData = (c: string | Buffer) => { buf += c.toString(); if (buf.includes("\n")) { process.stdin.removeListener("data", onData); process.stdin.pause(); resolve(buf.trim()); } };
+        process.stdin.resume();
+        process.stdin.on("data", onData);
+      });
+      if (!/^y(es)?$/i.test(answer)) {
+        throw new CliError("aborted", "Aborted by user.", 1);
+      }
+    }
   }
 
   // Write notes via MCP
@@ -2218,11 +2266,12 @@ export const HELP: Record<string, CmdHelp> = {
     exit_codes: EXIT_CODES,
   },
   ingest: {
-    usage: "grove ingest <dir> [--recursive] [--dry-run] [--json]",
-    description: "Deprecated alias — prefer `grove import <dir> --source=fs`. Imports .md or .txt files into the vault (.txt is renamed to .md). Deduplicates by title against existing notes. Creates a snapshot before starting. Pass --recursive (or -r) to include nested subdirectories.",
+    usage: "grove ingest <dir> [--recursive] [--dry-run] [--yes] [--json]",
+    description: "Deprecated alias — prefer `grove import <dir> --source=fs`. Imports .md or .txt files into the vault (.txt is renamed to .md). Deduplicates by title against existing notes. Creates a snapshot before starting. Pass --recursive (or -r) to include nested subdirectories. Prints the destination vault and prompts before writing; pass --yes (or -y) to skip the prompt in scripts.",
     flags: [
       "--recursive  Walk subdirectories (alias: -r)",
       "--dry-run    Show what would be imported",
+      "--yes        Skip the destination-vault confirmation prompt (alias: -y)",
       "--json       JSON output",
     ],
     json_schema: "{ok, action, imported, failed, skipped, enqueued, total, results: [{path, status}]}",
