@@ -2219,7 +2219,7 @@ export const HELP: Record<string, CmdHelp> = {
   },
   ingest: {
     usage: "grove ingest <dir> [--recursive] [--dry-run] [--json]",
-    description: "Import .md or .txt files into the vault (.txt is renamed to .md). Deduplicates by title against existing notes. Creates a snapshot before starting. Pass --recursive (or -r) to include nested subdirectories.",
+    description: "Deprecated alias — prefer `grove import <dir> --source=fs`. Imports .md or .txt files into the vault (.txt is renamed to .md). Deduplicates by title against existing notes. Creates a snapshot before starting. Pass --recursive (or -r) to include nested subdirectories.",
     flags: [
       "--recursive  Walk subdirectories (alias: -r)",
       "--dry-run    Show what would be imported",
@@ -2228,6 +2228,25 @@ export const HELP: Record<string, CmdHelp> = {
     json_schema: "{ok, action, imported, failed, skipped, enqueued, total, results: [{path, status}]}",
     exit_codes: EXIT_CODES,
     examples: ["grove ingest ./import/", "grove ingest ./vault --recursive", "grove ingest ./export/ --dry-run"],
+  },
+  import: {
+    usage: "grove import <dir> --source=<fs|sources|bookmarks> [--apply|--plan] [--recursive] [--json]",
+    description: "Import notes into the vault. --source=fs reads .md/.txt files from <dir>; --source=sources syncs archived sources; --source=bookmarks syncs bookmarks. Defaults to --plan (dry-run); pass --apply to execute.",
+    flags: [
+      "--source S   Where to import from: fs|sources|bookmarks (default: fs)",
+      "--apply      Execute the import (writes to the vault)",
+      "--plan       Dry-run — show what would be imported (default when --apply is absent)",
+      "--recursive  (--source=fs) Walk subdirectories (alias: -r)",
+      "--count N    (--source=bookmarks) Number of bookmarks to fetch (default: 20)",
+      "--json       JSON output",
+    ],
+    json_schema: "{ok, action, imported, failed, skipped, enqueued, total, results: [{path, status}]}",
+    exit_codes: EXIT_CODES,
+    examples: [
+      "grove import ./import/ --source=fs --apply",
+      "grove import ./vault --source=fs --recursive --plan",
+      "grove import . --source=bookmarks --apply",
+    ],
   },
   bookmarks: {
     usage: "grove bookmarks [--count N] [--json]",
