@@ -74,9 +74,10 @@ function extractTerms(query: string): string[] {
     .filter(t => t.length >= 2 && !STOPWORDS.has(t.toLowerCase()));
 }
 
-/** Extract vault path from FTS5 filepath (strip life/ prefix). */
+/** Extract vault path from FTS5 filepath (strip the `<collection>/` prefix). */
 function ftsVaultPath(filepath: string): string {
-  return filepath.startsWith("life/") ? filepath.slice(5) : filepath;
+  const slash = filepath.indexOf("/");
+  return slash === -1 ? filepath : filepath.slice(slash + 1);
 }
 
 /**
@@ -103,7 +104,7 @@ function bm25Search(query: string, n: number, collection?: string): SearchResult
     `SELECT f.filepath, f.title, rank,
             substr(f.body, 1, 200) as snippet
      FROM documents_fts f
-     JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
+     JOIN documents d ON d.path = SUBSTR(f.filepath, INSTR(f.filepath, '/') + 1) AND d.active = 1
      ${collectionClause}
      WHERE documents_fts MATCH ?
      ORDER BY rank
@@ -172,7 +173,7 @@ function titleSearch(query: string, n: number, collection?: string): SearchResul
   for (const [alias, entry] of aliasIndex) {
     // Only match if the full alias appears in the query (case-insensitive)
     if (alias.length >= 3 && queryLower.includes(alias)) {
-      const vaultPath = entry.filepath.startsWith("life/") ? entry.filepath.slice(5) : entry.filepath;
+      const vaultPath = ftsVaultPath(entry.filepath);
       aliasHits.push({
         title: entry.title,
         vault_path: vaultPath,
@@ -189,7 +190,7 @@ function titleSearch(query: string, n: number, collection?: string): SearchResul
     `SELECT f.filepath, f.title, rank,
             substr(f.body, 1, 200) as snippet
      FROM documents_fts f
-     JOIN documents d ON d.path = SUBSTR(f.filepath, 6) AND d.active = 1
+     JOIN documents d ON d.path = SUBSTR(f.filepath, INSTR(f.filepath, '/') + 1) AND d.active = 1
      ${collectionClause}
      WHERE documents_fts MATCH ?
      ORDER BY rank
@@ -507,7 +508,7 @@ export async function hybridSearch(
         const [item] = fused.splice(idx, 1);
         fused.splice(Math.min(2, fused.length), 0, item);
       } else if (idx === -1) {
-        const vaultPath = entry.filepath.startsWith("life/") ? entry.filepath.slice(5) : entry.filepath;
+        const vaultPath = ftsVaultPath(entry.filepath);
         fused.splice(Math.min(2, fused.length), 0, {
           title: entry.title,
           vault_path: vaultPath,
