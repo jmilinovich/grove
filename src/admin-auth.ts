@@ -47,6 +47,17 @@ function validateToken(token: string): StoredKey | null {
   return key;
 }
 
+/**
+ * Grove-wide platform owner — `users.role='owner'`. Distinct from
+ * `vault_members(role='owner')` which is per-vault. A platform owner can
+ * administer any vault even when they're not a member; lets us back the
+ * `grove onboard` paved path without forcing the operator to insert a
+ * throwaway `vault_members` row before every cross-vault admin call.
+ */
+export function isPlatformOwner(userId: string): boolean {
+  return getUserRole(userId) === "owner";
+}
+
 export function adminAuth(req: IncomingMessage, vaultId?: string): AdminAuthResult {
   let userId: string | null = null;
   let keyName = "";

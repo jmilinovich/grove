@@ -24,7 +24,7 @@ process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
 import { getDb, resetDb, createSchema } from "../src/db.js";
 import { createKey } from "../src/keys.js";
-import { adminAuth } from "../src/admin-auth.js";
+import { adminAuth, isPlatformOwner } from "../src/admin-auth.js";
 
 /** Build a fake `IncomingMessage` for the auth helper. We only
  *  exercise the headers / cookie parsing path, so a duck-typed object
@@ -166,5 +166,30 @@ describe("adminAuth(req, vaultId?)", () => {
     const carolKey = createKey("carol-key2", ["read", "write"], "vault_alice", undefined, "user_carol");
     const result = adminAuth(fakeReq({ authorization: `Bearer ${carolKey.token}` }));
     expect(result).toEqual({ ok: false, status: 403 });
+  });
+});
+
+describe("isPlatformOwner(userId)", () => {
+  beforeEach(() => {
+    resetDb();
+    seedDb();
+  });
+
+  afterEach(() => {
+    resetDb();
+  });
+
+  it("returns true for users with users.role='owner'", () => {
+    expect(isPlatformOwner("user_alice")).toBe(true);
+    expect(isPlatformOwner("user_bob")).toBe(true);
+    expect(isPlatformOwner("user_mallory")).toBe(true);
+  });
+
+  it("returns false for non-owner roles", () => {
+    expect(isPlatformOwner("user_carol")).toBe(false);
+  });
+
+  it("returns false for unknown users", () => {
+    expect(isPlatformOwner("user_does_not_exist")).toBe(false);
   });
 });
