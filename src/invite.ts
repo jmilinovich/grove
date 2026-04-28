@@ -235,8 +235,17 @@ export async function inviteUserToVault(
   // pair so the invitee never has to hunt for URLs.
   const wwwBase = baseUrl.replace("api.grove.md", "grove.md");
   const ownerHandle = user.username;
-  const vaultUrl = `${wwwBase}/@${ownerHandle}/${vault.slug}/dashboard`;
   const connectorUrl = `${baseUrl}/v/${vault.slug}/mcp`;
+
+  // Both branches must route through grove.md's /api/auth/callback so the
+  // dashboard receives a session cookie before its auth gate runs. Skipping
+  // the callback (a bare dashboard URL, or a verify→dashboard redirect that
+  // only carries ?code=) was the root cause of Sumon's onboarding bounce:
+  // /v1/admin/onboard always provisions the user moments before invite, so
+  // even the "existing user" branch has no session yet. See inviteUser
+  // (~line 126) for the canonical wwwBase + /api/auth/callback shape.
+  const dashboardRedirect = `${wwwBase}/@${ownerHandle}/${vault.slug}/dashboard`;
+  const callbackUrl = `${wwwBase}/api/auth/callback?redirect=${encodeURIComponent(dashboardRedirect)}`;
 
   if (created) {
     const token = randomBytes(32).toString("hex");
@@ -250,8 +259,7 @@ export async function inviteUserToVault(
       tokenHash,
       new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     );
-    const redirect = `${wwwBase}/@${ownerHandle}/${vault.slug}/dashboard`;
-    const verifyUrl = `${baseUrl}/auth/verify?token=${token}&email=${encodeURIComponent(normalizedEmail)}&redirect=${encodeURIComponent(redirect)}`;
+    const verifyUrl = `${baseUrl}/auth/verify?token=${token}&email=${encodeURIComponent(normalizedEmail)}&redirect=${encodeURIComponent(callbackUrl)}`;
     await sendVaultInviteEmail(normalizedEmail, verifyUrl, connectorUrl, {
       vaultSlug: vault.slug,
       vaultName: vault.display_name,
@@ -259,8 +267,24 @@ export async function inviteUserToVault(
       magicLink: true,
     });
   } else {
-    // Existing user — no magic link; they already have a session via grove.md.
-    await sendVaultInviteEmail(normalizedEmail, vaultUrl, connectorUrl, {
+    // Existing user — also route through /api/auth/callback. Even when the
+    // user predates this invite, they may not have a live grove.md session
+    // (cookie expired, different browser, /v1/admin/onboard pre-creating
+    // the user). The callback is a no-op for an already-authenticated
+    // request and a session-establisher otherwise.
+    const token = randomBytes(32).toString("hex");
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    const mlId = "ml_" + randomBytes(8).toString("hex");
+    db.prepare(
+      "INSERT INTO magic_links (id, email, token_hash, expires_at) VALUES (?, ?, ?, ?)",
+    ).run(
+      mlId,
+      normalizedEmail,
+      tokenHash,
+      new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    );
+    const verifyUrl = `${baseUrl}/auth/verify?token=${token}&email=${encodeURIComponent(normalizedEmail)}&redirect=${encodeURIComponent(callbackUrl)}`;
+    await sendVaultInviteEmail(normalizedEmail, verifyUrl, connectorUrl, {
       vaultSlug: vault.slug,
       vaultName: vault.display_name,
       role,

@@ -171,14 +171,31 @@ describe("e2e onboarding (full path Sumon hit)", () => {
   // session cookie before its auth gate runs.
   //
   // Flip `it.todo` → `it` once the fix lands; the assertion is ready.
-  it.todo(
+  it(
     "invite email URL establishes a session before the dashboard auth gate",
-    /* () => {
+    async () => {
+      // beforeEach resets inviteEmails but the SQLite file persists across
+      // tests in this file — use a fresh slug/email so we don't collide
+      // with the first test's "newvault" + Newuser@Example.COM.
+      await provisionVault(
+        {
+          slug: "newvault2",
+          ownerEmail: "Other@Example.COM",
+          displayName: "Other Vault",
+        },
+        { skipReload: false, effects: testEffects },
+      );
+      await inviteUserToVault(
+        "Other@Example.COM",
+        "newvault2",
+        "owner",
+        "https://api.grove.md",
+      );
       const url = inviteEmails[0].primaryUrl;
       expect(
         url.includes("/auth/verify") || url.includes("/api/auth/callback"),
         `email URL must establish a session; got bare deep-link: ${url}`,
       ).toBe(true);
-    } */
+    },
   );
 });
