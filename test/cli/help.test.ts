@@ -8,7 +8,7 @@ describe("HELP", () => {
     "search", "read", "list", "write", "delete", "move", "init",
     "graph", "digest", "health", "metrics",
     "status", "history", "diagnostics",
-    "keys", "trails", "vault", "sync", "ingest", "lint", "snapshot", "rollback",
+    "keys", "trails", "vault", "sync", "ingest", "import", "lint", "snapshot", "rollback",
     "whoami", "tag-backfill",
   ];
 
@@ -46,6 +46,16 @@ describe("printCommandHelp", () => {
     expect(out).toContain("Unknown command");
   });
 
+  it("renders a real help block for `import` (not 'Unknown command')", () => {
+    // Regression for the bug Sumon hit on 2026-04-28: the dispatcher routed
+    // `grove import` correctly but the HELP table had no entry, so
+    // `grove import --help` printed "Unknown command: import."
+    const out = printCommandHelp("import");
+    expect(out).not.toContain("Unknown command");
+    expect(out).toContain("grove import");
+    expect(out).toContain("--source");
+  });
+
   it("includes flags section when flags exist", () => {
     const out = printCommandHelp("write");
     expect(out).toContain("Flags:");
@@ -78,10 +88,18 @@ interface HelpExpectations {
 const HELP_CASES: [string, HelpExpectations][] = [
   ["ingest", {
     usageContains: ["grove ingest"],
-    descriptionMatches: /Import/,
+    descriptionMatches: /Import/i,
     jsonSchemaMatches: /imported/,
     flagSubstrings: ["dry-run"],
     printContains: ["grove ingest", "dry-run", "Examples:"],
+  }],
+  ["import", {
+    usageContains: ["grove import", "--source"],
+    descriptionMatches: /fs|sources|bookmarks/,
+    jsonSchemaMatches: /imported/,
+    flagSubstrings: ["--source", "--apply", "--plan"],
+    exampleSubstring: "--source=fs",
+    printContains: ["grove import", "--source", "Examples:"],
   }],
   ["vault", {
     usageContains: ["grove vault", "status", "encrypt", "unlock", "lock"],
