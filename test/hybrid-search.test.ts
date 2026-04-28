@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stripWikilinks, formatResults, rrfFuse } from "../src/hybrid-search.js";
+import { stripWikilinks, formatResults, rrfFuse, buildAliasEntries } from "../src/hybrid-search.js";
 
 interface SearchResult {
   title: string;
@@ -266,5 +266,66 @@ describe("formatResults", () => {
     ]);
     expect(output).toContain("(https://grove.md/a/b)");
     expect(output).not.toContain("/@");
+  });
+});
+
+// ── Alias index: filepath uses row.collection, never hardcoded "life/" ──
+//
+// Regression for the multi-vault bug where the alias index stamped every
+// entry with `life/<path>` even when the row came from sharpshoot or any
+// other non-life vault. The fix uses `${row.collection}/${row.path}` so
+// downstream consumers can strip the right prefix.
+
+describe("buildAliasEntries", () => {
+  const docWithAlias = `---
+title: "Foo"
+aliases:
+  - "FooBar"
+  - "FB"
+---
+
+body`;
+
+  it("prefixes filepath with the row's collection (life)", () => {
+    const entries = buildAliasEntries([
+      { path: "inbox/foo.md", title: "Foo", collection: "life", doc: docWithAlias },
+    ]);
+    expect(entries).toHaveLength(2);
+    const [, entry] = entries[0];
+    expect(entry.collection).toBe("life");
+    expect(entry.filepath).toBe("life/inbox/foo.md");
+    expect(entry.filepath.startsWith("life/")).toBe(true);
+  });
+
+  it("prefixes filepath with the row's collection (sharpshoot — non-life vault)", () => {
+    const entries = buildAliasEntries([
+      { path: "inbox/foo.md", title: "Foo", collection: "sharpshoot", doc: docWithAlias },
+    ]);
+    expect(entries).toHaveLength(2);
+    for (const [, entry] of entries) {
+      expect(entry.collection).toBe("sharpshoot");
+      expect(entry.filepath).toBe("sharpshoot/inbox/foo.md");
+      // The bug we are guarding against: never stamp non-life rows with life/.
+      expect(entry.filepath.startsWith("life/")).toBe(false);
+    }
+  });
+
+  it("preserves per-row collection when mixing vaults", () => {
+    const entries = buildAliasEntries([
+      { path: "a.md", title: "A", collection: "life", doc: `---\naliases:\n  - "AAA"\n---\n` },
+      { path: "b.md", title: "B", collection: "sharpshoot", doc: `---\naliases:\n  - "BBB"\n---\n` },
+    ]);
+    const map = new Map(entries);
+    expect(map.get("aaa")?.filepath).toBe("life/a.md");
+    expect(map.get("aaa")?.collection).toBe("life");
+    expect(map.get("bbb")?.filepath).toBe("sharpshoot/b.md");
+    expect(map.get("bbb")?.collection).toBe("sharpshoot");
+  });
+
+  it("skips rows without an aliases block", () => {
+    const entries = buildAliasEntries([
+      { path: "x.md", title: "X", collection: "life", doc: `---\ntitle: "X"\n---\n` },
+    ]);
+    expect(entries).toHaveLength(0);
   });
 });

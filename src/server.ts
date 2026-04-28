@@ -778,9 +778,17 @@ Modes:
   );
 
   // ── Resource: vault notes accessible as MCP resources ──────────
+  // The resource template is scoped to whichever vault this grove-server
+  // process is bound to (one process per vault under PM2). Hardcoding
+  // `life` here meant non-life per-vault servers (sharpshoot, test-vault,
+  // etc.) advertised an incorrect URI scheme. Falls back to the basename
+  // of GROVE_VAULT, then `personal` to match the SERVER_VAULT_CONTEXT
+  // default above.
+  const resourceVaultSlug =
+    process.env.GROVE_VAULT_SLUG ?? (VAULT_PATH ? VAULT_PATH.split("/").filter(Boolean).pop() : undefined) ?? "personal";
   server.resource(
     "note",
-    new ResourceTemplate("vault://life/{path}", { list: undefined }),
+    new ResourceTemplate(`vault://${resourceVaultSlug}/{path}`, { list: undefined }),
     async (uri, { path }) => ({
       contents: [{
         uri: uri.href,
