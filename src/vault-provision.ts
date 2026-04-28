@@ -20,7 +20,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -70,6 +70,14 @@ export interface Effects {
   initRepo(gitPath: string): void;
   /** `qmd init` in the per-vault QMD data directory. */
   initQmd(qmdPath: string): void;
+  /**
+   * Register the new vault as a QMD collection so search hits it.
+   * Without this, `grove search` and the MCP `query` lex backend return
+   * empty for every vault except the legacy `life` one — which is what
+   * Sumon hit on day 1 of `sharpshoot`. Idempotent: re-registering an
+   * existing slug is a no-op.
+   */
+  registerQmdCollection(slug: string, vaultPath: string): void;
   /** Write the PM2 ecosystem config atomically. */
   writeEcosystem(path: string, content: string): void;
   /** Trigger `sudo pm2 reload ecosystem.config.cjs`. */
@@ -109,6 +117,38 @@ export const defaultEffects: Effects = {
     // qmd 2.1+ removed that subcommand, so invoking it just prints an
     // unknown-command error. The mkdir is idempotent and harmless.
     mkdirSync(qmdPath, { recursive: true });
+  },
+  registerQmdCollection(slug: string, vaultPath: string): void {
+    // QMD's CLI `collection add` ignores --path / positional path args
+    // (always uses cwd), so editing index.yml directly is the reliable
+    // path. Format is plain enough to handle without a yaml dep:
+    //
+    //   collections:
+    //     life:
+    //       path: /root/life
+    //       pattern: "**/*.md"
+    const configPath = "/root/.config/qmd/index.yml";
+    let body = existsSync(configPath)
+      ? readFileSync(configPath, "utf8")
+      : "collections:\n";
+    if (!body.includes("collections:")) body = "collections:\n" + body;
+    // Idempotent: if the slug is already a top-level collection key, leave
+    // index.yml alone. Match `\n  <slug>:\n` to avoid false positives on
+    // substrings (e.g. registering `team` when `team-eu` already exists).
+    if (!new RegExp(`\\n {2}${slug}:\\s*\\n`).test("\n" + body)) {
+      const block = `  ${slug}:\n    path: ${vaultPath}\n    pattern: "**/*.md"\n`;
+      body = body.replace(/collections:\s*\n/, `collections:\n${block}`);
+      writeFileSync(configPath, body, "utf8");
+    }
+    // Index the (initially empty) collection so it shows up in `qmd
+    // collection list` and is ready to pick up the first ingest.
+    try {
+      execSync(`sudo qmd update`, { stdio: "inherit" });
+    } catch {
+      // QMD update is best-effort during provisioning; the next ingest
+      // will trigger an index refresh anyway. Don't fail the whole
+      // provision over a search-tooling hiccup.
+    }
   },
   writeEcosystem(path: string, content: string): void {
     writeFileSync(path, content, "utf8");
@@ -226,6 +266,7 @@ export async function provisionVault(
 
   effects.initRepo(gitPath);
   effects.initQmd(qmdPath);
+  effects.registerQmdCollection(input.slug, gitPath);
 
   const vaultId = `vault_${randomBytes(4).toString("hex")}`;
   const rawToken = `grove_live_${randomBytes(32).toString("hex")}`;
