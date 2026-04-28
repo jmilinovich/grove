@@ -16,6 +16,7 @@ import {
 const noopEffects: Effects = {
   initRepo: () => {},
   initQmd: () => {},
+  registerQmdCollection: () => {},
   writeEcosystem: () => {},
   reloadPm2: () => {},
   startPm2Apps: () => {},
@@ -159,6 +160,27 @@ describe("vault-provision (P8-A4)", () => {
       const db = getDb();
       const count = (db.prepare("SELECT COUNT(*) as c FROM vaults").get() as { c: number }).c;
       expect(count).toBe(1); // only personal
+    });
+
+    it("registers the new vault as a QMD collection (so search hits it on day one)", async () => {
+      // Regression: sharpshoot was provisioned but never added to QMD's
+      // index.yml, so `grove search` returned nothing for the owner. This
+      // asserts the provision pipeline runs `registerQmdCollection` with
+      // the slug + on-disk path so the next `qmd update` picks it up.
+      let captured: { slug: string; path: string } | null = null;
+      const effects: Effects = {
+        ...noopEffects,
+        registerQmdCollection: (slug, path) => {
+          captured = { slug, path };
+        },
+      };
+      const r = await provisionVault(
+        { slug: "team", ownerEmail: "team@example.com" },
+        { skipReload: true, effects },
+      );
+      expect(captured).not.toBeNull();
+      expect(captured!.slug).toBe("team");
+      expect(captured!.path).toBe(r.gitPath);
     });
 
     it("reuses an existing user when the email matches", async () => {
