@@ -227,19 +227,24 @@ export async function provisionVault(
 
   const displayName = input.displayName ?? input.slug.charAt(0).toUpperCase() + input.slug.slice(1);
 
+  // Match invite.ts — store/lookup users by lowercased+trimmed email so
+  // `--owner Foo@x.com` and a later `grove invite foo@x.com` resolve to
+  // the same row instead of creating a duplicate user.
+  const normalizedEmail = input.ownerEmail.toLowerCase().trim();
+
   let ownerUserId = "";
 
   const tx = db.transaction(() => {
     const existingUser = db
       .prepare("SELECT id FROM users WHERE email = ?")
-      .get(input.ownerEmail) as { id: string } | undefined;
+      .get(normalizedEmail) as { id: string } | undefined;
     if (existingUser) {
       ownerUserId = existingUser.id;
     } else {
       ownerUserId = `user_${randomBytes(4).toString("hex")}`;
       db.prepare(
         "INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)",
-      ).run(ownerUserId, input.ownerEmail.split("@")[0], input.ownerEmail, "owner");
+      ).run(ownerUserId, normalizedEmail.split("@")[0], normalizedEmail, "owner");
     }
 
     db.prepare(

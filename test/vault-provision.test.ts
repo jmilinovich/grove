@@ -173,6 +173,22 @@ describe("vault-provision (P8-A4)", () => {
       expect(r.ownerUserId).toBe("user_reuse");
     });
 
+    it("normalizes owner email to lowercase so a later same-email invite reuses the row", async () => {
+      const db = getDb();
+      const r = await provisionVault(
+        { slug: "team", ownerEmail: "Mixed.Case@Example.com" },
+        { skipReload: true, effects: noopEffects },
+      );
+      const row = db
+        .prepare("SELECT email FROM users WHERE id = ?")
+        .get(r.ownerUserId) as { email: string };
+      expect(row.email).toBe("mixed.case@example.com");
+      const matches = db
+        .prepare("SELECT COUNT(*) AS n FROM users WHERE LOWER(email) = ?")
+        .get("mixed.case@example.com") as { n: number };
+      expect(matches.n).toBe(1);
+    });
+
     it("emits a 60s health poll when skipReload is false (via effects mock)", async () => {
       let reloaded = false;
       let polledPort = 0;
