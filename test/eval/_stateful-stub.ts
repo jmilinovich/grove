@@ -69,7 +69,7 @@ export async function startStatefulStub(seed: StubNote[] = []): Promise<StubServ
           status = 401;
           payload = { error: "unauthorized" };
         } else if (method === "GET" && url.pathname === "/health") {
-          payload = { ok: true, checks: { proxy: true, "grove-server": true, qmd: true, embed: true } };
+          payload = { ok: true, checks: { proxy: true, "grove-server": true, embed: true } };
         } else if (method === "GET" && url.pathname === "/v1/whoami") {
           payload = { key_id: "key_eval", key_name: "eval-key", scopes: ["read", "write"], vault_id: "life" };
         } else if (method === "GET" && url.pathname === "/v1/stats") {

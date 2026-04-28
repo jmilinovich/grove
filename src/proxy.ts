@@ -1009,12 +1009,10 @@ const server = createServer(async (req, res) => {
   if (handleOAuth(req, res, url)) return;
 
   // Deep health check — verifies downstream services (Grove server + embed).
-  // The legacy `qmd-server` HTTP companion on :8177 is no longer required —
-  // hybrid-search runs BM25 in-process via FTS5 (see hybrid-search.ts:85).
-  // We still PROBE :8177 so operators can see whether anything's listening,
-  // but its state no longer fails the readiness gate. Only the proxy's
-  // ability to reach the canonical grove-server (via $GROVE_SERVER_PORT)
-  // and the presence of a Voyage API key are required for `ok: true`.
+  // Hybrid-search runs BM25 in-process via FTS5 (see hybrid-search.ts:85), so
+  // only the proxy's ability to reach the canonical grove-server (via
+  // $GROVE_SERVER_PORT) and the presence of a Voyage API key are required for
+  // `ok: true`.
   if (url.pathname === "/health") {
     const checks: Record<string, boolean> = { proxy: true };
     const checkServer = (hostname: string, port: number, path: string) =>
@@ -1027,16 +1025,11 @@ const server = createServer(async (req, res) => {
         r.on("timeout", () => { r.destroy(); resolve(false); });
         r.end();
       });
-    const [groveOk, qmdOk] = await Promise.all([
-      checkServer("127.0.0.1", GROVE_SERVER_PORT, "/health"),
-      checkServer("127.0.0.1", 8177, "/health"), // legacy BM25 companion — advisory only
-    ]);
+    const groveOk = await checkServer("127.0.0.1", GROVE_SERVER_PORT, "/health");
     // Embed health: just check that VOYAGE_API_KEY is set (API is external).
     const embedOk = !!process.env.VOYAGE_API_KEY;
     checks["grove-server"] = groveOk;
-    checks.qmd = qmdOk;
     checks.embed = embedOk;
-    // qmd intentionally omitted from the readiness gate. See header comment.
     const allOk = groveOk && embedOk;
     sendJson(res, allOk ? 200 : 503, {
       ok: allOk,

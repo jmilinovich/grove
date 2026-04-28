@@ -39,7 +39,7 @@ const FIXTURES = {
     })),
     count: 10,
   },
-  health: { ok: true, checks: { proxy: true, "grove-server": true, qmd: true, embed: true } },
+  health: { ok: true, checks: { proxy: true, "grove-server": true, embed: true } },
   stats: {
     vault: { total_notes: 1083, total_bytes: 5_200_000 },
     freshness: { stale_days: 3 },
