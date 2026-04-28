@@ -64,6 +64,56 @@ Content here`;
   });
 });
 
+describe("gitPush with no remote", () => {
+  let vaultPath: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    vaultPath = mkdtempSync(join(tmpdir(), "grove-vault-push-noremote-"));
+    const { exec, _resetNoRemoteWarned } = await import("../src/vault-ops.js");
+    await exec("git", ["init", "-b", "main"], vaultPath);
+    await exec("git", ["config", "user.email", "test@test"], vaultPath);
+    await exec("git", ["config", "user.name", "test"], vaultPath);
+    writeFileSync(join(vaultPath, "x.md"), "x");
+    await exec("git", ["add", "-A"], vaultPath);
+    await exec("git", ["commit", "-m", "init"], vaultPath);
+    _resetNoRemoteWarned();
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    rmSync(vaultPath, { recursive: true, force: true });
+  });
+
+  it("resolves silently and does not throw when no git remote exists", async () => {
+    // Per-write pushes from the WriteQueue must not throw on remote-less
+    // vaults — that path was throwing `fatal: 'origin' does not appear to
+    // be a git repository` for every write on freshly-provisioned vaults.
+    // Now `gitPush` checks `git remote` first and bails silently.
+    const { gitPush } = await import("../src/vault-ops.js");
+    await expect(gitPush(vaultPath)).resolves.toBeUndefined();
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("logs the no-remote heads-up exactly once per vault path", async () => {
+    // The heads-up is useful (it tells the operator backup isn't wired)
+    // but only if it's not repeated on every write. The warn-once cache
+    // collapses subsequent calls.
+    const { gitPush } = await import("../src/vault-ops.js");
+    await gitPush(vaultPath);
+    await gitPush(vaultPath);
+    await gitPush(vaultPath);
+    const noRemoteCalls = logSpy.mock.calls.filter((c) =>
+      String(c[0] ?? "").includes("no git remote configured"),
+    );
+    expect(noRemoteCalls).toHaveLength(1);
+  });
+});
+
 describe("startupRecovery with no remote", () => {
   let vaultPath: string;
 
