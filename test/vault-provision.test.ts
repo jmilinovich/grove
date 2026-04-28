@@ -18,6 +18,7 @@ const noopEffects: Effects = {
   initQmd: () => {},
   writeEcosystem: () => {},
   reloadPm2: () => {},
+  startPm2Apps: () => {},
   waitForHealth: async () => {},
   listPm2Apps: () => [],
   deletePm2App: () => {},
@@ -189,13 +190,19 @@ describe("vault-provision (P8-A4)", () => {
       expect(matches.n).toBe(1);
     });
 
-    it("emits a 60s health poll when skipReload is false (via effects mock)", async () => {
+    it("starts only the new vault's apps and skips pm2 reload (no proxy bounce)", async () => {
       let reloaded = false;
+      let started: string[] | null = null;
       let polledPort = 0;
       const effects: Effects = {
         ...noopEffects,
+        // Proxy + personal vault are already running.
+        listPm2Apps: () => ["grove-proxy", "grove-server-personal", "grove-discovery-personal"],
         reloadPm2: () => {
           reloaded = true;
+        },
+        startPm2Apps: (_path, names) => {
+          started = names;
         },
         waitForHealth: async (port) => {
           polledPort = port;
@@ -205,8 +212,39 @@ describe("vault-provision (P8-A4)", () => {
         { slug: "team", ownerEmail: "team@example.com" },
         { effects },
       );
-      expect(reloaded).toBe(true);
+      expect(reloaded).toBe(false);
+      expect(started).toEqual(["grove-server-team", "grove-discovery-team"]);
       expect(polledPort).toBe(8191);
+    });
+
+    it("falls back to reloadPm2 when no new apps need to be started", async () => {
+      // Pathological case for the diff path — every expected app is
+      // already in pm2's list. Provisioning still has to refresh the
+      // ecosystem file (env may have changed), so reloadPm2 runs.
+      let reloaded = false;
+      let startedCount = 0;
+      const effects: Effects = {
+        ...noopEffects,
+        listPm2Apps: () => [
+          "grove-proxy",
+          "grove-server-personal",
+          "grove-discovery-personal",
+          "grove-server-team",
+          "grove-discovery-team",
+        ],
+        reloadPm2: () => {
+          reloaded = true;
+        },
+        startPm2Apps: (_p, names) => {
+          startedCount += names.length;
+        },
+      };
+      await provisionVault(
+        { slug: "team", ownerEmail: "team@example.com" },
+        { effects },
+      );
+      expect(reloaded).toBe(true);
+      expect(startedCount).toBe(0);
     });
   });
 

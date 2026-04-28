@@ -1507,6 +1507,65 @@ async function cmdInvite(config: Config, email: string, flags: Record<string, st
   };
 }
 
+// ── Onboard (paved path, remote, via /v1/admin/onboard API) ─────
+
+async function cmdOnboard(
+  config: Config,
+  email: string,
+  flags: Record<string, string | boolean>,
+): Promise<CmdResult> {
+  if (!email) {
+    throw new CliError(
+      "bad_request",
+      "Usage: grove onboard <email> --slug <slug> [--display-name \"<name>\"]",
+      1,
+    );
+  }
+  const slug = typeof flags.slug === "string" ? flags.slug : "";
+  if (!slug) {
+    throw new CliError("bad_request", "--slug <slug> is required", 1);
+  }
+  const displayName = typeof flags["display-name"] === "string" ? flags["display-name"] : undefined;
+
+  const payload: Record<string, string> = { email, slug };
+  if (displayName) payload.display_name = displayName;
+
+  const url = new URL("/v1/admin/onboard", config.server);
+  const res = await httpDo(
+    "POST",
+    url,
+    { Authorization: `Bearer ${config.token}` },
+    JSON.stringify(payload),
+  );
+  if (res.status === 409) {
+    throw new CliError("conflict", `slug "${slug}" already exists`, 4);
+  }
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+
+  return {
+    ok: true,
+    ...data,
+    _fmt: () => {
+      const lines = [
+        `\nOnboarded: ${email}`,
+        `Vault:     ${data.slug} (${data.vault_id})`,
+        `Connector: ${data.connector_url}`,
+      ];
+      if (data.invite_sent) {
+        lines.push(`\nA welcome email with a magic link has been sent. The new owner can`);
+        lines.push(`log into the dashboard, mint their own keys, and add the connector to`);
+        lines.push(`Claude.ai from there.`);
+      } else {
+        lines.push(`\n⚠️  Provisioning succeeded but the invite email did not send:`);
+        lines.push(`    ${data.invite?.error ?? "unknown error"}`);
+        lines.push(`Re-run: grove invite ${email} --vault ${data.slug} --role owner`);
+      }
+      return lines.join("\n") + "\n";
+    },
+  };
+}
+
 // ── Vault provisioning (P8-A4 — runs directly on the VPS) ───────
 
 async function cmdVaultCreate(
@@ -2092,14 +2151,16 @@ export const HELP: Record<string, CmdHelp> = {
   },
   vault: {
     usage: "grove vault [status|encrypt|unlock|lock|create|regen] [--json]",
-    description: "Encryption lifecycle, vault provisioning, and ecosystem config regen.",
+    description: "Encryption lifecycle, vault provisioning, and ecosystem config regen. Note: `create` runs locally on the VPS (touches /root/vaults/) — for the paved path that works from any machine, use `grove onboard`.",
     flags: [
-      "--json         JSON output",
-      "--prune        (regen) pm2-delete apps no longer in the generated config",
-      "--skip-reload  (regen) write the file but skip `pm2 reload`",
-      "--dry-run      (regen) print the plan without writing or reloading",
+      "--json            JSON output",
+      "--owner EMAIL     (create) owner email (required)",
+      "--display-name N  (create) human-readable vault name",
+      "--prune           (regen) pm2-delete apps no longer in the generated config",
+      "--skip-reload     (regen) write the file but skip pm2 start/reload",
+      "--dry-run         (regen) print the plan without writing or reloading",
     ],
-    json_schema: "encryption: {ok, encrypted, unlocked, last_unlocked_at} | regen: {ok, ecosystem_path, expected_apps, current_apps, orphans, pruned, wrote, reloaded}",
+    json_schema: "encryption: {ok, encrypted, unlocked, last_unlocked_at} | create: {ok, vault_id, slug, connector_url, owner_api_token} | regen: {ok, ecosystem_path, expected_apps, current_apps, orphans, pruned, wrote, reloaded}",
     exit_codes: EXIT_CODES,
     examples: [
       "grove vault status",
@@ -2107,8 +2168,41 @@ export const HELP: Record<string, CmdHelp> = {
       "grove vault unlock",
       "grove vault lock",
       "GROVE_VAULT_PASSPHRASE=... grove vault unlock --json",
+      "sudo grove vault create team --owner team@example.com --display-name 'Team Vault'",
       "grove vault regen --dry-run",
       "sudo grove vault regen --prune",
+    ],
+  },
+  invite: {
+    usage: "grove invite <email> --vault <slug> [--role owner|member|viewer] | grove invite <email> --trail <trail-id> [--role viewer]",
+    description: "Send a vault- or trail-invite email. New users get a magic link; existing users get a direct dashboard link plus an Add-to-Claude.ai deep link. Caller must be a vault owner OR a Grove-wide platform owner.",
+    flags: [
+      "--vault SLUG      Invite to this vault (mutually exclusive with --trail)",
+      "--trail ID        Invite to this trail (mutually exclusive with --vault)",
+      "--role R          Role: owner|member|viewer (default: member for vault, viewer for trail)",
+      "--json            JSON output",
+    ],
+    json_schema: "{ok, user_id, email, vault_id?, vault_slug?, trail_id?, key_id, role, created, newMembership}",
+    exit_codes: EXIT_CODES,
+    examples: [
+      "grove invite alice@example.com --vault team",
+      "grove invite alice@example.com --vault team --role owner",
+      "grove invite alice@example.com --trail trail_abc123 --role viewer",
+    ],
+  },
+  onboard: {
+    usage: "grove onboard <email> --slug <slug> [--display-name \"<name>\"] [--json]",
+    description: "Paved path for adding a new owner: provisions the vault, mints the owner's first key server-side, regenerates the PM2 config, brings up only the new processes (no proxy bounce), refreshes the proxy's vault map, and emails the new owner a magic link to the dashboard. One round-trip; no SSH, no cleartext token to copy. Caller must be a Grove-wide platform owner.",
+    flags: [
+      "--slug SLUG       URL-safe slug — becomes api.grove.md/v/<slug>/mcp (required)",
+      "--display-name N  Human-readable vault name shown in the dashboard",
+      "--json            JSON output",
+    ],
+    json_schema: "{ok, vault_id, slug, connector_url, owner_user_id, server_port, invite_sent, invite}",
+    exit_codes: EXIT_CODES,
+    examples: [
+      "grove onboard friend@example.com --slug friend-vault --display-name \"Friend's Vault\"",
+      "grove onboard sumon@example.com --slug sharpshoot --display-name 'Sumon Sadhu'",
     ],
   },
   sync: {
@@ -2215,7 +2309,9 @@ Commands:
   config                  Show vault structure config; 'config init' auto-detects
   keys                    Manage API keys
   trails                  Manage trails (scoped access)
-  vault                   Encryption lifecycle (status|encrypt|unlock|lock)
+  invite <email>          Send a vault- or trail-invite email
+  onboard <email>         Provision a new vault + email the magic link (paved path)
+  vault                   Encryption lifecycle (status|encrypt|unlock|lock|create|regen)
   sync <dir>              Sync archived Sources
   ingest <dir>            Import .md or .txt files into vault
   lint <dir>              Normalize frontmatter
@@ -2517,6 +2613,14 @@ async function main() {
     // Invite
     if (command === "invite") {
       result = await cmdInvite(config, positional, flags);
+      emitResult(result, flags);
+      return;
+    }
+
+    // Onboard — paved-path: provision a vault for someone and email them
+    // the magic link in one round-trip.
+    if (command === "onboard") {
+      result = await cmdOnboard(config, positional, flags);
       emitResult(result, flags);
       return;
     }

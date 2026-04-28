@@ -74,6 +74,13 @@ export interface Effects {
   writeEcosystem(path: string, content: string): void;
   /** Trigger `sudo pm2 reload ecosystem.config.cjs`. */
   reloadPm2(ecosystemPath: string): void;
+  /**
+   * `sudo pm2 start <ecosystem> --only <csv>` — bring up only the named
+   * apps without restarting the others. Used by `provisionVault` so a new
+   * vault's grove-server/discovery come online without bouncing the proxy
+   * (the old `pm2 reload` path 502'd /healthz for ~10s during onboarding).
+   */
+  startPm2Apps(ecosystemPath: string, appNames: string[]): void;
   /** Poll the new server's /health until {ok: true} or timeout. */
   waitForHealth(port: number, timeoutMs: number): Promise<void>;
   /** List all app names currently registered with PM2. */
@@ -108,6 +115,11 @@ export const defaultEffects: Effects = {
   },
   reloadPm2(ecosystemPath: string): void {
     execSync(`sudo pm2 reload ${ecosystemPath}`, { stdio: "inherit" });
+  },
+  startPm2Apps(ecosystemPath: string, appNames: string[]): void {
+    if (appNames.length === 0) return;
+    const csv = appNames.join(",");
+    execSync(`sudo pm2 start ${ecosystemPath} --only ${csv}`, { stdio: "inherit" });
   },
   async waitForHealth(port: number, timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
@@ -269,10 +281,23 @@ export async function provisionVault(
   effects.writeEcosystem(ecosystemPath, ecosystem);
 
   if (!opts.skipReload) {
+    // Compute which apps are new vs already running. `pm2 reload <ecosystem>`
+    // would restart every app (bouncing the proxy and causing a 502 window
+    // on /healthz); `pm2 start --only <new-csv>` only spins up the additions
+    // and leaves the rest untouched.
+    const expected = extractAppNames(ecosystem);
+    const current = new Set(effects.listPm2Apps());
+    const newApps = expected.filter((n) => !current.has(n));
     try {
-      effects.reloadPm2(ecosystemPath);
+      if (newApps.length > 0) {
+        effects.startPm2Apps(ecosystemPath, newApps);
+      } else {
+        // No new apps — config-only change. Fall back to reload so the
+        // updated env/args reach the existing processes.
+        effects.reloadPm2(ecosystemPath);
+      }
     } catch (err) {
-      throw new ProvisionError("reload_failed", `pm2 reload failed: ${(err as Error).message}`);
+      throw new ProvisionError("reload_failed", `pm2 start/reload failed: ${(err as Error).message}`);
     }
     await effects.waitForHealth(serverPort, 60_000);
   }

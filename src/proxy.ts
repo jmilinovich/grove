@@ -110,7 +110,7 @@ import {
   userIsVaultMember,
   type VaultContext,
 } from "./vault-router.js";
-import { adminAuth, type AdminAuthResult } from "./admin-auth.js";
+import { adminAuth, isPlatformOwner, type AdminAuthResult } from "./admin-auth.js";
 
 installCrashHandlers("grove-proxy");
 
@@ -1629,7 +1629,10 @@ const server = createServer(async (req, res) => {
             sendJson(res, 404, { error: "vault not found" });
             return;
           }
-          if (!userCanWriteVault(admin.userId, targetVault.id)) {
+          // Platform owners bypass the per-vault membership check — they
+          // need to invite users into vaults they just provisioned but
+          // aren't a member of yet.
+          if (!isPlatformOwner(admin.userId) && !userCanWriteVault(admin.userId, targetVault.id)) {
             // 404 not 403 so we don't confirm the vault exists.
             sendJson(res, 404, { error: "vault not found" });
             return;
@@ -1647,7 +1650,7 @@ const server = createServer(async (req, res) => {
             sendJson(res, 404, { error: "trail not found" });
             return;
           }
-          if (!userCanWriteVault(admin.userId, trailRow.vault_id)) {
+          if (!isPlatformOwner(admin.userId) && !userCanWriteVault(admin.userId, trailRow.vault_id)) {
             sendJson(res, 404, { error: "trail not found" });
             return;
           }
@@ -1661,6 +1664,74 @@ const server = createServer(async (req, res) => {
         } else {
           sendJson(res, 500, { error: msg });
         }
+      }
+      return;
+    }
+
+    // POST /v1/admin/onboard — paved path: provision vault + send invite
+    // email in one round-trip. Caller must be a Grove-wide platform owner;
+    // per-vault membership is irrelevant because the vault doesn't exist
+    // yet. Atomically:
+    //   1. provisionVault — creates vault + owner user + owner key + git
+    //      repo + ecosystem regen + targeted pm2 start (no full reload)
+    //   2. loadVaultMap — proxy now routes /v/<slug>/* without SIGHUP
+    //   3. inviteUserToVault — sends magic-link email so the new owner
+    //      can log into the dashboard and mint their own keys
+    if (restPath === "/v1/admin/onboard" && req.method === "POST") {
+      const admin = adminAuth(req); // Grove-wide check — no vaultId
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+
+      let body: string;
+      try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
+      let parsed: any;
+      try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
+
+      const { email, slug, display_name } = parsed;
+      if (typeof email !== "string" || !email.includes("@")) {
+        sendJson(res, 400, { error: "email is required" });
+        return;
+      }
+      if (typeof slug !== "string" || !slug) {
+        sendJson(res, 400, { error: "slug is required" });
+        return;
+      }
+
+      try {
+        const { provisionVault, ProvisionError } = await import("./vault-provision.js");
+        const provision = await provisionVault({
+          slug,
+          ownerEmail: email,
+          displayName: typeof display_name === "string" ? display_name : undefined,
+        });
+        // Refresh the proxy's in-memory route map so the next request to
+        // /v/<slug>/* resolves without waiting for SIGHUP.
+        try { loadVaultMap(); } catch { /* non-fatal — SIGHUP/restart will recover */ }
+
+        let invite: any = null;
+        try {
+          invite = await inviteUserToVault(email, slug, "owner", GROVE_URL);
+        } catch (err) {
+          // Provision succeeded — bubble the email failure as a partial
+          // success rather than 500ing the whole call.
+          invite = { error: (err as Error).message };
+        }
+
+        sendJson(res, 200, {
+          ok: true,
+          vault_id: provision.vaultId,
+          slug: provision.slug,
+          connector_url: provision.connectorUrl,
+          owner_user_id: provision.ownerUserId,
+          server_port: provision.serverPort,
+          invite_sent: invite && !invite.error,
+          invite,
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const code = err instanceof Error ? (err as any).code : undefined;
+        if (code === "slug_taken") { sendJson(res, 409, { error: msg }); return; }
+        if (code === "invalid_slug" || code === "reserved_slug") { sendJson(res, 400, { error: msg }); return; }
+        sendJson(res, 500, { error: msg });
       }
       return;
     }
