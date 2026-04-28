@@ -999,8 +999,13 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
     }
   }
 
-  // Snapshot before writing
-  if (!dryRun) {
+  // Snapshot before writing. Only meaningful for the legacy single-user
+  // setup where the operator runs the CLI on the same box that hosts the
+  // vault git repo. Hosted users (the common case) have no local
+  // VAULT_PATH; spawnSync would error with ENOENT trying to cd into a
+  // directory that doesn't exist. Server-side per-write commits give
+  // them per-note rollback already.
+  if (!dryRun && existsSync(join(VAULT_PATH, ".git"))) {
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const tagName = `grove-snapshot-pre-ingest-${timestamp}`;
     execSync(`git tag ${tagName}`, { cwd: VAULT_PATH });
