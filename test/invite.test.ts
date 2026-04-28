@@ -9,7 +9,7 @@ process.env.GROVE_DB_PATH = TEST_DB_PATH;
 
 // Import after setting env var
 import { getDb, resetDb, createSchema } from "../src/db.js";
-import { inviteUser } from "../src/invite.js";
+import { inviteUser, inviteUserToVault } from "../src/invite.js";
 import { stopCleanup } from "../src/auth.js";
 
 function seedDb() {
@@ -131,6 +131,57 @@ describe("invite", () => {
     expect(user).toBeDefined();
     // Username should be derived from local part, cleaned up
     expect(user.username).toMatch(/^[a-z0-9][a-z0-9-]{2,30}$/);
+  });
+
+  it("vault invite as 'owner' sets users.role to 'owner' so the new user passes the global owner check on /keys", async () => {
+    // Regression: invitees were created with the default users.role='viewer'
+    // even when their vault membership was 'owner'. The dashboard's
+    // /access/keys page calls /keys (no vault context), which falls
+    // through to admin-auth.ts's `getUserRole(userId) !== 'owner'` check
+    // and 403'd, producing a redirect("/") that looked like the magic
+    // link was broken.
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)",
+    ).run("vault_friend", "user_00000000", "friend", "Friend", "/tmp/friend");
+
+    await inviteUserToVault("friend@example.com", "friend", "owner", "https://api.grove.md");
+
+    const user = db
+      .prepare("SELECT role FROM users WHERE email = ?")
+      .get("friend@example.com") as { role: string } | undefined;
+    expect(user?.role).toBe("owner");
+  });
+
+  it("vault invite as 'member' leaves users.role at the default 'viewer'", async () => {
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)",
+    ).run("vault_team", "user_00000000", "team", "Team", "/tmp/team");
+
+    await inviteUserToVault("member@example.com", "team", "member", "https://api.grove.md");
+
+    const user = db
+      .prepare("SELECT role FROM users WHERE email = ?")
+      .get("member@example.com") as { role: string } | undefined;
+    expect(user?.role).toBe("viewer");
+  });
+
+  it("promoting an existing viewer to vault owner upgrades users.role", async () => {
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)",
+    ).run("vault_promo", "user_00000000", "promo", "Promo", "/tmp/promo");
+    db.prepare(
+      "INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)",
+    ).run("user_existing", "existing", "existing@example.com", "viewer");
+
+    await inviteUserToVault("existing@example.com", "promo", "owner", "https://api.grove.md");
+
+    const user = db
+      .prepare("SELECT role FROM users WHERE id = ?")
+      .get("user_existing") as { role: string };
+    expect(user.role).toBe("owner");
   });
 
   it("embeds the owning resident handle in the magic-link redirect (P16-4)", async () => {

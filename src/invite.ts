@@ -172,7 +172,19 @@ export async function inviteUserToVault(
   let user = getUserByEmail(normalizedEmail);
   const created = !user;
   if (!user) {
-    user = createUser(normalizedEmail, deriveHandleFromEmail(normalizedEmail));
+    // New owners get `users.role = 'owner'` so they pass the global
+    // owner check in admin-auth.ts (e.g. /keys, where the request has
+    // no vault context). Without this, an invitee who is `owner` of
+    // their new vault is still rejected when the dashboard's keys
+    // page calls /keys → 403 → SSR redirect("/"). Members/viewers stay
+    // on the default ("viewer"); they have no reason to mint keys.
+    const userRole = role === "owner" ? "owner" : "viewer";
+    user = createUser(normalizedEmail, deriveHandleFromEmail(normalizedEmail), userRole);
+  } else if (role === "owner" && user.role !== "owner") {
+    // Existing user being promoted to owner of a new vault. Same reason
+    // as above — they need the global role to manage their own keys.
+    db.prepare("UPDATE users SET role = 'owner' WHERE id = ?").run(user.id);
+    user = { ...user, role: "owner" };
   }
 
   const existingMembership = db
