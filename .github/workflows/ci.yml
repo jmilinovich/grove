@@ -93,6 +93,15 @@ jobs:
   # for manual re-runs.
   deploy:
     needs: [test, audit, secrets]
+    # Serialize prod deploys across all runs. The workflow-level
+    # concurrency above cancels in-progress runs on the same ref —
+    # safe for PR pushes, dangerous mid-deploy (a fast follow-up
+    # merge to main could SIGKILL pm2 reload). This per-job override
+    # queues subsequent deploys instead of cancelling, so an in-flight
+    # pm2 reload + health probe always completes.
+    concurrency:
+      group: grove-prod-deploy
+      cancel-in-progress: false
     if: |
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
