@@ -229,11 +229,33 @@ function computeFreshness(fileInfos: FileInfo[]): VaultStats["freshness"] {
 
 // ── Graph Section ────────────────────────────────────────────────────
 
+// Single-flight per vault path. analyzeGraph + brandes are CPU-bound
+// (Brandes' algorithm on the full graph) and on a large vault take 30+
+// seconds. Without this dedupe the 5-min refresh timer will start a
+// fresh walk every tick even if the previous one is still running — by
+// the third tick that's three concurrent Brandes' computations chewing
+// through the proxy's event loop. The outer Promise.race timeout in
+// computeVaultStats lets a refreshStats() caller resolve fast, but the
+// inner work tracked here keeps running and the next caller reuses it.
+const graphInflightByPath = new Map<string, Promise<Awaited<ReturnType<typeof analyzeGraph>>>>();
+
+function analyzeGraphSingleflight(
+  vaultPath: string,
+): Promise<Awaited<ReturnType<typeof analyzeGraph>>> {
+  const existing = graphInflightByPath.get(vaultPath);
+  if (existing) return existing;
+  const p = analyzeGraph(vaultPath).finally(() => {
+    graphInflightByPath.delete(vaultPath);
+  });
+  graphInflightByPath.set(vaultPath, p);
+  return p;
+}
+
 async function computeGraphSection(
   vaultPath: string,
 ): Promise<VaultStats["graph"]> {
   try {
-    const g = await analyzeGraph(vaultPath);
+    const g = await analyzeGraphSingleflight(vaultPath);
     return {
       nodes: g.nodes,
       edges: g.edges,
@@ -349,11 +371,27 @@ function computeIndexSection(totalNotes: number, vaultPath: string): VaultStats[
 
 // ── Lifecycle Section ────────────────────────────────────────────────
 
+// Single-flight per vault path. computeDigest walks every .md once to
+// classify lifecycle stage; same overlap pattern as analyzeGraph.
+const digestInflightByPath = new Map<string, Promise<Awaited<ReturnType<typeof computeDigest>>>>();
+
+function computeDigestSingleflight(
+  vaultPath: string,
+): Promise<Awaited<ReturnType<typeof computeDigest>>> {
+  const existing = digestInflightByPath.get(vaultPath);
+  if (existing) return existing;
+  const p = computeDigest(vaultPath).finally(() => {
+    digestInflightByPath.delete(vaultPath);
+  });
+  digestInflightByPath.set(vaultPath, p);
+  return p;
+}
+
 async function computeLifecycleSection(
   vaultPath: string,
 ): Promise<VaultStats["lifecycle"]> {
   try {
-    const digest = await computeDigest(vaultPath);
+    const digest = await computeDigestSingleflight(vaultPath);
     return {
       seeds: digest.seeds.count,
       sprouts: digest.sprouts.count,
@@ -407,14 +445,29 @@ export async function computeVaultStats(
   const git = computeGitSection(vaultPath);
   console.log(`[vault-stats] vault/freshness/index/git computed in ${Date.now() - t0}ms (${files.length} files)`);
 
-  // Graph and lifecycle both do their own vault walks — run in parallel
-  // Use a timeout so a slow Brandes' doesn't block everything
-  const TIMEOUT_MS = 120_000;
+  // Graph and lifecycle each do their own vault walks. We single-flight
+  // them per vaultPath inside computeGraphSection / computeLifecycleSection
+  // so a slow walk doesn't get duplicated by the next interval tick — the
+  // 5-min timer stacking 2-3 concurrent analyzeGraph()s is what generated
+  // the [vault-stats] timed-out log flood on 2026-04-28.
+  //
+  // Outer timeout is now 30s and bounded only by perceived freshness:
+  // refreshStats() callers that don't get an answer in 30s receive a
+  // fallback, but the inner work keeps running and populates the cache
+  // when it finishes. The next caller (timer tick or HTTP request via
+  // getStats) reads the populated cache.
+  const TIMEOUT_MS = 30_000;
   const timeout = <T>(p: Promise<T>, fallback: T, label: string): Promise<T> =>
     Promise.race([
       p.then((v) => { console.log(`[vault-stats] ${label} completed in ${Date.now() - t0}ms`); return v; }),
       new Promise<T>((resolve) =>
-        setTimeout(() => { console.warn(`[vault-stats] ${label} timed out after ${TIMEOUT_MS}ms`); resolve(fallback); }, TIMEOUT_MS),
+        setTimeout(() => {
+          // Demoted from console.warn to console.debug — timeouts on
+          // outer responses are expected when a vault walk legitimately
+          // takes >30s; the inner work is still running and cached.
+          console.debug(`[vault-stats] ${label} returning fallback after ${TIMEOUT_MS}ms (inner work continues)`);
+          resolve(fallback);
+        }, TIMEOUT_MS),
       ),
     ]);
 
