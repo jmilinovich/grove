@@ -84,18 +84,36 @@ describe("url builder (/@<handle>/<path>)", () => {
     expect(vaultOwnerHandle(teamCtx)).toBe("bob");
   });
 
-  it("vaultOwnerHandle falls back to the oldest vault's owner for unknown vaultId", () => {
+  it("vaultOwnerHandle returns 'unknown' for an unresolvable vaultId (no cross-vault fallback)", () => {
     const phantom: VaultContext = {
       vaultPath: "/nowhere",
       vaultId: "vault_does_not_exist",
       vaultSlug: "ghost",
     };
-    // alice owns the oldest vault (personal) — the fallback should land there.
-    expect(vaultOwnerHandle(phantom)).toBe("alice");
+    // The previous shape returned the oldest vault's owner ("alice") here,
+    // which silently attributed URLs for an unknown vault to an unrelated
+    // resident. The new contract is fail-closed: when the scoped lookup
+    // misses, return "unknown" so the URL is obviously broken (and never
+    // crosses vault ownership boundaries).
+    expect(vaultOwnerHandle(phantom)).toBe("unknown");
+  });
+
+  it("vaultOwnerHandle does not borrow the 'life' sentinel's owner from a real vault", () => {
+    // Pre-PR-#49 keys carry the literal vault_id "life" which never matches
+    // a real vaults.id. The legacy shape would have returned alice (oldest
+    // vault owner) for every URL minted under that sentinel — even though
+    // those keys belong to other tenants. Ensure the fallback no longer
+    // bridges those identities.
+    const sentinel: VaultContext = {
+      vaultPath: "/nowhere",
+      vaultId: "life",
+      vaultSlug: "personal",
+    };
+    expect(vaultOwnerHandle(sentinel)).toBe("unknown");
   });
 
   it("vaultOwnerHandle returns 'unknown' when DB is empty", () => {
-    // Wipe users + vaults so neither the scoped nor the fallback query hits a row.
+    // Wipe users + vaults so the scoped query has nothing to hit.
     const db = getDb();
     db.prepare("DELETE FROM vaults").run();
     db.prepare("DELETE FROM users").run();

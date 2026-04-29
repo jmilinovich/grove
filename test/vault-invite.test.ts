@@ -3,10 +3,30 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-// Hoisted module mock — silence email sends across the suite.
+// Hoisted module mock — silence email sends across the suite. The
+// `lastInvite*` accessors let individual tests assert on the URL the email
+// would have carried (we can't import the spies from inside the factory).
+const lastInvite = {
+  vaultUrl: null as string | null,
+  connectorUrl: null as string | null,
+  magicVerifyUrl: null as string | null,
+};
+
 vi.mock("../src/email.js", async (orig) => ({
   ...(await orig<typeof import("../src/email.js")>()),
-  sendVaultInviteEmail: async () => {},
+  sendVaultInviteEmail: async (
+    _email: string,
+    urlOrVaultUrl: string,
+    connectorUrl: string,
+    opts: { magicLink?: boolean },
+  ) => {
+    lastInvite.connectorUrl = connectorUrl;
+    if (opts.magicLink) {
+      lastInvite.magicVerifyUrl = urlOrVaultUrl;
+    } else {
+      lastInvite.vaultUrl = urlOrVaultUrl;
+    }
+  },
   sendMagicLinkEmail: async () => {},
 }));
 
@@ -21,6 +41,9 @@ describe("P8-B1/B2 — vault_members backfill + vault invites", () => {
     process.env.GROVE_DB_PATH = join(tempDir, "grove.db");
     resetDb();
     createSchema();
+    lastInvite.vaultUrl = null;
+    lastInvite.connectorUrl = null;
+    lastInvite.magicVerifyUrl = null;
     const db = getDb();
     db.prepare(
       "INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)",
@@ -161,6 +184,72 @@ describe("P8-B1/B2 — vault_members backfill + vault invites", () => {
           "https://api.grove.md",
         ),
       ).rejects.toThrow(/invalid role/);
+    });
+
+    it("invite URL addresses the vault by its OWNER's handle, not the invitee's", async () => {
+      // Pre-existing user → vaultUrl wraps the dashboard through
+      // /api/auth/callback (PR #101); the dashboard URL embedded in the
+      // redirect query param must use the OWNER's handle. The owner of
+      // `team` is `user_admin` (handle `admin`); inviting
+      // `alice@example.com` must NOT produce `/@alice/team/...` anywhere
+      // in the resulting URL chain.
+      await inviteUserToVault(
+        "alice@example.com",
+        "team",
+        "member",
+        "https://api.grove.md",
+      );
+      // Owner handle present, invitee handle absent. URL is double-
+      // encoded through the verify→callback→dashboard redirect chain,
+      // so decode twice before substring-matching.
+      const fullyDecoded = decodeURIComponent(decodeURIComponent(lastInvite.vaultUrl));
+      expect(fullyDecoded).toContain("/@admin/team/");
+      expect(fullyDecoded).not.toContain("/@alice/");
+      expect(lastInvite.connectorUrl).toBe("https://api.grove.md/v/team/mcp");
+    });
+
+    it("magic-link redirect for new users also uses the OWNER's handle", async () => {
+      await inviteUserToVault(
+        "newcomer@example.com",
+        "team",
+        "viewer",
+        "https://api.grove.md",
+      );
+      // The verify URL embeds the redirect via `redirect=` query param —
+      // assert the vault-owner handle appears there (possibly wrapped
+      // through /api/auth/callback), not the invitee's (`newcomer`).
+      expect(lastInvite.magicVerifyUrl).toBeTruthy();
+      const verify = new URL(lastInvite.magicVerifyUrl!);
+      const redirect = verify.searchParams.get("redirect");
+      expect(redirect).toBeTruthy();
+      // Owner handle must appear somewhere in the redirect chain.
+      const decoded = decodeURIComponent(redirect!);
+      expect(decoded).toContain("/@admin/team/");
+      expect(decoded).not.toContain("/@newcomer/");
+    });
+
+    it("fails closed when the vault's owner user row is missing", async () => {
+      const db = getDb();
+      // Simulate an orphaned vault: temporarily drop FK enforcement, delete
+      // the owner's user row, leaving a dangling owner_id. The previous
+      // shape would have happily emitted `/@<invitee>/team/...` here; the
+      // URL builder must refuse rather than substitute a wrong handle.
+      db.exec("PRAGMA foreign_keys = OFF");
+      try {
+        db.prepare("DELETE FROM api_keys WHERE user_id = ?").run("user_admin");
+        db.prepare("DELETE FROM vault_members WHERE user_id = ?").run("user_admin");
+        db.prepare("DELETE FROM users WHERE id = ?").run("user_admin");
+      } finally {
+        db.exec("PRAGMA foreign_keys = ON");
+      }
+      await expect(
+        inviteUserToVault(
+          "alice@example.com",
+          "team",
+          "member",
+          "https://api.grove.md",
+        ),
+      ).rejects.toThrow(/no owner/);
     });
   });
 });
