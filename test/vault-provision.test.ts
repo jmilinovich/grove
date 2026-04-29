@@ -340,8 +340,8 @@ describe("vault-provision (P8-A4)", () => {
       const result = await regenerateEcosystem({ effects });
       expect(result.wrote).toBe(true);
       expect(result.reloaded).toBe(true);
-      expect(wrote).toBe("/root/grove/ecosystem.runtime.cjs");
-      expect(reloaded).toBe("/root/grove/ecosystem.runtime.cjs");
+      expect(wrote).toBe("/root/grove/ecosystem.runtime.config.cjs");
+      expect(reloaded).toBe("/root/grove/ecosystem.runtime.config.cjs");
     });
 
     it("prunes orphan apps when --prune is passed", async () => {
