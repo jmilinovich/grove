@@ -89,13 +89,16 @@ const DEFAULT_LIMIT = 10;
  * @param sourcePath  Vault-relative path (e.g. "Resources/Concepts/transformers.md")
  * @param vaultRoot   Absolute path to the vault root
  * @param searchFn    Vector search function (injectable for testing)
- * @param options     Limit and minimum similarity threshold
+ * @param options     Limit, minimum similarity threshold, and optional vault id.
+ *                    `vaultId` scopes both the clear and the inserts so vault
+ *                    A's reprocess doesn't wipe vault B's same-path results —
+ *                    the helpers default to `$GROVE_VAULT_ID` when omitted.
  */
 export async function findNeighbors(
   sourcePath: string,
   vaultRoot: string,
   searchFn: VectorSearchFn,
-  options?: { limit?: number; minSimilarity?: number },
+  options?: { limit?: number; minSimilarity?: number; vaultId?: string },
 ): Promise<DiscoveryResultRow[]> {
   const limit = options?.limit ?? DEFAULT_LIMIT;
   const minSimilarity = options?.minSimilarity ?? DEFAULT_MIN_SIMILARITY;
@@ -163,8 +166,11 @@ export async function findNeighbors(
     if (results.length >= limit) break;
   }
 
-  // Persist: clear old undismissed results, then insert fresh ones
-  clearUndismissedResults(sourcePath);
+  // Persist: clear old undismissed results, then insert fresh ones.
+  // Both calls are vault-scoped so concurrent reprocessing across vaults
+  // doesn't wipe one another's rows when paths collide.
+  const vaultId = options?.vaultId;
+  clearUndismissedResults(sourcePath, vaultId);
   for (const r of results) {
     insertDiscoveryResult(
       r.id,
@@ -172,6 +178,7 @@ export async function findNeighbors(
       r.target_path,
       r.similarity,
       r.relationship!,
+      vaultId,
     );
   }
 
