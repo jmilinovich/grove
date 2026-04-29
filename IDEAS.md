@@ -165,6 +165,46 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 
 ---
 
+### Per-Vault SQLite Split
+
+**Problem:** Multi-tenant scope leaks in Grove keep recurring at every layer that touches a shared store. PRs #66, #85, #86, #87, #88, #89, #90, #105, and #114 (last 14 days) all share the same shape: a row in a shared SQLite store needs a `WHERE vault_id = ?` clause that the calling code is morally obligated to add. Forgetting it on any path is a leak. `scripts/check-invariants.ts` literally encodes "every callsite must remember to do X" — that's the storage-layer-mistake tell. The bug rate is bounded only by audit thoroughness, which doesn't scale past ~200 callsites.
+
+**Sketch:** Split per-tenant tables out of the shared `~/.grove/grove.db` into per-vault files. After migration, "forgot `WHERE vault_id = ?`" becomes structurally impossible because the connection is bound to a vault file.
+
+- **Per-vault → `~/.grove/vaults/<slug>/state.db`**: `api_keys`, `shared_links`, `discovery_queue`, `discovery_results`, `graph_health`, `graph_health_flags`, `vault_usage_daily`
+- **Stays shared in `~/.grove/control.db`**: `users`, `vaults`, `vault_members`, `sessions`, `magic_links`, `oauth_clients`, `oauth_codes`, `auth_codes` (these are genuinely cross-tenant)
+- **QMD index**: also split — from one shared `~/.cache/qmd/index.sqlite` to per-vault `~/.cache/qmd/<slug>/index.sqlite`. The 1-day phase below kills today's search-layer leak class structurally.
+- **API**: `db.ts` introduces `getControlDb()` and `getVaultDb(vaultId)`. Callers that take a `vaultId` arg get a connection bound to that vault's file. Cross-vault admin reads (e.g. `/keys` admin) become explicit `vaults.forEach(v => openVaultDb(v).query(...))` fan-out — visible at the call site instead of hidden in a missing predicate.
+
+**Migration phases:**
+- **1 day** — QMD per-vault split. Touches QMD's collection-as-database mode + `src/hybrid-search.ts` + `src/vault-stats.ts`. Self-contained; can ship before the bigger move.
+- **1 week** — `state.db` split. Touches `db.ts`, `keys.ts`, `share.ts`, `discovery.ts`, `graph-health.ts`, `vault-usage.ts`. Migration is one-shot SQL: ATTACH, copy `WHERE vault_id = ?`, detach, drop.
+- **1 month** — Once Phase 4 collapses servers into one in-process router, `getVaultDb` becomes a connection pool keyed by vault. Drop `vault_id` columns on tables that moved. Delete the `no-new-tenant-default-strings` invariant — it can't fire because the shared store it guarded no longer exists.
+
+**Dependencies:**
+- None blocking the 1-day phase (QMD split is self-contained).
+- 1-month phase depends on Phase 4 (proxy + grove-server-* collapse, named in `~/.claude/projects/-Users-jm-src-grove/memory/project_2026_04_28_overnight_hardening.md`).
+
+**Success signal:** The `no-new-tenant-default-strings` invariant in `scripts/check-invariants.ts` becomes deletable. New code paths that read/write a per-vault table cannot accidentally cross vaults because the connection is bound to a file. PR review burden for "did you remember to scope this?" drops to zero on per-tenant tables. Cross-vault admin operations look like cross-vault operations (explicit fan-out), not silent shared-state queries.
+
+**Counter-arguments + mitigations:**
+- *"Cross-vault joins disappear"* — true for `/keys` admin, future "all your sessions across vaults" UI, etc. **Mitigation:** keep genuinely cross-tenant tables in `control.db`; the few admin reads that span per-vault tables become explicit fan-out, which is honest about being cross-tenant.
+- *"More files, more checkpoints, more migration complexity"* — true. WAL files multiply; schema migrations iterate vaults; backup tooling enumerates. **Mitigation:** at 3-10 tenants this is dozens of files, not thousands. Wrap migration runner in `forEachVaultDb()`. Backups are `tar` of `~/.grove/`.
+
+**What NOT to do at this scale:**
+- Postgres + row-level security — overkill for 3-10 tenants on one VM.
+- A `VaultScopedDb` query rewriter — parsing/rewriting SQL is fragile.
+- SQLite triggers asserting `vault_id = current_session_vault` — requires shared-mutable state for the session vault, awkward.
+
+**Open questions:**
+- Cross-vault admin endpoint shape (`/keys` admin) — do these stay in proxy as fan-out, or move to a separate admin service?
+- Backup/restore tooling needs adapting — single `tar` of `~/.grove/` covers it but restore granularity changes.
+- Migration safety: 1-week phase needs careful staging because moving `api_keys` could lock out active sessions if mistimed. Plan to ship under maintenance window or with a dual-read window.
+
+**Anchor:** CLAUDE.md "the vault is the source of truth" + "simple until it needs to be complex." Per-vault SQLite is the simplest shape that makes the entire bug class structurally impossible. Full architectural decision doc in `~/.claude/projects/-Users-jm-src-grove/memory/project_per_vault_sqlite_split.md`.
+
+---
+
 ## Ready
 
 <!-- Fully shaped ideas waiting to be moved into PLAN.md -->

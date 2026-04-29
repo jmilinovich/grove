@@ -13,6 +13,18 @@ Grove is a hosted knowledge API that makes Obsidian vaults searchable and writab
 
 Read `PLAN.md` for the full spec. This file governs how you work — PLAN.md governs what you build.
 
+## Diagnostic discipline
+
+These exist because they cost us 24 hours and one near-miss data wipe in late April 2026. Each rule has a memory entry under `~/.claude/projects/-Users-jm-src-grove/memory/` with the full incident.
+
+1. **Falsifier-first before anything destructive.** Before recommending or executing `rm`, `DROP`, force-push, vault wipe, key revoke, or a deploy-verb change, write the single command whose output would prove the plan wrong — then run it before the destructive one. If no <60-second falsifier exists, say so explicitly and ask. The autonomy granted in this repo is conditional on this discipline; the operator is not the safety net. (`feedback_verify_before_destroy.md`)
+
+2. **Test deploy/infra verbs against the prod-pinned binary before merging.** CI runs vitest, tsc, audit, gitleaks — none of them touch `pm2`, `ssh`, or shell verbs in `.github/workflows/ci.yml` or `scripts/deploy.sh`. If a PR edits a deploy verb, run it once against the prod-pinned tool with a stub ecosystem before pushing. Otherwise prod is the integration test, and it's also the bug report. (`feedback_test_deploy_verbs_locally.md`)
+
+3. **Cross-tenant leak triage: path-check before pattern-match.** If a tenant reports seeing another tenant's content, derive the file path from the URL/screenshot and run `ssh prod 'test -e /root/vaults/<reporting-tenant>/<path>'` *first*. ENOENT means search/routing leak — do not wipe. EXISTS means data contamination — then verify byte-equality (`cmp`) against suspected origins before destroying anything. (`project_incident_2026_04_29_search_layer_leak.md`)
+
+4. **Check open PRs before assuming a bug is new.** Run `gh pr list --state open` as part of incident triage. A stale security PR can be the exact fix for the live incident — PR #87 (search scope) sat in rebase-rot from 04-25 to 04-29 and would have prevented Sumon's leak. Stale open PRs aren't just process debt; they cause misdiagnosis of live incidents. (`feedback_check_open_prs_first.md`)
+
 ## Running locally
 
 ```bash
