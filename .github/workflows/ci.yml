@@ -69,6 +69,68 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Smoke test for the deploy script's PM2 verbs against the prod-pinned
+  # PM2 version. Catches "the verb threw on the prod binary" bugs that
+  # vitest, tsc, audit, and gitleaks all cannot — i.e. PR #110 (`pm2
+  # startOrReload` reads `config.deploy` without null-check) and PR #111
+  # (`pm2 reload <freeform-name>.cjs` parses the path as a process name).
+  # The job mirrors the exact two-step verb sequence the deploy script
+  # runs and uses the same filename pattern prod expects.
+  #
+  # If prod's PM2 is upgraded, bump `pm2@<version>` here. The deploy
+  # script also echoes `pm2 -v` per deploy so version drift surfaces.
+  pm2-deploy-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+      - run: npm ci
+      # Pin to prod PM2 (verified via `pm2 -v` on the prod box). When
+      # prod bumps, bump here too — otherwise this test drifts away
+      # from reality and provides false confidence.
+      - run: npm i -g pm2@6.0.14
+      - name: Exercise the deploy script's pm2 verb sequence
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          cat > app.js <<'JS'
+          const http = require('http');
+          http.createServer((_, res) => res.end('ok')).listen(0);
+          setInterval(() => {}, 1 << 30);
+          JS
+          # Same filename pattern prod uses (`*.config.cjs`). PR #111
+          # broke because `ecosystem.runtime.cjs` doesn't match PM2's
+          # config-file detection — it gets parsed as a process name.
+          cat > ecosystem.runtime.config.cjs <<'CJS'
+          module.exports = { apps: [
+            { name: 'smoke-a', script: 'app.js' },
+            { name: 'smoke-b', script: 'app.js' },
+          ]};
+          CJS
+          # Two-step verb sequence matching ci.yml's deploy job:
+          # 1. `pm2 reload <file>` for already-running apps (no-op when
+          #    nothing is running, hence `|| true`)
+          # 2. `pm2 start <file> --only <new-csv>` for apps not yet running
+          # PR #110 broke when this used `pm2 startOrReload` which throws
+          # on configs without a `deploy` block. Asserting the same shape
+          # the deploy uses guarantees we won't reintroduce that pattern.
+          pm2 reload ./ecosystem.runtime.config.cjs --update-env || true
+          EXPECTED=$(node -e "console.log(require('/tmp/smoke/ecosystem.runtime.config.cjs').apps.map(a=>a.name).join('\n'))")
+          RUNNING=$(sudo pm2 jlist 2>/dev/null | jq -r '.[].name' || pm2 jlist | jq -r '.[].name' || true)
+          NEW=$(comm -23 <(echo "$EXPECTED" | sort) <(echo "$RUNNING" | sort) | paste -sd, -)
+          if [ -n "$NEW" ]; then
+            pm2 start ./ecosystem.runtime.config.cjs --only "$NEW" --update-env
+          fi
+          # Drift assertion (mirrors deploy's): every expected app is
+          # online. If the verbs threw or the file wasn't parsed as an
+          # ecosystem, this fails because zero apps came online.
+          pm2 jlist | jq -e '[.[] | select(.pm2_env.status == "online")] | length == 2'
+          pm2 delete all
+
   # Health-gated deploy with auto-rollback.
   #
   # Flow (all in one SSH script to keep it atomic):
@@ -92,7 +154,7 @@ jobs:
   # for schema-touching deploys (requires confirm_schema_change=true) and
   # for manual re-runs.
   deploy:
-    needs: [test, audit, secrets]
+    needs: [test, audit, secrets, pm2-deploy-smoke]
     # Serialize prod deploys across all runs. The workflow-level
     # concurrency above cancels in-progress runs on the same ref —
     # safe for PR pushes, dangerous mid-deploy (a fast follow-up
