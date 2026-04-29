@@ -108,6 +108,7 @@ import {
   contextFromRoute,
   userCanWriteVault,
   userIsVaultMember,
+  userRoleInVault,
   type VaultContext,
 } from "./vault-router.js";
 import { adminAuth, isPlatformOwner, type AdminAuthResult } from "./admin-auth.js";
@@ -1140,6 +1141,20 @@ const server = createServer(async (req, res) => {
 
   // ── Magic link auth routes ──────────────────────────────────────
   if (url.pathname === "/auth/magic-link" && req.method === "POST") {
+    // IP-scoped rate limit. The per-email cap inside requestMagicLink
+    // (3 / 15 min) blocks targeted-email floods, but doesn't bound an
+    // attacker spraying random emails — each request still inserts a
+    // magic_links row and (for known emails) sends an email. Mirrors
+    // the IP guards already on /admin/login, /oauth/authorize, and
+    // /auth/exchange.
+    const mlIp = clientIp(req);
+    const mlLimit = rateLimiter.check(`magic-link:${mlIp}`, "write");
+    if (!mlLimit.allowed) {
+      sendJson(res, 429, { error: "rate_limited", retry_after_ms: mlLimit.retryAfterMs });
+      return;
+    }
+    rateLimiter.record(`magic-link:${mlIp}`, "write");
+
     let body: string;
     try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
     let parsed: any;
@@ -2426,6 +2441,32 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Mutation role gate (legacy + vault-scoped) — viewers are read-only on
+    // every vault, even when their session-key carries the default
+    // ['read','write'] scopes. /v/<slug>/v1/* enforces this in the
+    // preprocessing block above; the same check has to fire on legacy
+    // /v1/* (which now routes to the token's bound vault per PR #59) so a
+    // viewer-role member with a session key bound to that vault can't
+    // write through the unscoped path.
+    const restIsMutation =
+      req.method === "PUT" ||
+      req.method === "POST" ||
+      req.method === "PATCH" ||
+      req.method === "DELETE";
+    const restIsWritePath =
+      restPath.startsWith("/v1/notes/") || restPath === "/v1/images";
+    if (restIsMutation && restIsWritePath) {
+      const directlyBound = restKey.vault_id === restCtx.vaultId;
+      if (!directlyBound && !userCanWriteVault(restKey.user_id, restCtx.vaultId)) {
+        structuredLog("warn", "rest.role_denied", rid, {
+          key_id: restKey.id, key_name: restKey.name, path: restPath, vault_id: restCtx.vaultId,
+        });
+        res.writeHead(403, restHeaders);
+        res.end(JSON.stringify({ error: "role_denied", detail: "viewer role cannot write" }));
+        return;
+      }
+    }
+
     // GET /v1/notes/* — fetch a single note with resolved links and backlinks
     if (restPath.startsWith("/v1/notes/") && req.method === "GET") {
       const notePath = decodeURIComponent(restPath.slice("/v1/notes/".length));
@@ -2835,8 +2876,12 @@ const server = createServer(async (req, res) => {
 
     // POST /v1/admin/trails — list, create, update, delete (admin only)
     if (restPath === "/v1/admin/trails" && req.method === "POST") {
-      if (restTrail || getUserRole(restKey.user_id) !== "owner") {
-        // Trail-scoped keys and non-owners cannot manage trails
+      // Trail-scoped keys are never admins. For role: require vault-level
+      // ownership of the request's vault, NOT the global users.role flag.
+      // Every vault provisioning sets users.role='owner' (vault-provision.ts),
+      // so a global-owner check lets any vault owner who is merely a member
+      // of vault X manage X's trails. The right gate is vault_members.role.
+      if (restTrail || userRoleInVault(restKey.user_id, restCtx.vaultId) !== "owner") {
         res.writeHead(403, restHeaders);
         res.end(JSON.stringify({ error: "admin access required" }));
         return;
@@ -2897,6 +2942,19 @@ const server = createServer(async (req, res) => {
 
       if (parsed.action === "update" && parsed.id) {
         const { id, action, ...updates } = parsed;
+        // Authority is per-vault — `id` must belong to the request's vault.
+        // Without this check, an owner of vault A could pass a trail id from
+        // vault B and rewrite/disable it because updateTrail() identifies
+        // the row by id alone.
+        const trailRow = getDb()
+          .prepare("SELECT vault_id FROM trails WHERE id = ? LIMIT 1")
+          .get(id) as { vault_id: string } | undefined;
+        if (!trailRow || trailRow.vault_id !== restCtx.vaultId) {
+          // 404 not 403 so we don't confirm the trail exists in another vault.
+          res.writeHead(404, restHeaders);
+          res.end(JSON.stringify({ error: "trail not found" }));
+          return;
+        }
         const ok = updateTrail(id, updates);
         if (!ok) {
           res.writeHead(404, restHeaders);
@@ -2909,6 +2967,15 @@ const server = createServer(async (req, res) => {
       }
 
       if (parsed.action === "delete" && parsed.id) {
+        // Same per-vault authority check as update — see above.
+        const trailRow = getDb()
+          .prepare("SELECT vault_id FROM trails WHERE id = ? LIMIT 1")
+          .get(parsed.id) as { vault_id: string } | undefined;
+        if (!trailRow || trailRow.vault_id !== restCtx.vaultId) {
+          res.writeHead(404, restHeaders);
+          res.end(JSON.stringify({ error: "trail not found" }));
+          return;
+        }
         const ok = deleteTrail(parsed.id);
         if (!ok) {
           res.writeHead(404, restHeaders);
@@ -2929,7 +2996,9 @@ const server = createServer(async (req, res) => {
     // :id is for context only; the scope comes from query params so new trails can be previewed too.
     const trailPreviewMatch = restPath.match(/^\/v1\/admin\/trails\/([^/]+)\/preview$/);
     if (trailPreviewMatch && req.method === "GET") {
-      if (restTrail || getUserRole(restKey.user_id) !== "owner") {
+      // Vault-scoped owner check (see /v1/admin/trails POST above for why
+      // the global users.role gate is not enough).
+      if (restTrail || userRoleInVault(restKey.user_id, restCtx.vaultId) !== "owner") {
         res.writeHead(403, restHeaders);
         res.end(JSON.stringify({ error: "admin access required" }));
         return;
@@ -3147,8 +3216,14 @@ const server = createServer(async (req, res) => {
       }
     }
 
-    // Vault lock gate — reject data tool calls when vault is encrypted + locked
-    if (mcpMethod === "tools/call" && isVaultLocked(key.vault_id)) {
+    // Vault lock gate — reject data tool calls when vault is encrypted + locked.
+    // The locked check must use the ROUTED vault id, not the token's bound
+    // vault. Otherwise a session-key bound to vault A reaching /v/<B>/mcp
+    // (via the userIsVaultMember fallback in decideRoute) would satisfy
+    // the gate based on A's unlock state while the backend reads/writes
+    // against B.
+    const mcpVaultId = routedVault?.id ?? key.vault_id;
+    if (mcpMethod === "tools/call" && isVaultLocked(mcpVaultId)) {
       sendLocked(res);
       return;
     }
@@ -3159,6 +3234,20 @@ const server = createServer(async (req, res) => {
       if (!keyScopes.includes("write")) {
         structuredLog("warn", "auth.scope_denied", rid, { key_id: key.id, key_name: key.name, tool: toolName });
         sendJson(res, 403, { error: "scope_denied", detail: "key lacks 'write' scope" });
+        return;
+      }
+      // Vault-role enforcement — viewers are read-only on every vault, even
+      // when their session-key carries the default ['read','write'] scopes.
+      // decideRoute admits any vault_members row (incl. viewer) via the
+      // userIsVaultMember fallback so this path is reachable without the
+      // role check below. Mirrors the REST mutation guard at the
+      // /v/<slug>/v1/* preprocessing block.
+      const directlyBoundMcp = key.vault_id === mcpVaultId;
+      if (!directlyBoundMcp && !userCanWriteVault(key.user_id, mcpVaultId)) {
+        structuredLog("warn", "auth.role_denied", rid, {
+          key_id: key.id, key_name: key.name, tool: toolName, vault_id: mcpVaultId,
+        });
+        sendJson(res, 403, { error: "role_denied", detail: "viewer role cannot write" });
         return;
       }
     }
