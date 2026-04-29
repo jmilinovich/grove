@@ -7,7 +7,7 @@
  * authoritative vaults DB — never an artifact left over from a
  * previous deploy or an out-of-band edit.
  *
- * Output path: /root/grove/ecosystem.runtime.cjs by default. Override
+ * Output path: /root/grove/ecosystem.runtime.config.cjs by default. Override
  * with --path <file> or env GROVE_ECOSYSTEM_PATH.
  *
  * Why a separate runtime file instead of the legacy
@@ -40,7 +40,7 @@ for (let i = 0; i < args.length; i++) {
 }
 
 const ecosystemPath =
-  pathArg ?? process.env.GROVE_ECOSYSTEM_PATH ?? "/root/grove/ecosystem.runtime.cjs";
+  pathArg ?? process.env.GROVE_ECOSYSTEM_PATH ?? "/root/grove/ecosystem.runtime.config.cjs";
 
 regenerateEcosystem({ ecosystemPath, skipReload: true, prune: false })
   .then((result) => {

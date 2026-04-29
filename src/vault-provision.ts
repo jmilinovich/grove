@@ -307,7 +307,7 @@ export async function provisionVault(
   const effects = opts.effects ?? defaultEffects;
   const vaultsRoot = opts.vaultsRoot ?? "/root/vaults";
   const qmdRoot = opts.qmdRoot ?? "/root/qmd";
-  const ecosystemPath = opts.ecosystemPath ?? "/root/grove/ecosystem.runtime.cjs";
+  const ecosystemPath = opts.ecosystemPath ?? "/root/grove/ecosystem.runtime.config.cjs";
   const connectorBaseUrl = opts.connectorBaseUrl ?? "https://api.grove.md";
   const gitPath = input.gitPath ?? join(vaultsRoot, input.slug);
   const qmdPath = join(qmdRoot, input.slug);
@@ -441,7 +441,7 @@ export async function regenerateEcosystem(
   opts: RegenOptions = {},
 ): Promise<RegenResult> {
   const effects = opts.effects ?? defaultEffects;
-  const ecosystemPath = opts.ecosystemPath ?? "/root/grove/ecosystem.runtime.cjs";
+  const ecosystemPath = opts.ecosystemPath ?? "/root/grove/ecosystem.runtime.config.cjs";
   const db = getDb();
   const vaults = readProvisionedVaults(db);
   const content = generateEcosystemConfig(vaults, opts);
