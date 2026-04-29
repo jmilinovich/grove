@@ -329,3 +329,59 @@ body`;
     expect(entries).toHaveLength(0);
   });
 });
+
+// ── Cross-vault alias scoping invariant ─────────────────────────────
+//
+// The alias index is a process-global singleton spanning every vault in the
+// shared QMD index. hybridSearch and titleSearch MUST filter alias hits by
+// `entry.collection` to prevent vault A's search from injecting vault B's
+// alias-matched notes into the result set.
+//
+// These tests exercise `buildAliasEntries` (the pure data builder) to
+// establish that the `collection` field is always present and correct.
+// End-to-end alias injection is covered in the hybridSearch integration
+// tests; here we guard the invariant that collection is never cross-applied.
+
+describe("alias collection isolation", () => {
+  const lifeDoc = `---\naliases:\n  - "meditation"\n---\nbody`;
+  const otherVaultDoc = `---\naliases:\n  - "meditation"\n---\nbody`;
+
+  it("same alias in two vaults produces entries with distinct collections", () => {
+    const entries = buildAliasEntries([
+      { path: "resources/concepts/meditation.md", title: "Meditation", collection: "life", doc: lifeDoc },
+      { path: "resources/concepts/meditation.md", title: "Meditation", collection: "othervault", doc: otherVaultDoc },
+    ]);
+    // Both entries share the same alias key "meditation" but last-write wins in Map;
+    // what matters is each raw entry has the right collection.
+    const byCollection = entries.reduce<Record<string, string[]>>(
+      (acc, [, e]) => {
+        acc[e.collection] = [...(acc[e.collection] ?? []), e.filepath];
+        return acc;
+      },
+      {},
+    );
+    expect(byCollection["life"]).toBeDefined();
+    expect(byCollection["othervault"]).toBeDefined();
+    // life entry must never carry othervault's prefix
+    for (const fp of byCollection["life"] ?? []) {
+      expect(fp.startsWith("life/")).toBe(true);
+      expect(fp.startsWith("othervault/")).toBe(false);
+    }
+    // othervault entry must never carry life's prefix
+    for (const fp of byCollection["othervault"] ?? []) {
+      expect(fp.startsWith("othervault/")).toBe(true);
+      expect(fp.startsWith("life/")).toBe(false);
+    }
+  });
+
+  it("entry.collection matches the row's collection, never another vault", () => {
+    const entries = buildAliasEntries([
+      { path: "inbox/note.md", title: "Note", collection: "alice-vault", doc: `---\naliases:\n  - "secretnote"\n---\n` },
+    ]);
+    expect(entries).toHaveLength(1);
+    const [, entry] = entries[0];
+    expect(entry.collection).toBe("alice-vault");
+    // Filepath must be scoped to alice-vault, not "life" or any global default
+    expect(entry.filepath).toBe("alice-vault/inbox/note.md");
+  });
+});

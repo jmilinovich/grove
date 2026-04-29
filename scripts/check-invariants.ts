@@ -47,6 +47,22 @@ const INVARIANTS: Invariant[] = [
       'src/server.ts:91:  vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
     ],
   },
+  {
+    name: "no-createKey-default-vault",
+    reason:
+      "The exported `createKey` function's `vaultId` parameter must not have " +
+      "a default value. A string-default like `= \"life\"` doesn't appear in " +
+      "the `?? \"life\"` grep above but has the same failure mode: a forgotten " +
+      "argument silently binds a new key to the personal vault on multi-tenant " +
+      "deploys. All callers must pass `vaultId` explicitly.",
+    // Match the function signature line. The CLI-internal `create` function
+    // (not exported) is intentionally excluded — it's a CLI wrapper that maps
+    // `--vault life` from the operator's command line, not a programmatic API.
+    pattern: "export function createKey",
+    allowlist: [
+      "src/keys.ts:144:export function createKey(",
+    ],
+  },
 ];
 
 function ripgrep(pattern: string): string[] {

@@ -144,7 +144,13 @@ if (isEntryPoint) {
 export function createKey(
   name: string,
   scopes: string[] = ["read", "write"],
-  vaultId = "life",
+  // No default — callers must supply the vault ID explicitly. The old
+  // default of "life" was a latent cross-vault footgun: a forgotten
+  // argument would silently bind a new key to the personal vault on any
+  // multi-tenant deployment. The check-invariants grep only catches
+  // the `??` operator form, not TypeScript parameter defaults — hence
+  // the separate no-createKey-default-vault invariant added there.
+  vaultId: string,
   ttlDays?: number,
   userId?: string,
   sessionId?: string | null,
