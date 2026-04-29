@@ -75,8 +75,18 @@ export function createShareLink(
     "INSERT INTO shared_links (id, note_path, vault_id, created_by, expires_at, max_views, view_count, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
   ).run(id, notePath, vaultId, createdBy, expiresAt.toISOString(), maxViews, now.toISOString());
 
-  const owner = getUserById(createdBy);
-  const ownerHandle = owner?.username ?? "unknown";
+  // Use the *vault owner's* handle, not the creator's. In the current
+  // access model only vault owners can create shares (adminAuth gates on
+  // `vault_members.role = owner`), so the two coincide today. But the
+  // URL structure is `/@<resident>/s/<id>` where `<resident>` is the
+  // vault's owner, and a future member-level share grant would break if
+  // we kept `createdBy` here.
+  const vaultOwnerRow = db
+    .prepare(
+      "SELECT u.username FROM vaults v JOIN users u ON u.id = v.owner_id WHERE v.id = ? LIMIT 1",
+    )
+    .get(vaultId) as { username: string } | undefined;
+  const ownerHandle = vaultOwnerRow?.username ?? (getUserById(createdBy)?.username ?? "unknown");
   const wwwBase = baseUrl.replace("api.grove.md", "grove.md");
   const url = `${wwwBase}/@${ownerHandle}/s/${id}`;
 

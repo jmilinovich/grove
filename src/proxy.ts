@@ -361,7 +361,16 @@ export function summarizeMcpResponse(response: unknown): unknown {
 // ── OAuth encryption helpers ──
 // Short-lived AES-256-GCM encryption for API keys stored in oauth_codes.
 // Keys are encrypted at code creation and decrypted at token exchange (5min window).
-const OAUTH_ENCRYPT_KEY = createHash("sha256").update(process.env.GROVE_CSRF_SECRET ?? "grove-oauth-default").digest();
+// SECURITY: fall back to a random per-process key, NOT a static string. A
+// static fallback ("grove-oauth-default") lets any attacker who knows the
+// source code decrypt the encrypted_key column in oauth_codes and recover
+// live API tokens. A per-process random key means that codes can only be
+// exchanged by the same process that issued them — which is the only correct
+// behaviour for a single-process proxy. If GROVE_CSRF_SECRET is set, derive
+// from it (preserves cross-restart reuse intentionally chosen by the operator).
+const OAUTH_ENCRYPT_KEY = createHash("sha256")
+  .update(process.env.GROVE_CSRF_SECRET ?? randomBytes(32).toString("hex"))
+  .digest();
 
 function encryptForOAuth(plaintext: string): string {
   const iv = randomBytes(12);

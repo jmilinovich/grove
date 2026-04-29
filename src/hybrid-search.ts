@@ -165,11 +165,16 @@ function titleSearch(query: string, n: number, collection?: string): SearchResul
   const terms = extractTerms(sanitized);
   if (terms.length === 0) return [];
 
-  // 1. Check alias index — match when query contains a known alias phrase
+  // 1. Check alias index — match when query contains a known alias phrase.
+  // Filter by collection so a title search for vault A never returns
+  // vault B's alias-matched notes. The alias index is process-global and
+  // contains entries from every indexed vault.
   const aliasIndex = getAliasIndex();
   const aliasHits: SearchResult[] = [];
   const queryLower = sanitized.toLowerCase();
   for (const [alias, entry] of aliasIndex) {
+    // Skip entries that belong to a different vault's collection.
+    if (collection && entry.collection !== collection) continue;
     // Only match if the full alias appears in the query (case-insensitive)
     if (alias.length >= 3 && queryLower.includes(alias)) {
       const prefix = `${entry.collection}/`;
@@ -529,11 +534,15 @@ export async function hybridSearch(
   const fused = rrfFuse(lists, limit);
 
   // Alias injection: if a known alias appears in the query, ensure that note
-  // is in the results (bypasses RRF when vec noise would otherwise bury it)
+  // is in the results (bypasses RRF when vec noise would otherwise bury it).
+  // MUST filter by collection: the alias index is a process-global singleton
+  // spanning all vaults. Without this check, vault A's search can inject
+  // vault B's alias-matched notes into the result set.
   const aliasIndex = getAliasIndex();
   const queryLower = query.toLowerCase().replace(/['"%()\-]/g, " ");
   const injected = new Set<string>();
   for (const [alias, entry] of aliasIndex) {
+    if (collection && entry.collection !== collection) continue;
     if (alias.length >= 3 && queryLower.includes(alias) && !injected.has(entry.title)) {
       injected.add(entry.title);
       // If already in results, boost to top 3; if missing, inject
