@@ -1,5 +1,29 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { summarizeMcpResponse } from "../src/proxy.js";
+
+/**
+ * Security regression: the OAUTH_ENCRYPT_KEY must not use a static fallback
+ * string. A static string ("grove-oauth-default") would let any attacker who
+ * knows the source code decrypt the `encrypted_key` column in `oauth_codes`
+ * and recover live API tokens from the database. The fallback must be random
+ * (randomBytes) or derived from an operator-supplied secret (GROVE_CSRF_SECRET).
+ */
+describe("OAuth encryption key — static fallback guard", () => {
+  it("does not use 'grove-oauth-default' as a fallback in OAUTH_ENCRYPT_KEY", () => {
+    const src = readFileSync(join(import.meta.dirname, "../src/proxy.ts"), "utf8");
+    // Extract the block that defines OAUTH_ENCRYPT_KEY, spanning the multi-line form.
+    const startIdx = src.indexOf("const OAUTH_ENCRYPT_KEY");
+    const endIdx = src.indexOf(".digest();", startIdx) + ".digest();".length;
+    const oauthKeyBlock = src.slice(startIdx, endIdx);
+    expect(oauthKeyBlock).toBeTruthy();
+    // Must not contain the old static fallback
+    expect(oauthKeyBlock).not.toContain("grove-oauth-default");
+    // Must use randomBytes as the fallback for per-process entropy
+    expect(oauthKeyBlock).toMatch(/randomBytes/);
+  });
+});
 
 describe("summarizeMcpResponse", () => {
   it("summarizes tool call response with text preview", () => {
