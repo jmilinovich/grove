@@ -220,9 +220,17 @@ export const defaultEffects: Effects = {
     throw new ProvisionError("health_failed", `grove-server on :${port} never became healthy`);
   },
   listPm2Apps(): string[] {
-    const raw = execSync("sudo pm2 jlist", { encoding: "utf8" });
-    const list = JSON.parse(raw) as Array<{ name?: string }>;
-    return list.map((p) => p.name ?? "").filter(Boolean);
+    // Best-effort: when pm2 isn't on PATH (CI runners, dev boxes,
+    // generate-ecosystem.ts running as a one-shot), return [] so
+    // regenerateEcosystem can still write its file. The "orphan
+    // detection" + prune flow is a no-op without pm2 anyway.
+    try {
+      const raw = execSync("sudo pm2 jlist", { encoding: "utf8" });
+      const list = JSON.parse(raw) as Array<{ name?: string }>;
+      return list.map((p) => p.name ?? "").filter(Boolean);
+    } catch {
+      return [];
+    }
   },
   deletePm2App(name: string): void {
     execSync(`sudo pm2 delete ${name}`, { stdio: "inherit" });
@@ -299,7 +307,7 @@ export async function provisionVault(
   const effects = opts.effects ?? defaultEffects;
   const vaultsRoot = opts.vaultsRoot ?? "/root/vaults";
   const qmdRoot = opts.qmdRoot ?? "/root/qmd";
-  const ecosystemPath = opts.ecosystemPath ?? "/root/grove/ecosystem.config.cjs";
+  const ecosystemPath = opts.ecosystemPath ?? "/root/grove/ecosystem.runtime.cjs";
   const connectorBaseUrl = opts.connectorBaseUrl ?? "https://api.grove.md";
   const gitPath = input.gitPath ?? join(vaultsRoot, input.slug);
   const qmdPath = join(qmdRoot, input.slug);
@@ -433,7 +441,7 @@ export async function regenerateEcosystem(
   opts: RegenOptions = {},
 ): Promise<RegenResult> {
   const effects = opts.effects ?? defaultEffects;
-  const ecosystemPath = opts.ecosystemPath ?? "/root/grove/ecosystem.config.cjs";
+  const ecosystemPath = opts.ecosystemPath ?? "/root/grove/ecosystem.runtime.cjs";
   const db = getDb();
   const vaults = readProvisionedVaults(db);
   const content = generateEcosystemConfig(vaults, opts);
