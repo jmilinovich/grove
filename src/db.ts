@@ -27,13 +27,36 @@ export function getDb(): Database.Database {
   mkdirSync(join(path, ".."), { recursive: true });
   db = new Database(path);
   db.pragma("journal_mode = WAL");
+  // Block-and-retry on writer contention instead of throwing SQLITE_BUSY.
+  // Multiple grove-server-<slug> + grove-proxy + grove-discovery-<slug>
+  // processes share this db file; without a busy timeout the second
+  // writer to hit a schema-lock window crashes immediately, which is how
+  // tonight's migration race manifested as PM2 restart loops.
+  db.pragma("busy_timeout = 5000");
+  // Safe with WAL — fsyncs at checkpoints rather than every commit. ~3-5×
+  // faster commits, no durability change for our use case (every write
+  // also goes through git, so a power-loss-only-loses-the-most-recent-tx
+  // window is bounded by the next git commit anyway).
+  db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
   return db;
 }
 
-/** Close the database connection (for tests/cleanup). */
+/**
+ * Close the database connection (for tests/cleanup).
+ *
+ * Best-effort `wal_checkpoint(TRUNCATE)` before close to keep the WAL
+ * sidecar from growing unbounded across PM2 reload cycles. Other procs
+ * may still be writing — TRUNCATE is allowed to fail silently in that
+ * case (it just becomes a PASSIVE checkpoint).
+ */
 export function closeDb(): void {
   if (db) {
+    try {
+      db.pragma("wal_checkpoint(TRUNCATE)");
+    } catch {
+      // best-effort — concurrent writers can block TRUNCATE; not fatal
+    }
     db.close();
     db = null;
   }
@@ -650,19 +673,65 @@ function migrateUserDisplayName(database: Database.Database): void {
 }
 
 /**
- * Migrate from JSON files to SQLite.
+ * Schema version recorded in `_migration_state` after a successful run.
+ * Bump this when adding a new migrate*() function to `createSchema()` —
+ * processes that already wrote the previous version short-circuit; the
+ * higher-version process will re-acquire the lock and run.
+ */
+const SCHEMA_VERSION = 1;
+
+/**
+ * Migrate from JSON files to SQLite, then run all schema migrations.
  *
  * Idempotent: if grove.db already has data, this is a no-op.
- * Reads keys.json and trails.json, imports them into SQLite in a single
- * transaction, then renames the originals to .migrated.
+ * Serialized across concurrent processes via BEGIN IMMEDIATE +
+ * `_migration_state` — multiple grove-server-* + grove-proxy +
+ * grove-discovery-* processes all call this on startup against the
+ * same db file. Without serialization the destructive DROP+RENAME
+ * paths in `migrateSharedLinks` and `migrateDiscoveryQueue` race
+ * with each other, and the migration as a whole hits SQLITE_BUSY
+ * on the COMMIT — that's the failure mode that drove the 2026-04-28
+ * orphan PM2 restart loop.
  */
 export function runMigration(): void {
-  createSchema();
   const database = getDb();
 
-  // Check if we already have data (migration already ran)
+  // Bootstrap the sentinel table outside the serialized region. CREATE
+  // TABLE IF NOT EXISTS is idempotent and safe under contention.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS _migration_state (
+      id INTEGER PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  // BEGIN IMMEDIATE acquires the writer lock at transaction start, so
+  // contending processes block on getDb's busy_timeout (5s) instead of
+  // hammering each other into SQLITE_BUSY restart loops.
+  const tx = database.transaction(() => runMigrationBody(database));
+  tx.immediate();
+}
+
+function runMigrationBody(database: Database.Database): void {
+  // Inside the IMMEDIATE lock — check whether we're already at the
+  // target schema version. If so, another process already ran the
+  // migration; we're done. (Each individual migrate*() is idempotent,
+  // but skipping the work avoids hundreds of redundant PRAGMA reads
+  // across N restart cycles.)
+  const state = database
+    .prepare("SELECT schema_version FROM _migration_state WHERE id = 1")
+    .get() as { schema_version: number } | undefined;
+  const alreadyMigrated = state !== undefined && state.schema_version >= SCHEMA_VERSION;
+
+  createSchema();
+
+  // Check if we already have data (JSON-to-SQLite migration already ran)
   const keyCount = database.prepare("SELECT COUNT(*) as count FROM api_keys").get() as { count: number };
-  if (keyCount.count > 0) return;
+  if (keyCount.count > 0) {
+    recordMigrationVersion(database, alreadyMigrated);
+    return;
+  }
 
   // Check if there's JSON data to migrate
   const hasKeys = existsSync(KEYS_PATH);
@@ -677,6 +746,7 @@ export function runMigration(): void {
     database.prepare(
       "INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)"
     ).run("vault_00000000", adminId, "personal", "Personal", join(homedir(), "life"));
+    recordMigrationVersion(database, alreadyMigrated);
     return;
   }
 
@@ -796,6 +866,23 @@ export function runMigration(): void {
 
   // Migrate OAuth clients from JSON to SQLite
   migrateOAuth(database);
+
+  recordMigrationVersion(database, alreadyMigrated);
+}
+
+/**
+ * Stamp the schema version into _migration_state. Skipped if a prior
+ * process already wrote the same version — keeps `updated_at` honest
+ * about who actually ran the migration.
+ */
+function recordMigrationVersion(database: Database.Database, alreadyMigrated: boolean): void {
+  if (alreadyMigrated) return;
+  database
+    .prepare(
+      `INSERT OR REPLACE INTO _migration_state (id, schema_version, updated_at)
+         VALUES (1, ?, datetime('now'))`,
+    )
+    .run(SCHEMA_VERSION);
 }
 
 // ── Discovery queue helpers ───────────────────────────────────────
