@@ -24,8 +24,21 @@ function publicBase(): string {
 
 /**
  * Resolve the username (handle) of the owner of `ctx.vaultId`.
- * Falls back to the oldest vault's owner — and then to "unknown" — so that
- * fresh test databases (no vaults yet) don't crash the URL builder.
+ *
+ * Returns `"unknown"` when no row matches. The previous shape fell back to
+ * "the oldest vault's owner" if `ctx.vaultId` didn't resolve — which is
+ * exactly the cross-vault leak vector this module exists to prevent.
+ * Concretely: a stale `GROVE_VAULT_ID` (e.g. PM2 process surviving a vault
+ * deletion, or a legacy "life" sentinel from pre-PR-#49 keys) caused every
+ * URL minted by that process to be attributed to whichever vault happened
+ * to be oldest in the database. A note written to vault B got returned as
+ * `/@<alice's-handle>/<B-slug>/...` — wrong resident, wrong vault address.
+ *
+ * Fail-closed semantics: when ownership can't be confirmed, return
+ * "unknown" so the resulting URL is obviously broken (`/@unknown/...`)
+ * rather than silently misdirected to an unrelated user. Surfaces that
+ * need to render gracefully (resident profiles, trail-info pages) already
+ * normalize "unknown" → null.
  */
 export function vaultOwnerHandle(ctx: VaultContext): string {
   try {
@@ -36,18 +49,7 @@ export function vaultOwnerHandle(ctx: VaultContext): string {
       )
       .get(ctx.vaultId) as { username: string | null } | undefined;
     if (scoped?.username) return scoped.username;
-
-    const anyVault = db
-      .prepare(
-        "SELECT u.username FROM vaults v JOIN users u ON u.id = v.owner_id ORDER BY v.created_at ASC LIMIT 1",
-      )
-      .get() as { username: string | null } | undefined;
-    if (anyVault?.username) return anyVault.username;
-
-    const owner = db
-      .prepare("SELECT username FROM users WHERE role = 'owner' LIMIT 1")
-      .get() as { username: string | null } | undefined;
-    return owner?.username ?? "unknown";
+    return "unknown";
   } catch {
     return "unknown";
   }

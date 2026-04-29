@@ -179,10 +179,26 @@ export async function inviteUserToVault(
   }
 
   const vault = db
-    .prepare("SELECT id, slug, display_name FROM vaults WHERE slug = ?")
-    .get(vaultSlug) as { id: string; slug: string; display_name: string } | undefined;
+    .prepare(
+      `SELECT v.id AS id, v.slug AS slug, v.display_name AS display_name,
+              u.username AS owner_handle
+         FROM vaults v
+         LEFT JOIN users u ON u.id = v.owner_id
+         WHERE v.slug = ?`,
+    )
+    .get(vaultSlug) as
+    | { id: string; slug: string; display_name: string; owner_handle: string | null }
+    | undefined;
   if (!vault) {
     throw new Error(`vault not found: ${vaultSlug}`);
+  }
+  // The URL must address the vault by its OWNER's handle, not the invitee's.
+  // grove-www routes `/@<handle>/<slug>/...` by resolving `<handle>` to a
+  // resident; an invitee with their own vault of the same slug would land in
+  // their own vault instead of the inviter's. Without an owner row (orphaned
+  // vault), fail closed rather than substituting the invitee.
+  if (!vault.owner_handle) {
+    throw new Error(`vault ${vaultSlug} has no owner — refusing to mint invite URL`);
   }
 
   let user = getUserByEmail(normalizedEmail);
@@ -233,8 +249,21 @@ export async function inviteUserToVault(
   // Magic link for first-time users; existing users just get the deep-link
   // email. Both branches produce a working "Open <vault>" + "Add to Claude.ai"
   // pair so the invitee never has to hunt for URLs.
+  //
+  // The handle in the URL is the VAULT OWNER's handle, not the invitee's.
+  // grove-www's `/@<handle>/<slug>/...` route resolves `<handle>` to a
+  // resident before serving vault content; addressing the vault by the
+  // invitee would (a) point users with their own same-slug vault to the
+  // wrong place and (b) make the URL misrepresent whose vault is being
+  // shared.
   const wwwBase = baseUrl.replace("api.grove.md", "grove.md");
-  const ownerHandle = user.username;
+  // PR #89 security fix: address the vault by its owner's handle, not the
+  // invitee's. Using `user.username` here was the bug — `user` is the
+  // invitee (line 204: getUserByEmail(normalizedEmail)), so the URL
+  // resolved to the invitee's namespace instead of the owner's. Per the
+  // comment block above, the URL must point at the vault owner's
+  // `/@<handle>/<slug>/...` route.
+  const ownerHandle = vault.owner_handle;
   const connectorUrl = `${baseUrl}/v/${vault.slug}/mcp`;
 
   // Both branches must route through grove.md's /api/auth/callback so the
