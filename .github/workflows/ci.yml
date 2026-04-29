@@ -149,6 +149,14 @@ jobs:
             fi
 
             # Deploy.
+            # Discard any local mods on the legacy ecosystem.config.cjs
+            # (vault-provision.ts overwrote this in place pre-PR-#NN; the
+            # file was removed from the repo in that PR). Without this
+            # checkout, `git pull --ff-only` fails when the upstream
+            # commit removes a locally-modified file. The 2>/dev/null
+            # || true silently absorbs the case where the file is
+            # already gone.
+            git checkout -- ecosystem.config.cjs 2>/dev/null || true
             git pull --ff-only
             echo "$TARGET_SHA" > .deployed_sha
             # Full `npm ci` (NOT --production) so tsx + better-sqlite3 are
@@ -158,18 +166,61 @@ jobs:
             # past that compiled to JS up front; with multi-vault tsx-on-
             # demand it just breaks PM2 start-up.
             npm ci
-            # Multi-vault rename: `grove-server` / `grove-discovery` no
-            # longer exist as PM2 names; processes are now per-vault
-            # (`grove-server-<slug>` etc.). Reload from ecosystem.config.cjs
-            # so the right set of processes is brought up regardless of
-            # how many vaults are provisioned. Falls back to `restart all`
-            # for the rare case where ecosystem.config.cjs is missing
-            # (fresh box, never provisioned).
-            if [ -f /root/grove/ecosystem.config.cjs ]; then
-              sudo pm2 reload /root/grove/ecosystem.config.cjs --update-env
-            else
-              sudo pm2 restart all --update-env
+
+            # Regenerate the runtime ecosystem from the vaults table,
+            # then bring up PM2 against the new file. ecosystem.runtime.cjs
+            # is gitignored (so `git reset --hard` rollback can't revert
+            # it to a stale state) and is the single source of truth for
+            # which procs PM2 manages. Failing loud here is intentional —
+            # if the generator can't write the file, we'd otherwise spin
+            # up whatever PM2 has cached, which is exactly how the
+            # 2026-04-28 orphan grove-server crash-loop survived.
+            sudo --preserve-env=GROVE_ECOSYSTEM_PATH npx tsx scripts/generate-ecosystem.ts
+            if [ ! -f /root/grove/ecosystem.runtime.cjs ]; then
+              echo "::error::ecosystem.runtime.cjs missing after generator ran"
+              exit 1
             fi
+            # `pm2 startOrReload` starts apps that aren't running and
+            # reloads ones that are — the right verb for an ecosystem
+            # file that may have added/removed apps since last deploy.
+            sudo pm2 startOrReload /root/grove/ecosystem.runtime.cjs --update-env
+
+            # Drift reconcile: PM2's running set must equal the
+            # generated ecosystem. Single source of truth in the repo
+            # (PR-C) doesn't prevent state drift on the box — the
+            # 2026-04-28 orphan grove-server was outside the generated
+            # ecosystem and PM2 had no idea to remove it.
+            #
+            # Phase 1: prune orphans (PM2 apps not in the ecosystem).
+            # The generator reads from the vaults table — anything PM2
+            # is running that didn't come from that table is by
+            # definition unmanaged and needs to go. This auto-heals
+            # tonight's orphans (grove-server, grove-discovery) on the
+            # first deploy that runs this code; subsequent deploys
+            # are no-ops because there's nothing to prune.
+            #
+            # Phase 2: assert running == expected. If pruning didn't
+            # converge (e.g. an app failed to start), fail loud so
+            # the operator catches it before traffic shifts.
+            EXPECTED=$(node -e "console.log(require('/root/grove/ecosystem.runtime.cjs').apps.map(a=>a.name).sort().join('\n'))")
+            RUNNING=$(sudo pm2 jlist | jq -r '.[].name' | sort)
+            ORPHANS=$(comm -23 <(echo "$RUNNING") <(echo "$EXPECTED"))
+            if [ -n "$ORPHANS" ]; then
+              echo "[deploy] pruning PM2 orphans:"
+              echo "$ORPHANS" | sed 's/^/  /'
+              for name in $ORPHANS; do
+                sudo pm2 delete "$name" || echo "::warning::failed to delete $name"
+              done
+              sudo pm2 save
+              RUNNING=$(sudo pm2 jlist | jq -r '.[].name' | sort)
+            fi
+            if [ "$EXPECTED" != "$RUNNING" ]; then
+              echo "::error::PM2/ecosystem drift after prune"
+              echo "expected:"; echo "$EXPECTED" | sed 's/^/  /'
+              echo "running:"; echo "$RUNNING" | sed 's/^/  /'
+              exit 1
+            fi
+            echo "[deploy] PM2 set matches ecosystem ($(echo "$EXPECTED" | wc -l | tr -d ' ') apps)"
 
             # Health poll — 12 × 5s = 60s window. We accept either the
             # full deep-health 200 OR a 503 whose body shows the new SHA
@@ -198,11 +249,14 @@ jobs:
             git reset --hard "$BEFORE_SHA"
             echo "$BEFORE_SHA" > .deployed_sha
             npm ci
-            if [ -f /root/grove/ecosystem.config.cjs ]; then
-              sudo pm2 reload /root/grove/ecosystem.config.cjs --update-env
-            else
-              sudo pm2 restart all --update-env
+            # Regenerate the runtime ecosystem against the rolled-back
+            # code. Same fail-loud contract as the forward path.
+            sudo --preserve-env=GROVE_ECOSYSTEM_PATH npx tsx scripts/generate-ecosystem.ts
+            if [ ! -f /root/grove/ecosystem.runtime.cjs ]; then
+              echo "::error::ecosystem.runtime.cjs missing after rollback regen"
+              exit 2
             fi
+            sudo pm2 startOrReload /root/grove/ecosystem.runtime.cjs --update-env
 
             # Verify rollback health.
             for i in $(seq 1 6); do
