@@ -180,10 +180,24 @@ jobs:
               echo "::error::ecosystem.runtime.cjs missing after generator ran"
               exit 1
             fi
-            # `pm2 startOrReload` starts apps that aren't running and
-            # reloads ones that are — the right verb for an ecosystem
-            # file that may have added/removed apps since last deploy.
-            sudo pm2 startOrReload /root/grove/ecosystem.runtime.cjs --update-env
+            # Bring up the ecosystem in two passes:
+            # 1. `pm2 reload` reloads any apps already running (zero-
+            #    downtime in cluster mode, restart in fork mode).
+            # 2. `pm2 start --only <new-csv>` starts any apps in the
+            #    ecosystem that PM2 doesn't already know about (new
+            #    vault provisioned since the last deploy).
+            # `pm2 startOrReload` would do this in one verb, but the
+            # version pinned on prod throws "Cannot read properties of
+            # undefined (reading 'deploy')" — see vault-provision.ts
+            # for the same two-step pattern at runtime provision time.
+            sudo pm2 reload /root/grove/ecosystem.runtime.cjs --update-env
+            EXPECTED=$(node -e "console.log(require('/root/grove/ecosystem.runtime.cjs').apps.map(a=>a.name).join('\n'))")
+            RUNNING_NAMES=$(sudo pm2 jlist | jq -r '.[].name')
+            NEW_APPS=$(comm -23 <(echo "$EXPECTED" | sort) <(echo "$RUNNING_NAMES" | sort) | tr '\n' ',' | sed 's/,$//')
+            if [ -n "$NEW_APPS" ]; then
+              echo "[deploy] starting new apps: $NEW_APPS"
+              sudo pm2 start /root/grove/ecosystem.runtime.cjs --only "$NEW_APPS" --update-env
+            fi
 
             # Drift reconcile: PM2's running set must equal the
             # generated ecosystem. Single source of truth in the repo
@@ -256,7 +270,7 @@ jobs:
               echo "::error::ecosystem.runtime.cjs missing after rollback regen"
               exit 2
             fi
-            sudo pm2 startOrReload /root/grove/ecosystem.runtime.cjs --update-env
+            sudo pm2 reload /root/grove/ecosystem.runtime.cjs --update-env
 
             # Verify rollback health.
             for i in $(seq 1 6); do
