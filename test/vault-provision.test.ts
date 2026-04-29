@@ -15,6 +15,7 @@ import {
 
 const noopEffects: Effects = {
   initRepo: () => {},
+  setupRemote: () => {},
   initQmd: () => {},
   registerQmdCollection: () => {},
   writeEcosystem: () => {},
@@ -160,6 +161,30 @@ describe("vault-provision (P8-A4)", () => {
       const db = getDb();
       const count = (db.prepare("SELECT COUNT(*) as c FROM vaults").get() as { c: number }).c;
       expect(count).toBe(1); // only personal
+    });
+
+    it("invokes setupRemote with the slug + git path so offsite backup can be wired", async () => {
+      // Regression: vaults provisioned before this hook had no `origin`,
+      // which spammed PM2 logs (`fatal: 'origin' does not appear to be a
+      // git repository`) on every per-write push and left the vault with
+      // no offsite backup. The provision pipeline now always calls
+      // setupRemote, even when no template env var is set — the default
+      // implementation just no-ops without auth, which keeps the call
+      // graph identical for both branches.
+      let captured: { gitPath: string; slug: string } | null = null;
+      const effects: Effects = {
+        ...noopEffects,
+        setupRemote: (gitPath, slug) => {
+          captured = { gitPath, slug };
+        },
+      };
+      const r = await provisionVault(
+        { slug: "team", ownerEmail: "team@example.com" },
+        { skipReload: true, effects },
+      );
+      expect(captured).not.toBeNull();
+      expect(captured!.slug).toBe("team");
+      expect(captured!.gitPath).toBe(r.gitPath);
     });
 
     it("registers the new vault as a QMD collection (so search hits it on day one)", async () => {

@@ -293,7 +293,43 @@ export function updateWikilinks(
   return modified;
 }
 
+// Per-vault flag so the "no remote configured" message logs at most once
+// per process. Without this, every write on a remote-less vault would emit
+// a line; with it, operators see the heads-up exactly once and the rest of
+// the log stays useful.
+const noRemoteWarned = new Set<string>();
+
+/**
+ * Return true if `git remote` lists at least one remote for the repo.
+ * Used by `gitPush` to skip the fetch/rebase/push round-trip on vaults
+ * that haven't had an offsite backup target configured yet (the default
+ * for vaults provisioned without `GROVE_VAULT_REMOTE_TEMPLATE` set —
+ * see `setupRemote` in vault-provision.ts).
+ */
+export async function hasGitRemote(vaultPath: string): Promise<boolean> {
+  try {
+    const out = await exec("git", ["remote"], vaultPath);
+    return out.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export async function gitPush(vaultPath: string): Promise<void> {
+  // No remote? Skip silently. Per-write pushes from the WriteQueue would
+  // otherwise spam PM2 logs with `fatal: 'origin' does not appear to be a
+  // git repository` for every vault that hasn't had offsite backup wired
+  // up yet. Log once per vault so the gap is visible without being noisy.
+  if (!(await hasGitRemote(vaultPath))) {
+    if (!noRemoteWarned.has(vaultPath)) {
+      noRemoteWarned.add(vaultPath);
+      console.log(
+        `[vault-ops] no git remote configured for ${vaultPath} — skipping push (set GROVE_VAULT_REMOTE_TEMPLATE and re-provision for offsite backup)`,
+      );
+    }
+    return;
+  }
+
   const { remote, branch } = await getRemoteAndBranch(vaultPath);
   await exec("git", ["fetch", remote], vaultPath);
   try {
@@ -306,6 +342,11 @@ export async function gitPush(vaultPath: string): Promise<void> {
     throw err;
   }
   await exec("git", ["push", remote, branch], vaultPath);
+}
+
+/** Test-only: clear the per-vault "no remote" warn-once cache. */
+export function _resetNoRemoteWarned(): void {
+  noRemoteWarned.clear();
 }
 
 export async function gitLog(

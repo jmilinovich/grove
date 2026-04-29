@@ -68,6 +68,21 @@ export class ProvisionError extends Error {
 export interface Effects {
   /** git init + initial .grove/config.yaml. Called once per new vault. */
   initRepo(gitPath: string): void;
+  /**
+   * Configure the vault's offsite git remote (`origin`) so per-write pushes
+   * back up to durable storage. Called once per new vault, after `initRepo`.
+   *
+   * Auth on prod is not yet wired (no `gh` CLI / GH_TOKEN in the proxy env),
+   * so the default implementation only adds an `origin` URL when
+   * `GROVE_VAULT_REMOTE_TEMPLATE` is set (e.g.
+   * `git@github.com:jmilinovich/grove-vault-{slug}.git`). Otherwise it
+   * leaves the repo remote-less; per-write pushes detect that and no-op
+   * silently (see `gitPush`). Idempotent.
+   *
+   * TODO(offsite-backup): once the proxy has GitHub auth, extend this to
+   * `gh repo create jmilinovich/grove-vault-<slug> --private` here.
+   */
+  setupRemote(gitPath: string, slug: string): void;
   /** `qmd init` in the per-vault QMD data directory. */
   initQmd(qmdPath: string): void;
   /**
@@ -110,6 +125,31 @@ export const defaultEffects: Effects = {
     // 'structure' object" at boot, crash-looping grove-server-<slug>.
     // Operators who want to customize structure should `grove vault
     // config init` after provisioning.
+  },
+  setupRemote(gitPath: string, slug: string): void {
+    // Only configure a remote when an explicit template is supplied via
+    // GROVE_VAULT_REMOTE_TEMPLATE. The token `{slug}` is substituted with
+    // the vault slug. Example template:
+    //   git@github.com:jmilinovich/grove-vault-{slug}.git
+    //
+    // Without the env var we deliberately leave the repo remote-less; the
+    // per-write push in `gitPush` no-ops silently when no remote exists,
+    // which keeps PM2 logs clean until the operator opts into offsite
+    // backup. See vault-ops.ts:gitPush for the silencing path.
+    const template = process.env.GROVE_VAULT_REMOTE_TEMPLATE;
+    if (!template) return;
+    const url = template.replace(/\{slug\}/g, slug);
+    try {
+      // Idempotent: `git remote add` errors if origin already exists, so
+      // probe first. We don't `set-url` an existing origin — operators may
+      // have wired a different backup target by hand.
+      const existing = execSync("git remote", { cwd: gitPath, encoding: "utf8" });
+      if (existing.split("\n").map((l) => l.trim()).includes("origin")) return;
+      execSync(`git remote add origin ${JSON.stringify(url)}`, { cwd: gitPath });
+    } catch {
+      // Best-effort. Provisioning must not fail because backup setup did —
+      // the vault is still functional locally without a remote.
+    }
   },
   initQmd(qmdPath: string): void {
     // Reserve the per-vault QMD directory for future use (shared QMD
@@ -265,6 +305,7 @@ export async function provisionVault(
   const qmdPath = join(qmdRoot, input.slug);
 
   effects.initRepo(gitPath);
+  effects.setupRemote(gitPath, input.slug);
   effects.initQmd(qmdPath);
   effects.registerQmdCollection(input.slug, gitPath);
 

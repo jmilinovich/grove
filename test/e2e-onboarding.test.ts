@@ -56,6 +56,7 @@ describe("e2e onboarding (full path Sumon hit)", () => {
     qmdCalls = [];
     testEffects = {
       initRepo: () => {},
+      setupRemote: () => {},
       initQmd: () => {},
       registerQmdCollection: (slug, path) => qmdCalls.push({ slug, path }),
       writeEcosystem: () => {},
