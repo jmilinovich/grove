@@ -79,6 +79,17 @@ const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
 const PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
 const VAULT_CONFIG: VaultConfig = loadVaultConfig(VAULT_PATH);
 
+// QMD indexes every vault into one shared SQLite file
+// (~/.cache/qmd/index.sqlite). Each vault's documents live under a
+// `collection` keyed by the vault's on-disk basename. Search calls in
+// this process MUST filter by this collection — without it, a query
+// against vault A's MCP server returns notes from every other vault
+// on the box. This was the 2026-04-29 cross-vault leak: Sumon's
+// sharpshoot vector queries returned John's `Areas/Business/Legacy
+// Holdings/...` notes with sharpshoot URLs minted on top.
+// Mirrors the derivation in rest.ts:handleSearch and vault-stats.ts.
+const VAULT_COLLECTION = VAULT_PATH.split("/").filter(Boolean).pop() ?? "";
+
 // grove-server is pinned to one vault per PM2 process. Build the
 // VaultContext once from env so every rest.ts handler call reuses the
 // same identity. The slug is best-effort — proxy already enforces
@@ -331,7 +342,9 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
       const fetchLimit = activeTrail ? (limit ?? 10) * 3 : (limit ?? 10);
       let results;
       try {
-        results = await hybridSearch(queryText, fetchLimit);
+        // Pass VAULT_COLLECTION so the shared QMD index doesn't return
+        // results from sibling vaults under the same physical SQLite file.
+        results = await hybridSearch(queryText, fetchLimit, VAULT_COLLECTION);
       } catch (err) {
         if (err instanceof VaultLockedError) {
           return { content: [{ type: "text" as const, text: err.message }], isError: true };
@@ -480,9 +493,12 @@ Use the content_hash as if_hash when updating the note.`,
         if (existsSync(matchAbs)) return readNote(matchAbs, aliasMatch.path, file);
       }
 
-      // 7. Fall back to BM25 search for partial/fuzzy matches
+      // 7. Fall back to BM25 search for partial/fuzzy matches.
+      // Scope to this vault's collection — defense-in-depth alongside
+      // the existsSync check below, and avoids picking a foreign-vault
+      // path as the top ranker when this vault has no match.
       try {
-        const results = await bm25Search(searchTerm, 3);
+        const results = await bm25Search(searchTerm, 3, VAULT_COLLECTION);
         if (results.length > 0) {
           // The vault_path from QMD may be lowercased; find the real path via listNotes
           const resolvedLower = results[0].vault_path.toLowerCase();
