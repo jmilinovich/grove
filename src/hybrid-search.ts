@@ -172,7 +172,8 @@ function titleSearch(query: string, n: number, collection?: string): SearchResul
   for (const [alias, entry] of aliasIndex) {
     // Only match if the full alias appears in the query (case-insensitive)
     if (alias.length >= 3 && queryLower.includes(alias)) {
-      const vaultPath = entry.filepath.startsWith("life/") ? entry.filepath.slice(5) : entry.filepath;
+      const prefix = `${entry.collection}/`;
+      const vaultPath = entry.filepath.startsWith(prefix) ? entry.filepath.slice(prefix.length) : entry.filepath;
       aliasHits.push({
         title: entry.title,
         vault_path: vaultPath,
@@ -229,24 +230,33 @@ function titleSearch(query: string, n: number, collection?: string): SearchResul
 }
 
 // --- Alias index: maps lowercase alias → { title, file } ---
+//
+// `filepath` is `<collection>/<row.path>` so consumers can derive a
+// vault-relative path by stripping the leading `<collection>/`. Hardcoding
+// `life/` here was a multi-vault bug: for a sharpshoot grove-server the
+// alias index would point at fictitious `life/...` paths instead of the
+// real `sharpshoot/...` ones. `collection` is captured separately so
+// consumers don't have to know which prefix to strip.
 
-let _aliasIndex: Map<string, { title: string; filepath: string }> | null = null;
+export interface AliasIndexEntry {
+  title: string;
+  filepath: string;
+  collection: string;
+}
 
-function getAliasIndex(): Map<string, { title: string; filepath: string }> {
-  if (_aliasIndex) return _aliasIndex;
+interface AliasRow {
+  path: string;
+  title: string;
+  collection: string;
+  doc: string;
+}
 
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT d.path, d.title, d.collection, c.doc
-       FROM documents d
-       JOIN content c ON d.hash = c.hash
-       WHERE d.active = 1 AND c.doc LIKE '%aliases:%'`
-    )
-    .all() as { path: string; title: string; collection: string; doc: string }[];
-
-  const index = new Map<string, { title: string; filepath: string }>();
-
+/**
+ * Pure helper: convert raw alias-bearing rows into [alias, entry] pairs.
+ * Exposed for unit tests; production callers go through `getAliasIndex`.
+ */
+export function buildAliasEntries(rows: AliasRow[]): [string, AliasIndexEntry][] {
+  const out: [string, AliasIndexEntry][] = [];
   for (const row of rows) {
     // Parse aliases from YAML frontmatter (handles both quoted and unquoted)
     const fm = row.doc.match(/^---\n([\s\S]*?)\n---/);
@@ -260,9 +270,35 @@ function getAliasIndex(): Map<string, { title: string; filepath: string }> {
       .filter(a => a.length > 0);
 
     for (const alias of aliases) {
-      index.set(alias.toLowerCase(), { title: cleanTitle, filepath: `life/${row.path}` });
+      out.push([
+        alias.toLowerCase(),
+        {
+          title: cleanTitle,
+          filepath: `${row.collection}/${row.path}`,
+          collection: row.collection,
+        },
+      ]);
     }
   }
+  return out;
+}
+
+let _aliasIndex: Map<string, AliasIndexEntry> | null = null;
+
+export function getAliasIndex(): Map<string, AliasIndexEntry> {
+  if (_aliasIndex) return _aliasIndex;
+
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT d.path, d.title, d.collection, c.doc
+       FROM documents d
+       JOIN content c ON d.hash = c.hash
+       WHERE d.active = 1 AND c.doc LIKE '%aliases:%'`
+    )
+    .all() as AliasRow[];
+
+  const index = new Map<string, AliasIndexEntry>(buildAliasEntries(rows));
 
   console.log(`[hybrid] alias index: ${index.size} aliases from ${rows.length} notes`);
   _aliasIndex = index;
@@ -507,7 +543,8 @@ export async function hybridSearch(
         const [item] = fused.splice(idx, 1);
         fused.splice(Math.min(2, fused.length), 0, item);
       } else if (idx === -1) {
-        const vaultPath = entry.filepath.startsWith("life/") ? entry.filepath.slice(5) : entry.filepath;
+        const prefix = `${entry.collection}/`;
+        const vaultPath = entry.filepath.startsWith(prefix) ? entry.filepath.slice(prefix.length) : entry.filepath;
         fused.splice(Math.min(2, fused.length), 0, {
           title: entry.title,
           vault_path: vaultPath,

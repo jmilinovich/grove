@@ -778,9 +778,15 @@ Modes:
   );
 
   // ── Resource: vault notes accessible as MCP resources ──────────
+  // The resource template is scoped to whichever vault this grove-server
+  // process is bound to (one process per vault under PM2). Hardcoding
+  // `life` here meant non-life per-vault servers (sharpshoot, etc.)
+  // advertised an incorrect URI scheme. Reuses SERVER_VAULT_CONTEXT
+  // rather than re-deriving the env-var default — see check-invariants
+  // no-new-tenant-default-strings rule (PR #66 history).
   server.resource(
     "note",
-    new ResourceTemplate("vault://life/{path}", { list: undefined }),
+    new ResourceTemplate(`vault://${SERVER_VAULT_CONTEXT.vaultSlug}/{path}`, { list: undefined }),
     async (uri, { path }) => ({
       contents: [{
         uri: uri.href,

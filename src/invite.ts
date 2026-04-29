@@ -54,19 +54,35 @@ export async function inviteUser(
   //    trails.vault_id is historically set to either the vault id or its
   //    slug — match on both so legacy rows still resolve.
   const trail = db.prepare(
-    `SELECT t.id AS id, t.name AS name, u.username AS owner_handle, u.display_name AS owner_display_name
+    `SELECT t.id AS id, t.name AS name, t.vault_id AS trail_vault_id,
+            v.id AS resolved_vault_id,
+            u.username AS owner_handle, u.display_name AS owner_display_name
        FROM trails t
        LEFT JOIN vaults v ON v.id = t.vault_id OR v.slug = t.vault_id
        LEFT JOIN users u ON u.id = v.owner_id
        WHERE t.id = ?`,
   ).get(trailId) as {
-    id: string; name: string; owner_handle: string | null; owner_display_name: string | null;
+    id: string;
+    name: string;
+    trail_vault_id: string | null;
+    resolved_vault_id: string | null;
+    owner_handle: string | null;
+    owner_display_name: string | null;
   } | undefined;
   if (!trail) {
     throw new Error(`Trail not found: ${trailId}`);
   }
   const ownerHandle = trail.owner_handle ?? "unknown";
   const ownerDisplayName = trail.owner_display_name ?? `@${ownerHandle}`;
+  // Bind the trail-scoped key to the trail's actual vault. Prefer the
+  // resolved vault id from the JOIN (handles legacy rows where
+  // trails.vault_id is the slug); fall back to the raw column. Hardcoding
+  // "life" here meant any trail in a non-life vault minted keys bound to
+  // the wrong vault, which then failed auth on every request.
+  const trailVaultId = trail.resolved_vault_id ?? trail.trail_vault_id;
+  if (!trailVaultId) {
+    throw new Error(`Trail ${trailId} has no resolvable vault_id`);
+  }
 
   // 2. Find or create user
   let user = getUserByEmail(normalizedEmail);
@@ -87,7 +103,7 @@ export async function inviteUser(
     keyId = existingGrant.grantee_id;
   } else {
     // 4. Create trail-scoped API key for the invited user
-    const keyResult = createKey(`trail:${trail.name}`, ["read"], "life", undefined, user.id);
+    const keyResult = createKey(`trail:${trail.name}`, ["read"], trailVaultId, undefined, user.id);
     keyId = keyResult.id;
 
     // 5. Create trail grant linking trail → key
