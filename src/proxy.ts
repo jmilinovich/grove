@@ -423,6 +423,17 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
 
   // Dynamic Client Registration (RFC 7591)
   if (path === "/oauth/register" && req.method === "POST") {
+    // IP-scoped rate limit. Without this, an attacker can flood the table with
+    // client registrations (each inserts a row into oauth_clients) or use
+    // timing differences between valid/invalid clients as an oracle.
+    const regIp = clientIp(req);
+    const regLimit = rateLimiter.check(`oauth-register:${regIp}`, "write");
+    if (!regLimit.allowed) {
+      sendJson(res, 429, { error: "rate_limited", retry_after_ms: regLimit.retryAfterMs });
+      return true;
+    }
+    rateLimiter.record(`oauth-register:${regIp}`, "write");
+
     readBody(req).then((body) => {
       const data = JSON.parse(body);
       const clientId = "grove_client_" + randomBytes(16).toString("hex");
@@ -605,6 +616,18 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
 
   // Token endpoint — exchange code for access token
   if (path === "/oauth/token" && req.method === "POST") {
+    // IP-scoped rate limit. Codes are 32 random hex chars so brute-force is
+    // infeasible, but without a limit an attacker can flood this endpoint to
+    // exhaust connection slots and trigger timing-based enumeration of whether
+    // a code exists in the DB before it expires (5-min TTL).
+    const tokenIp = clientIp(req);
+    const tokenLimit = rateLimiter.check(`oauth-token:${tokenIp}`, "write");
+    if (!tokenLimit.allowed) {
+      sendJson(res, 429, { error: "rate_limited", retry_after_ms: tokenLimit.retryAfterMs });
+      return true;
+    }
+    rateLimiter.record(`oauth-token:${tokenIp}`, "write");
+
     readBody(req).then((body) => {
       const params = new URLSearchParams(body);
       const grantType = params.get("grant_type");
