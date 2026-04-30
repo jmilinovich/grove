@@ -154,6 +154,16 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
 
   // Batch path: operations[] present takes precedence over single-op fields.
   if (input.operations && input.operations.length > 0) {
+    // Hard cap: each op acquires the write mutex and creates a git commit.
+    // An unbounded batch is a DoS multiplier — one rate-limit tick could
+    // trigger 1,000 disk writes + git commits + discovery enqueues.
+    const MAX_BATCH_OPS = 50;
+    if (input.operations.length > MAX_BATCH_OPS) {
+      return {
+        content: [{ type: "text", text: `operations[] batch capped at ${MAX_BATCH_OPS} ops (got ${input.operations.length})` }],
+        isError: true,
+      };
+    }
     const parsedOps: BatchOperation[] = [];
     for (const [i, op] of input.operations.entries()) {
       if (!op || typeof op.frontmatter !== "string" || typeof op.content !== "string") {
@@ -331,7 +341,7 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
         searches: z.array(z.object({
           type: z.enum(["lex", "vec", "hyde"]),
           query: z.string(),
-        })).describe("Search sub-queries"),
+        })).max(10, "searches array capped at 10 sub-queries").describe("Search sub-queries (max 10)"),
         intent: z.string().optional().describe("What you're looking for — improves snippet selection"),
         limit: z.number().optional().default(10).describe("Max results"),
       },
