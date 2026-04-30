@@ -2906,11 +2906,13 @@ const server = createServer(async (req, res) => {
       }
 
       if (parsed.action === "list") {
-        // Scope to the URL's vault when we arrived via
-        // `/v/<slug>/v1/admin/trails` so a multi-vault owner sees only
-        // that vault's trails. Legacy unscoped `/v1/admin/trails` still
-        // returns every trail.
-        const trails = loadTrails(restIsVaultScoped ? restCtx.vaultId : undefined);
+        // Always scope to the authenticated token's vault. On the
+        // vault-slug path (`/v/<slug>/v1/admin/trails`) restCtx comes
+        // from the URL; on the legacy path (`/v1/admin/trails`) restCtx
+        // is resolved from the Bearer token's vault_id (line ~1530).
+        // Passing `undefined` (i.e. "no vault filter") leaked every
+        // vault's trail names + config to any authenticated owner.
+        const trails = loadTrails(restCtx.vaultId);
         res.writeHead(200, restHeaders);
         res.end(JSON.stringify({ trails }));
         return;
@@ -3069,10 +3071,12 @@ const server = createServer(async (req, res) => {
         return;
       }
       const trailId = decodeURIComponent(trailUsageMatch[1]!);
-      // Scope the lookup to trails owned by this URL's vault. Without it
-      // a vault A owner with admin auth could read vault B's trail
-      // metadata (name + request counts) by guessing trail ids.
-      const trails = loadTrails(restIsVaultScoped ? restCtx.vaultId : undefined);
+      // Always scope to the authenticated token's vault (same fix as the
+      // `action: "list"` path above — restCtx is already resolved to the
+      // caller's vault on the legacy unscoped path via the Bearer lookup
+      // at ~line 1530). Passing `undefined` allowed a vault A owner to
+      // read vault B's trail name + request counts by guessing trail ids.
+      const trails = loadTrails(restCtx.vaultId);
       const trail = trails.find((t) => t.id === trailId);
       if (!trail) {
         res.writeHead(404, restHeaders);
