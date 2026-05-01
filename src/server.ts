@@ -18,7 +18,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 
-import { hybridSearch, formatResults, bm25Search } from "./hybrid-search.js";
+import { hybridSearch, formatResults, bm25Search, type SearchMode } from "./hybrid-search.js";
 import { VaultLockedError } from "./index-crypto.js";
 import { noteUrl, vaultOwnerHandle } from "./url.js";
 
@@ -350,11 +350,24 @@ Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do
       const queryText = searches.map((s) => s.query).join(" ");
       // Fetch more results if trail filtering is active (pre-filter reduction)
       const fetchLimit = activeTrail ? (limit ?? 10) * 3 : (limit ?? 10);
+
+      // Honour the caller's declared search type(s). If all sub-queries share
+      // the same type, use it directly; mixed types → hybrid (default).
+      // This was previously ignored — every searches[] call ran full hybrid
+      // regardless of type, which caused pure-lex queries to surface
+      // vector-nearest-neighbor results that didn't contain the literal term.
+      const types = new Set(searches.map((s) => s.type));
+      let searchMode: SearchMode = "hybrid";
+      if (types.size === 1) {
+        const t = [...types][0]!;
+        if (t === "lex" || t === "vec" || t === "hyde") searchMode = t;
+      }
+
       let results;
       try {
         // Pass VAULT_COLLECTION so the shared QMD index doesn't return
         // results from sibling vaults under the same physical SQLite file.
-        results = await hybridSearch(queryText, fetchLimit, VAULT_COLLECTION);
+        results = await hybridSearch(queryText, fetchLimit, VAULT_COLLECTION, searchMode);
       } catch (err) {
         if (err instanceof VaultLockedError) {
           return { content: [{ type: "text" as const, text: err.message }], isError: true };
