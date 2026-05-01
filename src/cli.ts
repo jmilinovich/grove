@@ -1208,9 +1208,26 @@ async function cmdKeysList(config: Config): Promise<CmdResult> {
   };
 }
 
-async function cmdKeysCreate(config: Config, name: string): Promise<CmdResult> {
-  if (!name) throw new CliError("bad_request", "Usage: grove keys create <name>", 1);
-  const res = await keysPost(config, { action: "create", name });
+async function cmdKeysCreate(
+  config: Config,
+  name: string,
+  flags: Record<string, string | boolean>,
+): Promise<CmdResult> {
+  if (!name) throw new CliError("bad_request", "Usage: grove keys create <name> [--vault <slug>] [--scopes read,write]", 1);
+  const body: Record<string, unknown> = { action: "create", name };
+  // `--vault <slug>` binds the new key to a specific vault. The server
+  // gates this behind `vault_members` membership (resolveMintVaultId in
+  // proxy.ts) — non-members get 404. Until this fix the flag was parsed
+  // by the arg parser but never plumbed into the HTTP body, so the key
+  // silently fell back to the caller's default vault — the
+  // ingest-bootstrap incident on 2026-05-01.
+  if (typeof flags.vault === "string" && flags.vault.length > 0) {
+    body.vault_slug = flags.vault;
+  }
+  if (typeof flags.scopes === "string" && flags.scopes.length > 0) {
+    body.scopes = flags.scopes.split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  const res = await keysPost(config, body);
   handleHttpStatus(res);
   const data = tryParseJson(res.body) ?? {};
   return {
@@ -1727,6 +1744,52 @@ async function cmdVaultRegen(
   };
 }
 
+// ── Vault seed-key (platform-owner-only bootstrap key minting) ─────────
+
+/**
+ * Mint a vault-bound API key for content seeding.
+ *
+ * Platform-owner-only. The standard `/keys` create endpoint requires the
+ * caller to be a `vault_members` row in the target vault — by design,
+ * post-2026-04 audit. This command bypasses that gate via a separate
+ * server endpoint that's only callable by Grove-wide owners. Intended
+ * for the "I just onboarded a friend, now I want to pre-load their vault
+ * with content before handing it over" workflow. Revoke when done.
+ */
+async function cmdVaultSeedKey(
+  config: Config,
+  slug: string,
+  flags: Record<string, string | boolean>,
+): Promise<CmdResult> {
+  if (!slug) {
+    throw new CliError("bad_request", "Usage: grove vault seed-key <slug> [--name <name>]", 1);
+  }
+  const name = typeof flags.name === "string" && flags.name.length > 0
+    ? flags.name
+    : `seed-${slug}`;
+  const url = new URL("/v1/admin/vaults/seed-key", config.server);
+  const res = await httpDo(
+    "POST",
+    url,
+    { Authorization: `Bearer ${config.token}` },
+    JSON.stringify({ slug, name }),
+  );
+  if (res.status === 404) {
+    throw new CliError("not_found", `vault not found: ${slug}`, 1);
+  }
+  if (res.status === 403) {
+    throw new CliError("forbidden", "platform-owner role required to mint seed keys", 2);
+  }
+  handleHttpStatus(res);
+  const data = tryParseJson(res.body) ?? {};
+  return {
+    ok: true,
+    ...data,
+    _fmt: () =>
+      `\nSeed key created for vault "${slug}":\n  id:   ${data.key_id}\n  name: ${data.name}\n\nToken (shown once, save it now):\n\n  ${data.token}\n\nUse it to seed content, then revoke:\n  grove keys revoke ${data.key_id}\n`,
+  };
+}
+
 // ── Vault encryption (remote, via /v1/admin/vault API) ─────────
 
 async function cmdVaultStatus(config: Config): Promise<CmdResult> {
@@ -2203,8 +2266,8 @@ export const HELP: Record<string, CmdHelp> = {
     exit_codes: EXIT_CODES,
   },
   vault: {
-    usage: "grove vault [status|encrypt|unlock|lock|create|regen] [--json]",
-    description: "Encryption lifecycle, vault provisioning, and ecosystem config regen. Note: `create` runs locally on the VPS (touches /root/vaults/) — for the paved path that works from any machine, use `grove onboard`.",
+    usage: "grove vault [status|encrypt|unlock|lock|create|regen|seed-key] [--json]",
+    description: "Encryption lifecycle, vault provisioning, ecosystem config regen, and platform-owner seed-key minting. Note: `create` runs locally on the VPS (touches /root/vaults/) — for the paved path that works from any machine, use `grove onboard`. `seed-key` is platform-owner-only and bypasses the per-vault membership gate so a Grove operator can pre-load content into a freshly-onboarded tenant's vault.",
     flags: [
       "--json            JSON output",
       "--owner EMAIL     (create) owner email (required)",
@@ -2212,8 +2275,9 @@ export const HELP: Record<string, CmdHelp> = {
       "--prune           (regen) pm2-delete apps no longer in the generated config",
       "--skip-reload     (regen) write the file but skip pm2 start/reload",
       "--dry-run         (regen) print the plan without writing or reloading",
+      "--name NAME       (seed-key) name for the minted key (default: seed-<slug>)",
     ],
-    json_schema: "encryption: {ok, encrypted, unlocked, last_unlocked_at} | create: {ok, vault_id, slug, connector_url, owner_api_token} | regen: {ok, ecosystem_path, expected_apps, current_apps, orphans, pruned, wrote, reloaded}",
+    json_schema: "encryption: {ok, encrypted, unlocked, last_unlocked_at} | create: {ok, vault_id, slug, connector_url, owner_api_token} | regen: {ok, ecosystem_path, expected_apps, current_apps, orphans, pruned, wrote, reloaded} | seed-key: {ok, key_id, name, token, vault_id, vault_slug}",
     exit_codes: EXIT_CODES,
     examples: [
       "grove vault status",
@@ -2224,6 +2288,8 @@ export const HELP: Record<string, CmdHelp> = {
       "sudo grove vault create team --owner team@example.com --display-name 'Team Vault'",
       "grove vault regen --dry-run",
       "sudo grove vault regen --prune",
+      "grove vault seed-key ryan",
+      "grove vault seed-key ryan --name ingest-bootstrap",
     ],
   },
   invite: {
@@ -2384,7 +2450,7 @@ Commands:
   trails                  Manage trails (scoped access)
   invite <email>          Send a vault- or trail-invite email
   onboard <email>         Provision a new vault + email the magic link (paved path)
-  vault                   Encryption lifecycle (status|encrypt|unlock|lock|create|regen)
+  vault                   Encryption lifecycle (status|encrypt|unlock|lock|create|regen|seed-key)
   sync <dir>              Sync archived Sources
   ingest <dir>            Import .md or .txt files into vault
   lint <dir>              Normalize frontmatter
@@ -2646,7 +2712,7 @@ async function main() {
       const subArg = process.argv.slice(4)[0] ?? "";
       switch (sub) {
         case "list":   result = await cmdKeysList(config); break;
-        case "create": result = await cmdKeysCreate(config, subArg); break;
+        case "create": result = await cmdKeysCreate(config, subArg, flags); break;
         case "revoke":
           await confirmTyped(subArg, `revoke API key "${subArg}" — this is immediate and irreversible.`);
           result = await cmdKeysRevoke(config, subArg); break;
@@ -2715,8 +2781,13 @@ async function main() {
         case "regen":
           result = await cmdVaultRegen(flags);
           break;
+        case "seed-key": {
+          const slugArg = positionals[1] ?? "";
+          result = await cmdVaultSeedKey(config, slugArg, flags);
+          break;
+        }
         default:
-          throw new CliError("bad_request", `Unknown vault subcommand: ${sub}\nUsage: grove vault [status|encrypt|unlock|lock|create|regen]`, 1);
+          throw new CliError("bad_request", `Unknown vault subcommand: ${sub}\nUsage: grove vault [status|encrypt|unlock|lock|create|regen|seed-key]`, 1);
       }
       emitResult(result, flags);
       return;

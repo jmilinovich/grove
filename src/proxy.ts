@@ -281,6 +281,58 @@ export function resolveMintVaultId(
   return { kind: "ok", vaultId: membership?.vault_id ?? "life" };
 }
 
+/**
+ * Mint a vault-bound API key without requiring `vault_members` membership.
+ *
+ * Companion to `resolveMintVaultId` — that helper enforces membership for
+ * the tenant-facing `/keys` endpoint. This one is the platform-owner
+ * bypass for the seed-key endpoint at `/v1/admin/vaults/seed-key`. Caller
+ * authorization (platform-owner gate) is the responsibility of the HTTP
+ * handler; this helper assumes the caller has already been authorized
+ * and only handles vault lookup + key creation.
+ *
+ * Pulled out so it's unit-testable without booting the proxy and so the
+ * two key-mint authorization shapes sit side-by-side for readers.
+ */
+export type MintVaultSeedKeyResult =
+  | {
+      kind: "ok";
+      keyId: string;
+      name: string;
+      token: string;
+      vaultId: string;
+      vaultSlug: string;
+    }
+  | { kind: "vault_not_found" };
+
+export function mintVaultSeedKey(args: {
+  slug: string;
+  name: string;
+  actorUserId: string;
+}): MintVaultSeedKeyResult {
+  const db = getDb();
+  const vault = db
+    .prepare("SELECT id, slug FROM vaults WHERE slug = ? LIMIT 1")
+    .get(args.slug) as { id: string; slug: string } | undefined;
+  if (!vault) return { kind: "vault_not_found" };
+
+  const result = createKey(
+    args.name,
+    ["read", "write"],
+    vault.id,
+    undefined,
+    args.actorUserId,
+  );
+  return {
+    kind: "ok",
+    keyId: result.id,
+    name: result.name,
+    token: result.token,
+    vaultId: vault.id,
+    vaultSlug: vault.slug,
+  };
+}
+
 /** Pick a vault for admin vault operations — either an explicit override or the admin's sole vault. */
 function resolveAdminVaultId(userId: string, override?: string): string | null {
   const db = getDb();
@@ -1773,6 +1825,67 @@ const server = createServer(async (req, res) => {
         if (code === "invalid_slug" || code === "reserved_slug") { sendJson(res, 400, { error: msg }); return; }
         sendJson(res, 500, { error: msg });
       }
+      return;
+    }
+
+    // POST /v1/admin/vaults/seed-key — platform-owner-only seed-key mint.
+    //
+    // Used to bootstrap content into a freshly-onboarded tenant's vault
+    // *before* the new owner logs in. The standard `/keys` create endpoint
+    // gates on `vault_members` membership (resolveMintVaultId) — by
+    // design, post-2026-04-26 audit. Platform owners are not auto-members
+    // of every tenant, so the gated endpoint denies them; this endpoint
+    // is the sanctioned bypass for the "I just provisioned a friend's
+    // vault, now I want to ingest content for them" workflow.
+    //
+    // Caller must be `users.role='owner'` (Grove-wide). Mints a key bound
+    // to the target vault and returns the plaintext token. Caller is
+    // expected to revoke the key after seeding via `grove keys revoke`.
+    if (restPath === "/v1/admin/vaults/seed-key" && req.method === "POST") {
+      const admin = adminAuth(req); // Grove-wide check — no vaultId
+      if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
+      // Strict platform-owner gate. `adminAuth(req)` (no vaultId) only
+      // passes Grove-wide owners today, but the second check makes the
+      // contract explicit so a future relaxation upstream doesn't
+      // silently widen this endpoint's blast radius.
+      if (!isPlatformOwner(admin.userId)) {
+        sendJson(res, 403, { error: "platform-owner role required" });
+        return;
+      }
+
+      let body: string;
+      try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
+      let parsed: any;
+      try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
+
+      const slug = typeof parsed.slug === "string" ? parsed.slug.trim() : "";
+      if (!slug) { sendJson(res, 400, { error: "slug is required" }); return; }
+      const name = typeof parsed.name === "string" && parsed.name.length > 0
+        ? parsed.name
+        : `seed-${slug}`;
+
+      const result = mintVaultSeedKey({ slug, name, actorUserId: admin.userId });
+      if (result.kind === "vault_not_found") {
+        // 404 (not 400) — same posture as the membership-gate denial in
+        // resolveMintVaultId so a slug enumerator can't distinguish
+        // "vault doesn't exist" from "vault exists but you can't touch it".
+        sendJson(res, 404, { error: "vault not found" });
+        return;
+      }
+      structuredLog("info", "vault.seed_key_minted", rid, {
+        actor_user_id: admin.userId,
+        vault_id: result.vaultId,
+        vault_slug: result.vaultSlug,
+        key_id: result.keyId,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        key_id: result.keyId,
+        name: result.name,
+        token: result.token,
+        vault_id: result.vaultId,
+        vault_slug: result.vaultSlug,
+      });
       return;
     }
 
