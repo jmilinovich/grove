@@ -1273,8 +1273,18 @@ async function cmdKeyRotate(
     throw new CliError("bad_request", "--grace must be a non-negative integer (seconds)", 1);
   }
 
-  // Step 2: create new key with the chosen name.
-  const createRes = await keysPost(config, { action: "create", name: newName });
+  // Step 2: create new key with the chosen name, preserving the old key's
+  // vault binding. Without `vault_slug` the server falls back to the
+  // caller's earliest vault_members row — wrong for any key that was
+  // explicitly bound to a non-default vault (same root cause as the
+  // 2026-05-01 --vault flag-drop incident, just via rotate instead of create).
+  const createBody: Record<string, unknown> = { action: "create", name: newName };
+  if (typeof oldKey.vault_id === "string" && oldKey.vault_id.length > 0) {
+    // vault_id is the canonical vault identifier; send it via the `vault`
+    // field which resolveMintVaultId accepts (membership-checked).
+    createBody.vault = oldKey.vault_id;
+  }
+  const createRes = await keysPost(config, createBody);
   handleHttpStatus(createRes);
   const createData = tryParseJson(createRes.body) ?? {};
   if (!createData.id || !createData.token) {
