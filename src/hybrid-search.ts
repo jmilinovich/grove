@@ -476,36 +476,64 @@ export function rrfFuse(
 }
 
 /**
+ * Which search backends to activate.
+ *
+ * - "lex"  → BM25 + title FTS5 only (no vector embedding, no Voyage API call)
+ * - "vec"  → vector only (no BM25)
+ * - "hyde" → vector only (caller already generated the HyDE passage as the query)
+ * - "hybrid" (default) → all three backends fused via RRF
+ *
+ * The `query` MCP tool surfaces `type` on each sub-query; passing modes here
+ * lets callers honour that contract instead of silently running full hybrid
+ * search regardless of what was requested.
+ */
+export type SearchMode = "lex" | "vec" | "hyde" | "hybrid";
+
+/**
  * Hybrid search: BM25 + vector with RRF fusion.
  * Runs both backends in parallel. Falls back to BM25-only if vector
  * search fails (TEI down, vec0 missing, etc.).
  *
  * `collection` restricts matches to a single QMD collection (vault).
  * Omit it for single-vault callers that want the global index.
+ *
+ * `mode` controls which backends participate:
+ *   - "lex"    → BM25 + title only (no embedding, no Voyage call)
+ *   - "vec"    → vector only (no BM25)
+ *   - "hyde"   → vector only (same as vec; caller supplies the HyDE passage)
+ *   - "hybrid" → all three fused (default)
  */
 export async function hybridSearch(
   query: string,
   limit: number = 10,
   collection?: string,
+  mode: SearchMode = "hybrid",
 ): Promise<HybridResult[]> {
   assertUnlocked();
   const searchStart = Date.now();
   const oversample = Math.min(limit * 5, 50);
 
+  const wantLex = mode === "lex" || mode === "hybrid";
+  const wantVec = mode === "vec" || mode === "hyde" || mode === "hybrid";
+
   let bm25: SearchResult[] = [];
-  try {
-    bm25 = bm25Search(query, oversample, collection);
-  } catch (err) {
-    console.error(`[hybrid] BM25 search failed: ${(err as Error).message}`);
+  if (wantLex) {
+    try {
+      bm25 = bm25Search(query, oversample, collection);
+    } catch (err) {
+      console.error(`[hybrid] BM25 search failed: ${(err as Error).message}`);
+    }
   }
 
-  const vec = await vectorSearch(query, oversample, collection).catch((err) => {
-    console.error(`[hybrid] vector search failed, falling back to BM25-only: ${err.message}`);
-    return null;
-  });
+  const vec = wantVec
+    ? await vectorSearch(query, oversample, collection).catch((err) => {
+        console.error(`[hybrid] vector search failed, falling back to BM25-only: ${err.message}`);
+        return null;
+      })
+    : [];
 
-  if (!vec) {
-    // BM25-only fallback
+  if (wantVec && vec === null) {
+    // Vector requested but failed — fall back to BM25 results (may be empty if lex not wanted)
     const fallbackResults = bm25.slice(0, limit).map((r) => ({
       title: r.title,
       vault_path: r.vault_path,
@@ -517,27 +545,40 @@ export async function hybridSearch(
     return fallbackResults;
   }
 
-  // Title search — fast FTS5 title-only match for concept note discovery
+  // Title search — fast FTS5 title-only match for concept note discovery.
+  // Only run when lex backends are active (title is a lex-family signal).
   let titles: SearchResult[] = [];
-  try {
-    titles = titleSearch(query, oversample, collection);
-  } catch (err) {
-    console.error(`[hybrid] title search failed: ${(err as Error).message}`);
+  if (wantLex) {
+    try {
+      titles = titleSearch(query, oversample, collection);
+    } catch (err) {
+      console.error(`[hybrid] title search failed: ${(err as Error).message}`);
+    }
   }
 
-  const lists: { results: SearchResult[]; weight: number; label: string }[] = [
-    { results: bm25, weight: BM25_WEIGHT, label: "bm25" },
-    { results: vec, weight: VEC_WEIGHT, label: "vector" },
-    { results: titles, weight: 3.0, label: "title" },
-  ];
+  const lists: { results: SearchResult[]; weight: number; label: string }[] = [];
+  if (wantLex) {
+    lists.push({ results: bm25, weight: BM25_WEIGHT, label: "bm25" });
+    lists.push({ results: titles, weight: 3.0, label: "title" });
+  }
+  if (wantVec && vec !== null) {
+    lists.push({ results: vec as SearchResult[], weight: VEC_WEIGHT, label: "vector" });
+  }
 
   const fused = rrfFuse(lists, limit);
 
   // Alias injection: if a known alias appears in the query, ensure that note
   // is in the results (bypasses RRF when vec noise would otherwise bury it).
+  // Only run for lex/hybrid — alias matching is a keyword signal and
+  // shouldn't override a pure-vec intent.
   // MUST filter by collection: the alias index is a process-global singleton
   // spanning all vaults. Without this check, vault A's search can inject
   // vault B's alias-matched notes into the result set.
+  if (!wantLex) {
+    const finalResults = fused.slice(0, limit);
+    searchMetrics.recordSearch(query, finalResults.length, Date.now() - searchStart);
+    return finalResults;
+  }
   const aliasIndex = getAliasIndex();
   const queryLower = query.toLowerCase().replace(/['"%()\-]/g, " ");
   const injected = new Set<string>();

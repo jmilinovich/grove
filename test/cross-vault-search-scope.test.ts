@@ -74,4 +74,46 @@ describe("cross-vault search-scope invariants", () => {
     const src = readSrc("src/hybrid-search.ts");
     expect(src).toMatch(/function bm25Search[\s\S]*?collection\??:/);
   });
+
+  /**
+   * Regression test for the searches[].type-ignored bug.
+   *
+   * The `query` MCP tool exposes a `type` field per sub-query ("lex", "vec",
+   * "hyde") so callers can request keyword-only or vector-only search. Before
+   * this fix, server.ts always called `hybridSearch(queryText, limit, collection)`
+   * — ignoring `type` entirely — so a pure-lex query would silently activate
+   * vector embedding (a Voyage API call) and return nearest-neighbor results
+   * that didn't contain the literal query term.
+   *
+   * The fix: derive a `SearchMode` from the searches[] types and pass it as
+   * the 4th arg to hybridSearch. This test checks the static invariant.
+   */
+  it("server.ts passes searchMode (4th arg) to hybridSearch derived from searches[].type", () => {
+    const src = readSrc("src/server.ts");
+    // The mode derivation block must be present.
+    expect(src).toMatch(/searchMode.*SearchMode/);
+    // hybridSearch calls in server.ts must include 4 args (query, limit, collection, mode).
+    const calls = [...src.matchAll(/hybridSearch\(([^)]*)\)/g)].map((m) => m[1]);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const args of calls) {
+      const argCount = args.split(",").map((s) => s.trim()).filter(Boolean).length;
+      expect(
+        argCount,
+        `hybridSearch in server.ts must include searchMode arg, got: hybridSearch(${args})`,
+      ).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  it("hybrid-search.ts hybridSearch signature accepts a mode arg", () => {
+    const src = readSrc("src/hybrid-search.ts");
+    // The 4th parameter should be `mode` typed as SearchMode.
+    expect(src).toMatch(/export async function hybridSearch[\s\S]*?mode.*SearchMode/);
+  });
+
+  it("hybrid-search.ts lex mode skips vector embedding (wantVec guard present)", () => {
+    const src = readSrc("src/hybrid-search.ts");
+    // The lex/vec gating logic must be present.
+    expect(src).toMatch(/wantLex.*mode.*===.*lex/);
+    expect(src).toMatch(/wantVec.*mode.*===.*vec/);
+  });
 });
