@@ -583,6 +583,40 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
       const codeChallenge = params.get("code_challenge") ?? "";
       const codeChallengeMethod = params.get("code_challenge_method") ?? "";
 
+      const db = getDb();
+
+      // Validate redirect_uri against the client's registered URIs.
+      // Without this check an attacker can substitute any redirect_uri and
+      // have the authorization code (which wraps the encrypted API key)
+      // delivered to a host they control — full token theft with no user
+      // interaction beyond visiting /oauth/authorize.
+      //
+      // Localhost is permitted without registration (MCP CLI flow); all
+      // other URIs must appear verbatim in oauth_clients.redirect_uris.
+      let redirectOk = false;
+      let redirectHostname = "";
+      try {
+        redirectHostname = new URL(redirectUri).hostname;
+      } catch {
+        sendJson(res, 400, { error: "invalid_request", error_description: "Malformed redirect_uri" });
+        return;
+      }
+      if (redirectHostname === "localhost" || redirectHostname === "127.0.0.1") {
+        redirectOk = true;
+      } else {
+        const clientRow = db.prepare("SELECT redirect_uris FROM oauth_clients WHERE client_id = ?").get(clientId) as { redirect_uris: string } | undefined;
+        if (clientRow) {
+          try {
+            const registered: string[] = JSON.parse(clientRow.redirect_uris);
+            redirectOk = registered.includes(redirectUri);
+          } catch { /* malformed DB row — deny */ }
+        }
+      }
+      if (!redirectOk) {
+        sendJson(res, 400, { error: "invalid_request", error_description: "redirect_uri not registered for this client" });
+        return;
+      }
+
       // Validate the API key
       const key = validateToken(apiKey);
       if (!key) {
@@ -592,9 +626,19 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
         return;
       }
 
+      // Require PKCE for non-localhost clients. Localhost MCP clients
+      // (Claude Code) always supply code_challenge; public clients that
+      // omit it over a non-localhost redirect are silently vulnerable to
+      // authorization code interception — enforce S256 everywhere except
+      // the legacy localhost CLI fallback where the OS port is the
+      // effective binding check.
+      if (!codeChallenge && redirectHostname !== "localhost" && redirectHostname !== "127.0.0.1") {
+        sendJson(res, 400, { error: "invalid_request", error_description: "code_challenge required" });
+        return;
+      }
+
       // Generate auth code and store in SQLite
       const codeStr = randomBytes(32).toString("hex");
-      const db = getDb();
       db.prepare(
         "INSERT INTO oauth_codes (code_hash, client_id, redirect_uri, key_id, encrypted_key, expires_at, code_challenge, code_challenge_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
       ).run(
@@ -713,6 +757,16 @@ function handleOAuth(req: IncomingMessage, res: ServerResponse, url: URL): boole
       if (new Date(authCode.expires_at).getTime() < Date.now()) {
         db.prepare("DELETE FROM oauth_codes WHERE code_hash = ?").run(codeHash);
         sendJson(res, 400, { error: "invalid_grant", error_description: "Code expired" });
+        return;
+      }
+
+      // RFC 6749 §4.1.3: if redirect_uri was included in the authorization
+      // request it MUST be present here and MUST match exactly. A mismatch
+      // means a different party is trying to redeem the code — reject it
+      // before touching PKCE so we don't leak timing info on the verifier.
+      const tokenRedirectUri = params.get("redirect_uri") ?? "";
+      if (authCode.redirect_uri && tokenRedirectUri !== authCode.redirect_uri) {
+        sendJson(res, 400, { error: "invalid_grant", error_description: "redirect_uri mismatch" });
         return;
       }
 
