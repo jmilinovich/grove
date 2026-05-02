@@ -24,7 +24,7 @@ import { execSync } from "node:child_process";
 import { readArchiveSources, planSync, normalizeDir } from "./sync-sources.js";
 import { loadTrails, createTrail, disableTrail, deleteTrail } from "./trails.js";
 import { parseNote, serializeNote, inferTags, contentHash } from "./notes-validate.js";
-import { enqueueDiscovery, createSchema } from "./db.js";
+import { createSchema } from "./db.js";
 import { syncBookmarks } from "./discovery-bookmarks.js";
 import { installSignalHandlers } from "./cli/lib/signals.js";
 import { guardAgainstTokenInArgv } from "./cli/lib/argv.js";
@@ -1107,29 +1107,21 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
   }
   if (toImport.length > 0) process.stderr.write("\n");
 
-  // P7-8: Enqueue all successfully imported notes for discovery processing
-  let enqueued = 0;
-  for (const r of results) {
-    if (!r.status.startsWith("error")) {
-      try {
-        enqueueDiscovery(r.path, "ingest");
-        enqueued++;
-      } catch {
-        // DB may not be initialized in all environments — best-effort
-      }
-    }
-  }
-  if (enqueued > 0) {
-    process.stderr.write(`Enqueued ${enqueued} notes for discovery processing\n`);
-  }
-
+  // Discovery enqueue happens server-side in handleWriteNote (rest.ts)
+  // with the request's authenticated ctx.vaultId. The CLI used to also
+  // enqueue locally here, but on the operator-on-same-box deployment
+  // (where the CLI's getDb() and the server's getDb() resolve to the
+  // same state.db) that local call writes a SECOND queue entry under
+  // process.env.GROVE_VAULT_ID — which on the CLI shell is unset and
+  // thus defaults to "vault_00000000". The result was duplicate-and-
+  // wrong-vault discovery rows for every CLI ingest into a non-default
+  // vault. Server-side enqueue is canonical; trust it.
   return {
     ok: true,
     action: "ingest",
     imported,
     failed,
     skipped: skipped.length,
-    enqueued,
     total: mdFiles.length,
     results,
     _fmt: () => {
@@ -1142,7 +1134,6 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
         lines.push(`  ${icon} ${r.path}`);
       }
       lines.push(`\nImported ${imported}/${mdFiles.length} notes (${skipped.length} skipped as duplicates)`);
-      if (enqueued > 0) lines.push(`${enqueued} enqueued for discovery`);
       if (failed > 0) lines.push(`${failed} failed`);
       return lines.join("\n");
     },
@@ -2350,7 +2341,7 @@ export const HELP: Record<string, CmdHelp> = {
       "--yes        Skip the destination-vault confirmation prompt (alias: -y)",
       "--json       JSON output",
     ],
-    json_schema: "{ok, action, imported, failed, skipped, enqueued, total, results: [{path, status}]}",
+    json_schema: "{ok, action, imported, failed, skipped, total, results: [{path, status}]}",
     exit_codes: EXIT_CODES,
     examples: ["grove ingest ./import/", "grove ingest ./vault --recursive", "grove ingest ./export/ --dry-run"],
   },
@@ -2365,7 +2356,7 @@ export const HELP: Record<string, CmdHelp> = {
       "--count N    (--source=bookmarks) Number of bookmarks to fetch (default: 20)",
       "--json       JSON output",
     ],
-    json_schema: "{ok, action, imported, failed, skipped, enqueued, total, results: [{path, status}]}",
+    json_schema: "{ok, action, imported, failed, skipped, total, results: [{path, status}]}",
     exit_codes: EXIT_CODES,
     examples: [
       "grove import ./import/ --source=fs --apply",
