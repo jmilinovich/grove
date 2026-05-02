@@ -334,6 +334,7 @@ function getIndexPath(): string {
 function computeIndexHealth(
   totalNotes: number,
   files: string[],
+  collection: string,
   indexDb?: Database.Database,
 ): IndexHealth {
   const defaults: IndexHealth = {
@@ -353,9 +354,15 @@ function computeIndexHealth(
       owned = true;
     }
 
+    // Scope to this vault's collection so multi-vault deployments don't
+    // compute embedding_coverage as (global embedded count) /
+    // (this-vault note count) — which can exceed 1.0 and leaks the
+    // existence of other vaults via the metric.
     const docRow = db
-      .prepare("SELECT COUNT(*) AS cnt FROM documents WHERE active = 1")
-      .get() as { cnt: number } | undefined;
+      .prepare(
+        "SELECT COUNT(*) AS cnt FROM documents WHERE active = 1 AND collection = ?",
+      )
+      .get(collection) as { cnt: number } | undefined;
     const indexedDocs = docRow?.cnt ?? 0;
 
     // Count embedded documents via the regular `content_vectors` table
@@ -371,9 +378,9 @@ function computeIndexHealth(
           `SELECT COUNT(DISTINCT d.id) AS cnt
              FROM documents d
              JOIN content_vectors cv ON cv.hash = d.hash
-            WHERE d.active = 1`,
+            WHERE d.active = 1 AND d.collection = ?`,
         )
-        .get() as { cnt: number } | undefined;
+        .get(collection) as { cnt: number } | undefined;
       embeddedDocs = vecRow?.cnt ?? 0;
     } catch {
       // content_vectors missing (unlikely) — leave at 0
@@ -469,17 +476,28 @@ function computeGrowthVelocity(
 
 // ── Duplicate candidates (optional) ──────────────────────────────────
 
-function countDuplicateCandidates(): number {
+/** Same env-default pattern as src/db.ts so legacy single-vault callers
+ * (and tests that rely on the same default for inserts) keep working. */
+function defaultVaultId(): string {
+  return process.env.GROVE_VAULT_ID ?? "vault_00000000";
+}
+
+function countDuplicateCandidates(vaultId: string = defaultVaultId()): number {
   // Near-duplicate pairs surface in discovery_results once discovery
   // (Phase 7) embeds notes and compares neighbors. Auto-healing (P13-3)
   // will flag them explicitly; here we just count undismissed high-sim
   // pairs that already exist in the table.
+  //
+  // discovery_results is a process-global SQLite table; without
+  // `vault_id = ?` here, vault A's stats report vault B's duplicate
+  // count — same class of cross-vault leak as the unscoped search query
+  // we caught on 2026-04-29.
   try {
     const row = getDb()
       .prepare(
-        "SELECT COUNT(*) AS cnt FROM discovery_results WHERE similarity > 0.85 AND dismissed_at IS NULL",
+        "SELECT COUNT(*) AS cnt FROM discovery_results WHERE vault_id = ? AND similarity > 0.85 AND dismissed_at IS NULL",
       )
-      .get() as { cnt: number } | undefined;
+      .get(vaultId) as { cnt: number } | undefined;
     return row?.cnt ?? 0;
   } catch {
     return 0;
@@ -491,6 +509,14 @@ function countDuplicateCandidates(): number {
 export interface ComputeOptions {
   indexDb?: Database.Database;
   now?: Date;
+  /**
+   * vault_id used to scope process-global tables (discovery_results,
+   * health flags) to this vault. Required for correct stats in
+   * multi-vault deployments; falls back to the empty string only for
+   * legacy single-vault callers, which produces zero matches and is
+   * preferable to leaking other vaults' counts.
+   */
+  vaultId?: string;
 }
 
 export async function computeHealthMetrics(
@@ -499,6 +525,11 @@ export async function computeHealthMetrics(
 ): Promise<GraphHealthMetrics> {
   const now = opts.now ?? new Date();
   const files = walkMd(vaultPath);
+
+  // QMD's documents table tags every row with `collection` (= the last
+  // path segment of the vault root). Use it to scope index reads here.
+  const collection = vaultPath.split("/").filter(Boolean).pop() ?? "";
+  const vaultId = opts.vaultId ?? defaultVaultId();
 
   const fileTexts = new Map<string, string>();
   let missingFrontmatter = 0;
@@ -517,9 +548,9 @@ export async function computeHealthMetrics(
 
   const totalNotes = files.length;
   const graph = buildGraph(files, fileTexts);
-  const index = computeIndexHealth(totalNotes, files, opts.indexDb);
+  const index = computeIndexHealth(totalNotes, files, collection, opts.indexDb);
   const growth = computeGrowthVelocity(vaultPath, now);
-  const duplicateCandidates = countDuplicateCandidates();
+  const duplicateCandidates = countDuplicateCandidates(vaultId);
 
   const linkDensity =
     totalNotes > 0 ? graph.edgeCount / totalNotes : 0;
@@ -740,6 +771,7 @@ export interface RunHealthCheckOptions {
   now?: Date;
   onAlert?: (alert: HealthAlert) => void;
   rid?: string;
+  vaultId?: string;
 }
 
 export interface HealthCheckResult {
@@ -755,6 +787,7 @@ export async function runHealthCheck(
   const metrics = await computeHealthMetrics(vaultPath, {
     indexDb: opts.indexDb,
     now: opts.now,
+    vaultId: opts.vaultId,
   });
   const score = calculateHealthScore(metrics);
   const snapshot = storeHealthSnapshot(
@@ -804,6 +837,7 @@ export interface HealthCronOptions {
   thresholds?: AlertThresholds;
   runImmediately?: boolean;
   onAlert?: (alert: HealthAlert) => void;
+  vaultId?: string;
 }
 
 export function startHealthCronLoop(
@@ -820,6 +854,7 @@ export function startHealthCronLoop(
       await runHealthCheck(vaultPath, {
         thresholds: opts.thresholds,
         onAlert: opts.onAlert,
+        vaultId: opts.vaultId,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -892,6 +927,13 @@ export interface AutoHealOptions {
   clusterIslandMaxSize?: number;
   rid?: string;
   config?: VaultConfig;
+  /**
+   * vault_id used to scope process-global tables (discovery_results) to
+   * this vault. Without it, the duplicate-flag pass would surface
+   * (source_path, target_path) pairs from other vaults — generating
+   * noise flags on this vault about notes that don't exist here.
+   */
+  vaultId?: string;
 }
 
 function readVaultFile(abs: string): string | null {
@@ -1210,15 +1252,19 @@ export async function autoHeal(
   }
 
   // ── 5. Near-duplicate flags (from discovery_results) ────────────────
+  // Scope by vault_id; discovery_results is process-global and an
+  // unscoped read here would let vault A's auto-heal fabricate flags
+  // about vault B's (source_path, target_path) pairs.
+  const vaultId = opts.vaultId ?? defaultVaultId();
   let duplicatesFlagged = 0;
   try {
     const rows = getDb()
       .prepare(
         `SELECT id, source_path, target_path, similarity
          FROM discovery_results
-         WHERE similarity > ? AND dismissed_at IS NULL`,
+         WHERE vault_id = ? AND similarity > ? AND dismissed_at IS NULL`,
       )
-      .all(dupThreshold) as Array<{
+      .all(vaultId, dupThreshold) as Array<{
       id: string;
       source_path: string;
       target_path: string;

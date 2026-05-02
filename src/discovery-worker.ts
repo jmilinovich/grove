@@ -42,7 +42,11 @@ startDiscoveryLoop(undefined, undefined, vaultId);
 const healthIntervalMs = process.env.GROVE_HEALTH_INTERVAL_MS
   ? Number(process.env.GROVE_HEALTH_INTERVAL_MS)
   : DEFAULT_HEALTH_INTERVAL_MS;
-startHealthCronLoop(vaultPath, { intervalMs: healthIntervalMs, runImmediately: true });
+startHealthCronLoop(vaultPath, {
+  intervalMs: healthIntervalMs,
+  runImmediately: true,
+  vaultId,
+});
 
 // Graceful shutdown
 let shuttingDown = false;

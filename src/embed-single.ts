@@ -131,11 +131,20 @@ export async function embedFile(vaultPath: string, filePath: string): Promise<vo
   db.loadExtension(findVec0());
   db.pragma("journal_mode = WAL");
 
+  // Scope by collection so embedFile in vault A doesn't wipe vault B's
+  // embeddings when both vaults happen to hold a note at the same relative
+  // path (e.g. Resources/Concepts/AI.md). The unscoped query was a real
+  // cross-vault data-corruption path: every documents-table read at write
+  // time must filter on collection, just like hybrid-search already does.
+  const collection = vaultPath.split("/").filter(Boolean).pop() ?? "";
+
   try {
     // Delete old vectors for this file (any hash that maps to this path)
     const oldHashes = db
-      .prepare("SELECT hash FROM documents WHERE path = ? OR title = ?")
-      .all(filePath, title) as { hash: string }[];
+      .prepare(
+        "SELECT hash FROM documents WHERE (path = ? OR title = ?) AND collection = ?",
+      )
+      .all(filePath, title, collection) as { hash: string }[];
 
     const deleteCv = db.prepare("DELETE FROM content_vectors WHERE hash = ? AND model = ?");
     const deleteVec = db.prepare("DELETE FROM vectors_vec WHERE hash_seq LIKE ?");
