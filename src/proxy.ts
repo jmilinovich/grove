@@ -1510,11 +1510,17 @@ const server = createServer(async (req, res) => {
         linkedSessionId,
       );
 
-      // If trail_id provided, create a trail grant linking this key to the trail
+      // If trail_id provided, create a trail grant linking this key to the trail.
+      // Scope check: the trail must belong to the same vault as the key.
+      // Without this, a member of vault A can supply a trail_id from vault B
+      // at mint time, injecting vault B's path/tag policy onto their vault A
+      // key (policy confusion — not a content leak, but an integrity bypass).
       if (parsed.trail_id) {
         const db = getDb();
-        const trail = db.prepare("SELECT id FROM trails WHERE id = ?").get(parsed.trail_id);
-        if (trail) {
+        const trail = db
+          .prepare("SELECT id, vault_id FROM trails WHERE id = ? LIMIT 1")
+          .get(parsed.trail_id) as { id: string; vault_id: string } | undefined;
+        if (trail && trail.vault_id === boundVaultId) {
           const grantId = "grant_" + randomBytes(4).toString("hex");
           db.prepare(
             "INSERT INTO trail_grants (id, trail_id, grantee_type, grantee_id, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -2241,6 +2247,22 @@ const server = createServer(async (req, res) => {
       if (!admin.ok) { sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" }); return; }
 
       const flagId = decodeURIComponent(resolveFlagMatch[1]);
+
+      // Scope check: the flag must belong to the request's vault. Without
+      // this, an owner of vault A authenticated via /v/<slug-A>/v1/admin/...
+      // can dismiss vault B's health flags by supplying a cross-vault flagId.
+      // resolveFlag() operates by id alone — the vault guard must live here.
+      {
+        const flagRow = getDb()
+          .prepare("SELECT vault_id FROM graph_health_flags WHERE id = ? LIMIT 1")
+          .get(flagId) as { vault_id: string } | undefined;
+        if (!flagRow || flagRow.vault_id !== restCtx.vaultId) {
+          // 404 not 403 so we don't confirm the flag exists in another vault.
+          sendJson(res, 404, { error: "flag not found or already resolved" });
+          return;
+        }
+      }
+
       const updated = resolveFlag(flagId);
       if (!updated) { sendJson(res, 404, { error: "flag not found or already resolved" }); return; }
       sendJson(res, 200, { resolved: flagId });
