@@ -260,14 +260,15 @@ CREATE TABLE IF NOT EXISTS graph_health_flags (
   target_path TEXT,
   details TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  resolved_at TEXT
+  resolved_at TEXT,
+  vault_id TEXT NOT NULL DEFAULT 'vault_00000000'
 );
 
 CREATE INDEX IF NOT EXISTS idx_health_flags_type ON graph_health_flags(flag_type, resolved_at);
 CREATE INDEX IF NOT EXISTS idx_flags_unresolved ON graph_health_flags(resolved_at, created_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_health_flags_unique
-  ON graph_health_flags(flag_type, coalesce(source_path, ''), coalesce(target_path, ''))
-  WHERE resolved_at IS NULL;
+-- The unique-tuple index is created in migrateMultiVault so it can
+-- include vault_id on both fresh installs and pre-P8 databases (where
+-- the column doesn't exist yet at SCHEMA-exec time).
 
 CREATE TABLE IF NOT EXISTS handle_history (
   handle TEXT PRIMARY KEY,
@@ -467,6 +468,28 @@ function migrateMultiVault(database: Database.Database): void {
       }
       database.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_vault ON ${table}(vault_id)`);
     }
+
+    // Build (or rebuild) the graph_health_flags unique-tuple index with
+    // vault_id included so two vaults can each hold the same
+    // (flag_type, source_path, target_path) tuple without one silently
+    // losing its insert via ON CONFLICT DO NOTHING. Idempotent in both
+    // directions: pre-P8 DBs without the column have just had it added
+    // above; older deployments may carry the index in its non-scoped
+    // form and need it dropped first.
+    const flagsIdx = database
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_health_flags_unique'",
+      )
+      .get() as { sql: string | null } | undefined;
+    const indexHasVaultScope = flagsIdx?.sql ? /\bvault_id\b/.test(flagsIdx.sql) : false;
+    if (flagsIdx && !indexHasVaultScope) {
+      database.exec(`DROP INDEX idx_health_flags_unique`);
+    }
+    database.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_health_flags_unique
+         ON graph_health_flags(vault_id, flag_type, coalesce(source_path, ''), coalesce(target_path, ''))
+         WHERE resolved_at IS NULL`,
+    );
 
     database.exec(`
       CREATE TABLE IF NOT EXISTS vault_members (
@@ -1202,6 +1225,12 @@ export interface HealthFlagRow {
  * Insert a health flag if there isn't already an unresolved one for the
  * same (flag_type, source_path, target_path) tuple. Returns the id of the
  * inserted row, or null when the flag was already present.
+ *
+ * `vaultId` is required so flags inserted by per-vault autoHeal land on
+ * the right tenant. Without it the migration's NOT NULL DEFAULT
+ * 'vault_00000000' stamps every vault's flags onto the personal vault —
+ * test-vault's autoHeal output would surface in personal admin's
+ * /v1/admin/health/flags and stay invisible to test-vault admin.
  */
 export function insertHealthFlag(
   id: string,
@@ -1209,15 +1238,16 @@ export function insertHealthFlag(
   sourcePath: string | null,
   targetPath: string | null,
   details: Record<string, unknown>,
+  vaultId: string,
 ): string | null {
   const database = getDb();
   const result = database
     .prepare(
-      `INSERT INTO graph_health_flags (id, flag_type, source_path, target_path, details)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO graph_health_flags (id, flag_type, source_path, target_path, details, vault_id)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT DO NOTHING`,
     )
-    .run(id, flagType, sourcePath, targetPath, JSON.stringify(details));
+    .run(id, flagType, sourcePath, targetPath, JSON.stringify(details), vaultId);
   return result.changes > 0 ? id : null;
 }
 
