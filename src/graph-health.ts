@@ -1280,6 +1280,7 @@ export async function autoHeal(
         a,
         b,
         { similarity: row.similarity, discovery_id: row.id },
+        vaultId,
       );
       if (inserted) {
         duplicatesFlagged++;
@@ -1334,6 +1335,7 @@ export async function autoHeal(
         last_modified_at: new Date(note.mtimeMs).toISOString(),
         age_days: Math.floor((now.getTime() - note.mtimeMs) / DAY_MS),
       },
+      vaultId,
     );
     if (inserted) {
       longOrphansFlagged++;
@@ -1396,6 +1398,7 @@ export async function autoHeal(
       memberPaths[0] ?? null,
       null,
       { size: members.length, members: memberPaths },
+      vaultId,
     );
     if (inserted) {
       clusterIslandsFlagged++;
