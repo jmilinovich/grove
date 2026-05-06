@@ -112,6 +112,12 @@ import {
   type VaultContext,
 } from "./vault-router.js";
 import { adminAuth, isPlatformOwner, type AdminAuthResult } from "./admin-auth.js";
+import {
+  addToWaitlist,
+  listWaitlist,
+  waitlistCount,
+  InvalidWaitlistEmailError,
+} from "./waitlist.js";
 
 installCrashHandlers("grove-proxy");
 
@@ -1298,6 +1304,61 @@ const server = createServer(async (req, res) => {
     }
     // Always return success to prevent email enumeration
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // ── Hosted-product waitlist ──────────────────────────────────────────
+  if (url.pathname === "/waitlist" && req.method === "POST") {
+    // Per-IP write-bucket. Same shape as magic-link / admin-login: a
+    // single-IP attacker spraying thousands of bogus emails is the
+    // realistic abuse vector. The 20 writes/min ceiling is well above
+    // any legitimate burst.
+    const wlIp = clientIp(req);
+    const wlLimit = rateLimiter.check(`waitlist:${wlIp}`, "write");
+    if (!wlLimit.allowed) {
+      sendJson(res, 429, { error: "rate_limited", retry_after_ms: wlLimit.retryAfterMs });
+      return;
+    }
+    rateLimiter.record(`waitlist:${wlIp}`, "write");
+
+    let body: string;
+    try { body = await readBody(req); } catch { sendJson(res, 400, { error: "read error" }); return; }
+    if (body.length > 4096) { sendJson(res, 413, { error: "body too large" }); return; }
+    let parsed: any;
+    try { parsed = JSON.parse(body); } catch { sendJson(res, 400, { error: "invalid json" }); return; }
+
+    const email = parsed?.email;
+    const source = typeof parsed?.source === "string" ? parsed.source : "unknown";
+    if (!email || typeof email !== "string") {
+      sendJson(res, 400, { error: "email required" });
+      return;
+    }
+
+    try {
+      const userAgent = req.headers["user-agent"] ?? null;
+      const result = await addToWaitlist({ email, source, ip: wlIp, userAgent });
+      sendJson(res, 200, { ok: true, added: result.added });
+    } catch (err) {
+      if (err instanceof InvalidWaitlistEmailError) {
+        sendJson(res, 400, { error: "invalid email" });
+        return;
+      }
+      console.error("[waitlist] insert failed:", err);
+      sendJson(res, 500, { error: "internal error" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/admin/waitlist" && req.method === "GET") {
+    const admin = adminAuth(req);
+    if (!admin.ok) {
+      sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" });
+      return;
+    }
+    const limitParam = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 500;
+    const entries = listWaitlist(limit);
+    sendJson(res, 200, { count: waitlistCount(), entries });
     return;
   }
 
