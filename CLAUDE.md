@@ -50,6 +50,21 @@ sudo pm2 logs grove-server   # tail logs
 Embeddings go direct to Voyage AI (`voyage-4-large`, 1024-dim) from grove-server and grove-discovery — no local embedding service. The earlier self-hosted TEI / sentence-transformers setup was retired once Voyage's hosted API proved both faster and cheaper than running embeddings on the same box.
 Vault syncs every 5 min via cron. Keys live at `~/.grove/keys.json`.
 
+### Checking hosted-product waitlist signups
+
+Signups from `grove.md` land in the `waitlist` table on prod (`/root/.grove/grove.db`) and trigger a Resend notification email to `GROVE_WAITLIST_NOTIFY_EMAIL` (default `jrmilinovich@gmail.com`). Two ways to read them:
+
+```bash
+# Via SSH + sqlite — newest first
+ssh -i ~/.ssh/grove-aws.pem ubuntu@52.37.76.231 \
+  'sudo sqlite3 /root/.grove/grove.db "SELECT created_at, email, source FROM waitlist ORDER BY created_at DESC LIMIT 50"'
+
+# Via the admin endpoint (requires admin session cookie or bearer token)
+curl -sS -H "Authorization: Bearer $GROVE_ADMIN_TOKEN" https://api.grove.md/admin/waitlist | jq
+```
+
+The endpoint returns `{count, entries}` — `entries` is newest first, capped at `?limit=N` (max 5000, default 500). Inserts are idempotent (`INSERT OR IGNORE` on `email`), so duplicate clicks don't double-notify.
+
 ## Code conventions
 
 - **TypeScript, strict mode.** No `any` unless interfacing with untyped externals.
