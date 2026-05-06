@@ -97,3 +97,53 @@ export async function sendVaultInviteEmail(
     console.error(`[auth] Resend API error: ${res.status} ${body}`);
   }
 }
+
+/**
+ * Hosted-product waitlist notification. Sent to GROVE_WAITLIST_NOTIFY_EMAIL
+ * (defaults to admin) every time a fresh email signs up via POST /waitlist.
+ * `reply_to` is the signup itself so a one-tap reply lands in the right
+ * inbox without anyone copy-pasting addresses.
+ */
+export async function sendWaitlistNotificationEmail(opts: {
+  email: string;
+  source: string;
+  ip?: string | null;
+  userAgent?: string | null;
+}): Promise<void> {
+  const apiKey = process.env.RESEND_API_KEY;
+  const to = process.env.GROVE_WAITLIST_NOTIFY_EMAIL ?? "jrmilinovich@gmail.com";
+  const at = new Date().toISOString();
+  const subject = `Grove waitlist: ${opts.email}`;
+  const text = [
+    `Email:  ${opts.email}`,
+    `Source: ${opts.source}`,
+    `When:   ${at}`,
+    `IP:     ${opts.ip ?? "unknown"}`,
+    `UA:     ${opts.userAgent ?? "unknown"}`,
+  ].join("\n");
+
+  if (!apiKey) {
+    console.log(`[waitlist] (no RESEND_API_KEY) ${opts.email} via ${opts.source}`);
+    return;
+  }
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: process.env.GROVE_FROM_EMAIL ?? "Grove <noreply@grove.md>",
+      to,
+      reply_to: opts.email,
+      subject,
+      text,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    console.error(`[waitlist] Resend API error: ${res.status} ${body}`);
+  }
+}
