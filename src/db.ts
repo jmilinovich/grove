@@ -329,6 +329,7 @@ export function createSchema(): void {
   migrateMultiVault(database);
   migrateVaultMembersBackfill(database);
   migrateApiKeyVaultId(database);
+  migrateVaultProvenanceRequired(database);
 }
 
 /**
@@ -712,6 +713,34 @@ function migrateUserRoles(database: Database.Database): void {
   if (cols.some((c) => c.name === "role")) return;
   database.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'");
   database.exec("UPDATE users SET role = 'owner' WHERE id = 'user_00000000'");
+}
+
+/**
+ * Phase C2: per-vault `provenance_required` column on `vaults` table.
+ * When set to 1 / true, the ecosystem generator emits
+ * `GROVE_REQUIRE_PROVENANCE_<slug>=true` on grove-proxy AND a global
+ * `GROVE_REQUIRE_PROVENANCE=true` on the per-vault server. Default 0 —
+ * tenants opt in via `grove vault set-provenance-required <slug> true`.
+ *
+ * Migration is idempotent and seeds the personal vault (slug=personal)
+ * to true so the prior hardcoded behavior is preserved.
+ */
+function migrateVaultProvenanceRequired(database: Database.Database): void {
+  const exists = database
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='vaults'")
+    .get();
+  if (!exists) return;
+  const cols = database.prepare("PRAGMA table_info(vaults)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "provenance_required")) return;
+  database.exec(
+    "ALTER TABLE vaults ADD COLUMN provenance_required INTEGER NOT NULL DEFAULT 0",
+  );
+  // Preserve the prior hardcoded slug==="personal" behavior — the
+  // ecosystem generator already enabled the flag for personal in
+  // PR #136. Without seeding, regenerating with the new code path
+  // would silently disable strict mode on personal until the operator
+  // ran `grove vault set-provenance-required personal true`.
+  database.exec("UPDATE vaults SET provenance_required = 1 WHERE slug = 'personal'");
 }
 
 /** Add display_name column to existing users tables that lack it (P15-1). */
