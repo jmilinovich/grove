@@ -12,6 +12,8 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+import { applyFolderHeuristic } from "./folder-heuristics.js";
+
 export type ClassifierVoice = "durable" | "perishable" | "unknown";
 export type Confidence = "low" | "medium" | "high";
 
@@ -317,29 +319,33 @@ export interface ClassifierResult {
 }
 
 /**
- * Classify a single note. Applies every rule; if any hits, picks the
- * highest-confidence + most-specific result.
+ * Classify a single note. Applies every content rule first; if none
+ * match, falls back to the folder heuristic. Aggregates multiple
+ * matches with content rules winning over folder rules.
  *
  * Voice resolution:
- *   - If multiple rules agree on voice, take the highest confidence.
- *   - If rules disagree, default to "unknown" for human review.
- *   - If no rule matches, default to "unknown".
+ *   - Content rules: if multiple agree, take highest confidence.
+ *     If they disagree, fall back to "unknown" for human review.
+ *   - If no content rule matches, apply the folder heuristic
+ *     (folder-heuristics.ts). Folder rules are catch-all defaults.
+ *   - If neither matches, default to "unknown".
  */
 export function classifyNote(input: ClassifyInput): ClassifierResult {
   const sig = readSignals(input);
-  const hits: RuleHit[] = [];
+  const contentHits: RuleHit[] = [];
   for (const rule of RULES) {
     const hit = rule.apply(input, sig);
-    if (hit) hits.push(hit);
+    if (hit) contentHits.push(hit);
   }
 
-  // Aggregate into a single decision.
   let voice: ClassifierVoice = "unknown";
   let confidence: Confidence = "low";
-  if (hits.length > 0) {
+  const allSignals: RuleHit[] = [...contentHits];
+
+  if (contentHits.length > 0) {
     // Group by voice; take the highest-confidence vote per voice.
     const byVoice = new Map<ClassifierVoice, Confidence>();
-    for (const h of hits) {
+    for (const h of contentHits) {
       const existing = byVoice.get(h.voice);
       if (!existing || rankConfidence(h.confidence) > rankConfidence(existing)) {
         byVoice.set(h.voice, h.confidence);
@@ -350,9 +356,17 @@ export function classifyNote(input: ClassifyInput): ClassifierResult {
       voice = v;
       confidence = c;
     } else {
-      // Disagreement — leave for human review.
+      // Disagreement among content rules — leave for human review.
       voice = "unknown";
       confidence = "low";
+    }
+  } else {
+    // No content rule fired — fall back to folder heuristic.
+    const folderHit = applyFolderHeuristic(input, sig);
+    if (folderHit) {
+      allSignals.push(folderHit);
+      voice = folderHit.voice;
+      confidence = folderHit.confidence;
     }
   }
 
@@ -360,7 +374,7 @@ export function classifyNote(input: ClassifyInput): ClassifierResult {
     path: input.notePath,
     proposed_voice: voice,
     confidence,
-    signals: hits,
+    signals: allSignals,
     excerpt: sig.body.slice(0, 200).replace(/\s+/g, " ").trim(),
     byte_length: sig.byteLength,
   };

@@ -1,21 +1,9 @@
-// Folder-path heuristics for legacy backfill — DRAFT.
+// Folder-path heuristics for legacy backfill.
 //
-// John flagged this as a separate concern from the content rules in
-// rules.ts: "There are some heuristics we can use to label provenance
-// even for the legacy stuff based on the folder path they are in. I
-// can help with this after the rest." (2026-05-07)
-//
-// This file is the draft starting point. Each entry is annotated with
-// a confidence + a "John, confirm?" comment. Folder rules are HIGH-
-// PRECISION DEFAULTS for the bulk backfill — they fire when no other
-// content rule fires, so they're the catch-all for the long tail.
-//
-// Once John signs off (replace TODO comments with locked-in
-// rationales), wire these into rules.ts as a final set of rules
-// applied AFTER the content rules. Order matters: content rules win
-// over folder rules so e.g. an interview-prep tag in Resources/People/
-// still classifies as perishable even though the folder default is
-// durable.
+// John signed off on the rule table 2026-05-07 (AskUserQuestion round).
+// These rules fire as a fallback in classifyNote() AFTER content rules,
+// so e.g. an interview-prep tag in Resources/People/ still classifies
+// as perishable even though the folder default is durable.
 
 import type { ClassifyInput, NoteSignals, RuleHit } from "./rules.js";
 
@@ -24,38 +12,31 @@ interface FolderRule {
   voice: "durable" | "perishable" | "unknown";
   confidence: "low" | "medium" | "high";
   rationale: string;
-  /** Free-text questions for John before this rule ships. */
-  questions?: string;
 }
 
 export const FOLDER_RULES: FolderRule[] = [
-  // ── Sources/ ──────────────────────────────────────────────────────
-  // Public material curated by John. The X-bookmark subset is already
-  // covered in rules.ts via `sources_research`. This is the catch-all
-  // for non-bookmark Sources/ entries.
+  // ── Sources/ — curated public material ───────────────────────────
+  // X-bookmark subset is already covered in rules.ts via
+  // sources_research; this catches non-bookmark Sources/ entries.
   {
     prefix: "Sources/",
     voice: "durable",
     confidence: "high",
     rationale: "Sources/ — curated public material; durable cited research",
-    questions: "Confirm? Anything in Sources/ ever NOT durable (e.g. Sources/working/)?",
   },
 
-  // ── Areas/ — long-running life domains ────────────────────────────
-  // These are John's own ongoing notes. Not Claude-synthesized.
+  // ── Areas/ — long-running life domains John writes himself ──────
   {
     prefix: "Areas/Health/",
     voice: "durable",
     confidence: "high",
-    rationale: "Areas/Health/ — John's own health tracking and notes",
-    questions: "Confirm? Any AI-generated health summaries here?",
+    rationale: "Areas/Health/ — John's own health tracking",
   },
   {
     prefix: "Areas/Finances/",
     voice: "durable",
     confidence: "high",
-    rationale: "Areas/Finances/ — John's own financial planning notes",
-    questions: "Confirm? Any AI-generated comp/finance analyses?",
+    rationale: "Areas/Finances/ — John's own financial planning",
   },
   {
     prefix: "Areas/Meal Planning/",
@@ -64,28 +45,23 @@ export const FOLDER_RULES: FolderRule[] = [
     rationale: "Areas/Meal Planning/ — John's own meal planning",
   },
 
-  // ── Areas/Business/ExecuSystems — has its own provenance system ──
-  // ExecuSystems already uses prose_by + last_edited_by + confidence
-  // frontmatter. The content rule in rules.ts catches `prose_by:
-  // Claude` already. This folder rule is the default for entries
-  // WITHOUT explicit prose_by — they're John's own.
+  // ── Areas/Business/ExecuSystems/ — has its own provenance system ──
+  // The content rule prose_by_claude in rules.ts catches notes with
+  // explicit prose_by frontmatter. This folder default fires only on
+  // notes WITHOUT prose_by — those are John's own.
   {
     prefix: "Areas/Business/ExecuSystems/",
     voice: "durable",
     confidence: "medium",
-    rationale: "Areas/Business/ExecuSystems/ — has rich provenance frontmatter; default to durable when no explicit prose_by",
-    questions:
-      "Confirm? Should we instead leave these unknown so the existing prose_by/confidence frontmatter is the only signal?",
+    rationale: "Areas/Business/ExecuSystems/ — durable when no explicit prose_by frontmatter (rich provenance system handles the AI-authored cases via content rule)",
   },
 
-  // ── Areas/Business/Legacy Holdings ───────────────────────────────
+  // ── Areas/Business/Legacy Holdings/ — John's own strategy vault ──
   {
     prefix: "Areas/Business/Legacy Holdings/",
     voice: "durable",
     confidence: "low",
-    rationale: "Areas/Business/Legacy Holdings/ — John's own strategy vault",
-    questions:
-      "Low confidence — John, do these atomic notes have any AI-synthesized content that should be perishable?",
+    rationale: "Areas/Business/Legacy Holdings/ — John's own strategy vault (low confidence; flag for manual review during backfill)",
   },
 
   // ── Resources/Pantry/ — kitchen inventory ────────────────────────
@@ -93,83 +69,73 @@ export const FOLDER_RULES: FolderRule[] = [
     prefix: "Resources/Pantry/",
     voice: "durable",
     confidence: "high",
-    rationale: "Resources/Pantry/ — John's kitchen inventory",
+    rationale: "Resources/Pantry/ — kitchen inventory",
   },
 
-  // ── Resources/Places/ — named locations ──────────────────────────
+  // ── Resources/Places/ — Claude-summarized public info OK ────────
+  // John signed off: AI-summarized public info is durable (cited
+  // research), same framing as Sources/.
   {
     prefix: "Resources/Places/",
     voice: "durable",
     confidence: "medium",
-    rationale: "Resources/Places/ — geographic / venue notes; John's own observations",
-    questions: "Confirm? Could a place note be Claude-summarized from a web search?",
+    rationale: "Resources/Places/ — geographic/venue notes; AI-summarized public info treated as cited research (durable)",
   },
 
-  // ── Resources/Companies/ — orgs in John's orbit ─────────────────
+  // ── Resources/Companies/ — same framing as Places/ ──────────────
   {
     prefix: "Resources/Companies/",
     voice: "durable",
     confidence: "medium",
-    rationale: "Resources/Companies/ — companies John has touched professionally",
-    questions:
-      "Confirm? Some company notes may be Claude-synthesized from public material — should those still be durable (cited research) or perishable (Claude-pattern)?",
+    rationale: "Resources/Companies/ — orgs in John's orbit; AI-summarized public info treated as cited research (durable)",
   },
 
-  // ── Resources/Projects/ — active personal projects ──────────────
+  // ── Resources/Projects/ — John's active personal projects ───────
   {
     prefix: "Resources/Projects/",
     voice: "durable",
     confidence: "medium",
-    rationale: "Resources/Projects/ — John's projects (Grove, Aesthetic, etc.)",
+    rationale: "Resources/Projects/ — John's own projects (Grove, Aesthetic, etc.)",
   },
 
-  // ── Notes/working/ — working scratchpad ─────────────────────────
-  {
-    prefix: "Notes/working/",
-    voice: "perishable",
-    confidence: "medium",
-    rationale: "Notes/working/ — in-progress thinking, often AI-assisted",
-    questions: "Confirm? Or should working notes be unknown (no stamp, leave for human)?",
-  },
-
-  // ── Notes/pinch/ — ??? unknown to me ─────────────────────────────
+  // ── Notes/pinch/ — Pinch agent project ───────────────────────────
+  // John (2026-05-07): Notes/pinch/ holds work for an agent named
+  // Pinch — PLAN.md, market research, beats, outreach. All
+  // project-related; default durable. Pinch's outputs (e.g. beats/)
+  // ARE Claude-generated but they're factual machine outputs, not
+  // synthesis — durable is the right call.
   {
     prefix: "Notes/pinch/",
-    voice: "unknown",
-    confidence: "low",
-    rationale: "Notes/pinch/ — DRAFT: I don't know what this is. John, please define.",
-    questions:
-      "What is Notes/pinch/? Looks like a project (PLAN.md + beats/ + outreach/). Voice should depend on what kind of content lives here.",
+    voice: "durable",
+    confidence: "medium",
+    rationale: "Notes/pinch/ — Pinch agent project documentation, plans, and outputs",
   },
 
-  // ── Archives/ — cold storage ─────────────────────────────────────
+  // ── Archives/ — cold storage; preserve original voice ───────────
+  // Don't blindly stamp archived content — it carries its pre-archival
+  // voice. Leave as unknown so backfill defers to whatever the
+  // archived_from path's voice was (or human review).
   {
     prefix: "Archives/",
     voice: "unknown",
     confidence: "high",
-    rationale: "Archives/ — preserve historical voice; archive is a marker not a re-classification",
-    questions:
-      "Confirm? Or should we trust the original frontmatter to declare voice (e.g. archived_from + the original note's voice)?",
+    rationale: "Archives/ — preserves historical voice; archive is a marker, not a re-classification",
   },
 
-  // ── Inbox/ — already in content rules but doubling here ─────────
+  // ── Inbox/ — content rule already covers this ────────────────────
   {
     prefix: "Inbox/",
     voice: "unknown",
     confidence: "high",
-    rationale: "Inbox/ — scratchpad; needs human review for promotion to a typed folder",
+    rationale: "Inbox/ — scratchpad; needs human review for promotion",
   },
 ];
 
 /**
  * Apply the folder rules. Returns the FIRST matching rule (rules are
- * ordered specific-prefix first, generic-prefix last). Use as a
+ * ordered specific-prefix first, generic-prefix last). Used as a
  * fallback in rules.ts:classifyNote() AFTER all content rules have
  * been tried.
- *
- * UNFINISHED: this function is exported but NOT yet wired into
- * rules.ts:classifyNote(). Wire after John signs off on the rule
- * table above.
  */
 export function applyFolderHeuristic(
   input: ClassifyInput,
