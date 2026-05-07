@@ -64,6 +64,23 @@ describe("ecosystem-gen (P8-A4)", () => {
     expect(out).toMatch(/"name": "grove-discovery-team"[\s\S]*?"GROVE_VAULT_SLUG": "team"/);
   });
 
+  it("sets GROVE_REQUIRE_PROVENANCE=true on grove-server-personal only", () => {
+    // Phase C2: only the `personal` vault has all callers migrated to
+    // pass provenance on every write (this CLI's garden skills,
+    // image-enrich, vault-life CLAUDE.md mandate). Other tenants stay
+    // default-off until their callers migrate; flipping the flag for
+    // them would break their writes.
+    const out = generateEcosystemConfig(vaults);
+    expect(out).toMatch(/"name": "grove-server-personal"[\s\S]*?"GROVE_REQUIRE_PROVENANCE": "true"/);
+    // Negative: non-personal servers must NOT have the flag set.
+    const teamServerBlock = out.match(/"name": "grove-server-team"[\s\S]*?(?=\}\s*,?\s*\{)/);
+    expect(teamServerBlock?.[0] ?? "").not.toContain("GROVE_REQUIRE_PROVENANCE");
+    // Negative: discovery worker (which bypasses handleWriteNote
+    // entirely) must NOT have the flag — it's irrelevant there.
+    const discoveryBlock = out.match(/"name": "grove-discovery-personal"[\s\S]*?(?=\}\s*,?\s*\{)/);
+    expect(discoveryBlock?.[0] ?? "").not.toContain("GROVE_REQUIRE_PROVENANCE");
+  });
+
   it("wraps tsx invocations in bash so prod without node_modules/.bin/tsx still boots", () => {
     // CI's `npm ci --production` skips devDependencies (where tsx lives),
     // so a direct `script: <repo>/node_modules/.bin/tsx` reference dies on

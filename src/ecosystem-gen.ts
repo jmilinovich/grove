@@ -107,18 +107,29 @@ export function generateEcosystemConfig(
   // a working BM25 HTTP server is in place.
 
   for (const v of vaults) {
+    // Per-vault env. Provenance is required only on the `personal` vault
+    // for now — that's the only vault whose ecosystem (this CLI's garden
+    // skills, image-enrich, vault-life CLAUDE.md) has fully migrated to
+    // pass provenance on every write. Other tenants (ryan, sharpshoot,
+    // test-vault) stay default-off until their callers are migrated; the
+    // flag is opt-in per vault to avoid breaking writes in tenants
+    // we don't control.
+    const serverEnv: Record<string, string> = {
+      NODE_ENV: "production",
+      GROVE_VAULT: v.git_repo_path,
+      GROVE_VAULT_ID: v.id,
+      GROVE_VAULT_SLUG: v.slug,
+      GROVE_SERVER_PORT: String(v.server_port),
+    };
+    if (v.slug === "personal") {
+      serverEnv.GROVE_REQUIRE_PROVENANCE = "true";
+    }
     apps.push({
       name: `grove-server-${v.slug}`,
       script: tsxRunner,
       args: tsxArgs("server.ts"),
       cwd: repoRoot,
-      env_static: {
-        NODE_ENV: "production",
-        GROVE_VAULT: v.git_repo_path,
-        GROVE_VAULT_ID: v.id,
-        GROVE_VAULT_SLUG: v.slug,
-        GROVE_SERVER_PORT: String(v.server_port),
-      },
+      env_static: serverEnv,
       kill_timeout: 60_000,
       autorestart: true,
       max_restarts: 10,
