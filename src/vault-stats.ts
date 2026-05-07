@@ -229,14 +229,19 @@ function computeFreshness(fileInfos: FileInfo[]): VaultStats["freshness"] {
 
 // ── Graph Section ────────────────────────────────────────────────────
 
-// Single-flight per vault path. analyzeGraph + brandes are CPU-bound
-// (Brandes' algorithm on the full graph) and on a large vault take 30+
-// seconds. Without this dedupe the 5-min refresh timer will start a
-// fresh walk every tick even if the previous one is still running — by
-// the third tick that's three concurrent Brandes' computations chewing
-// through the proxy's event loop. The outer Promise.race timeout in
-// computeVaultStats lets a refreshStats() caller resolve fast, but the
-// inner work tracked here keeps running and the next caller reuses it.
+// Single-flight per vault path. analyzeGraph walks every .md and builds
+// adjacency; on big vaults that's seconds even without Brandes. Without
+// this dedupe the 5-min refresh timer would start a fresh walk every tick
+// while the previous is still running. The outer Promise.race timeout in
+// computeVaultStats lets a refreshStats() caller resolve fast; the inner
+// work tracked here keeps running and the next caller reuses it.
+//
+// Brandes' betweenness centrality (the dominant cost — O(n·(n+e))) is
+// SKIPPED on this path: VaultStats.graph never exposes `bridges`, so the
+// computation was being thrown away. On the 1949-node personal vault that
+// alone took ~28s of the 30s budget. Skipping it drops graph-section
+// compute to ~1-2s, keeps the MCP tool's direct analyzeGraph() call
+// returning bridges as before.
 const graphInflightByPath = new Map<string, Promise<Awaited<ReturnType<typeof analyzeGraph>>>>();
 
 function analyzeGraphSingleflight(
@@ -244,7 +249,7 @@ function analyzeGraphSingleflight(
 ): Promise<Awaited<ReturnType<typeof analyzeGraph>>> {
   const existing = graphInflightByPath.get(vaultPath);
   if (existing) return existing;
-  const p = analyzeGraph(vaultPath).finally(() => {
+  const p = analyzeGraph(vaultPath, { skipBridges: true }).finally(() => {
     graphInflightByPath.delete(vaultPath);
   });
   graphInflightByPath.set(vaultPath, p);
