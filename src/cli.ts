@@ -927,10 +927,31 @@ export function walkIngestSources(
 }
 
 async function cmdIngest(config: Config, dir: string, flags: Record<string, string | boolean>): Promise<CmdResult> {
-  if (!dir) throw new CliError("bad_request", "Usage: grove ingest <dir> [--recursive] [--dry-run] [--yes]", 1);
+  if (!dir) {
+    throw new CliError(
+      "bad_request",
+      "Usage: grove ingest <dir> [--recursive] [--dry-run] [--yes] [--voice=durable|perishable] [--by=<id>]",
+      1,
+    );
+  }
   const dryRun = !!flags["dry-run"];
   const recursive = !!flags.recursive || !!flags.r;
   const skipConfirm = !!flags.yes || !!flags.y;
+
+  // Provenance for ingested files. Default to durable + by=human since
+  // ingestion is "the user pulled an already-existing markdown file
+  // into the vault" — equivalent to John typing it. Override via
+  // --voice and --by if the source is actually AI-synthesized (e.g.,
+  // pulling Claude-generated drafts from a working directory).
+  const ingestVoice = (flags.voice as string | undefined) ?? "durable";
+  if (ingestVoice !== "durable" && ingestVoice !== "perishable") {
+    throw new CliError(
+      "bad_request",
+      `--voice must be "durable" or "perishable" (got "${ingestVoice}")`,
+      1,
+    );
+  }
+  const ingestBy = (flags.by as string | undefined) ?? "human";
 
   // Verify dir exists and has .md/.txt files (recursing into subfolders if requested).
   let mdFiles: Array<{ name: string; absPath: string }>;
@@ -1095,6 +1116,13 @@ async function cmdIngest(config: Config, dir: string, flags: Record<string, stri
         path: note.targetPath,
         frontmatter: JSON.stringify(fm),
         content: note.content,
+        provenance: {
+          voice: ingestVoice,
+          by: ingestBy,
+          written_at: new Date().toISOString(),
+          source: `grove ingest ${dir}`,
+          reason: `bulk-ingested from ${note.filename}`,
+        },
       });
       const result = tryParseJson(raw) ?? {};
       results.push({ path: result.path ?? note.targetPath, status: result.action ?? "created" });
@@ -1789,6 +1817,63 @@ async function cmdVaultSeedKey(
     _fmt: () =>
       `\nSeed key created for vault "${slug}":\n  id:   ${data.key_id}\n  name: ${data.name}\n\nToken (shown once, save it now):\n\n  ${data.token}\n\nUse it to seed content, then revoke:\n  grove keys revoke ${data.key_id}\n`,
   };
+}
+
+/**
+ * `grove vault set-provenance-required <slug> <true|false>` — flip the
+ * provenance_required column for a vault. The ecosystem generator
+ * reads this on next regen and emits GROVE_REQUIRE_PROVENANCE accordingly.
+ *
+ * Operator runs this on the box (CLI uses local DB). Caller should
+ * follow up with `grove vault regen` + `pm2 reload` to pick up the
+ * env change without redeploying.
+ */
+async function cmdVaultSetProvenanceRequired(
+  slug: string,
+  value: string,
+): Promise<CmdResult> {
+  if (!slug) {
+    throw new CliError(
+      "bad_request",
+      "Usage: grove vault set-provenance-required <slug> <true|false>",
+      1,
+    );
+  }
+  const normalized = value?.toLowerCase();
+  if (normalized !== "true" && normalized !== "false" && normalized !== "1" && normalized !== "0") {
+    throw new CliError(
+      "bad_request",
+      `Value must be true|false|1|0; got "${value}"`,
+      1,
+    );
+  }
+  const required = normalized === "true" || normalized === "1" ? 1 : 0;
+
+  const { default: Database } = await import("better-sqlite3");
+  const dbPath = process.env.GROVE_DB_PATH ?? join(homedir(), ".grove", "grove.db");
+  const db = new Database(dbPath);
+  try {
+    const row = db
+      .prepare("SELECT id, slug, provenance_required FROM vaults WHERE slug = ?")
+      .get(slug) as { id: string; slug: string; provenance_required: number } | undefined;
+    if (!row) {
+      throw new CliError("not_found", `No vault with slug "${slug}"`, 1);
+    }
+    db.prepare("UPDATE vaults SET provenance_required = ? WHERE slug = ?").run(required, slug);
+    return {
+      ok: true,
+      slug,
+      provenance_required: required,
+      previous: row.provenance_required,
+      _fmt: () =>
+        `vault "${slug}": provenance_required ${row.provenance_required} → ${required}\n` +
+        (required === 1
+          ? "\nNext steps:\n  1. Ensure all callers (Claude.ai prompts, garden skills, CLI ingestion) pass provenance.\n  2. Run `grove vault regen && sudo pm2 reload grove-server-" + slug + " grove-proxy`.\n  3. Verify with a test write — should reject without provenance.\n"
+          : "\nStrict mode disabled. Existing provenance trailers on prior commits remain valid.\n"),
+    };
+  } finally {
+    db.close();
+  }
 }
 
 // ── Vault encryption (remote, via /v1/admin/vault API) ─────────
@@ -2787,8 +2872,14 @@ async function main() {
           result = await cmdVaultSeedKey(config, slugArg, flags);
           break;
         }
+        case "set-provenance-required": {
+          const slugArg = positionals[1] ?? "";
+          const valueArg = positionals[2] ?? "";
+          result = await cmdVaultSetProvenanceRequired(slugArg, valueArg);
+          break;
+        }
         default:
-          throw new CliError("bad_request", `Unknown vault subcommand: ${sub}\nUsage: grove vault [status|encrypt|unlock|lock|create|regen|seed-key]`, 1);
+          throw new CliError("bad_request", `Unknown vault subcommand: ${sub}\nUsage: grove vault [status|encrypt|unlock|lock|create|regen|seed-key|set-provenance-required]`, 1);
       }
       emitResult(result, flags);
       return;

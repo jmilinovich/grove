@@ -19,6 +19,10 @@ export interface VaultRow {
   git_repo_path: string;
   server_port: number;
   discovery_port: number;
+  /** When 1, ecosystem generator sets GROVE_REQUIRE_PROVENANCE=true on
+   *  grove-server-<slug> AND GROVE_REQUIRE_PROVENANCE_<slug>=true on
+   *  grove-proxy (so REST writes also enforce). Default 0. */
+  provenance_required: number;
 }
 
 export interface EcosystemOptions {
@@ -49,7 +53,8 @@ const DEFAULT_QMD_BIN = "/usr/bin/qmd";
 export function readProvisionedVaults(db: Database.Database): VaultRow[] {
   return db
     .prepare(
-      `SELECT id, slug, git_repo_path, server_port, discovery_port
+      `SELECT id, slug, git_repo_path, server_port, discovery_port,
+              provenance_required
          FROM vaults
         WHERE server_port IS NOT NULL AND discovery_port IS NOT NULL
         ORDER BY slug ASC`,
@@ -92,7 +97,7 @@ export function generateEcosystemConfig(
     QMD_PORT: String(qmdPort),
   };
   for (const v of vaults) {
-    if (v.slug === "personal") {
+    if (v.provenance_required === 1) {
       proxyEnv[`GROVE_REQUIRE_PROVENANCE_${v.slug}`] = "true";
     }
   }
@@ -119,13 +124,11 @@ export function generateEcosystemConfig(
   // a working BM25 HTTP server is in place.
 
   for (const v of vaults) {
-    // Per-vault env. Provenance is required only on the `personal` vault
-    // for now — that's the only vault whose ecosystem (this CLI's garden
-    // skills, image-enrich, vault-life CLAUDE.md) has fully migrated to
-    // pass provenance on every write. Other tenants (ryan, sharpshoot,
-    // test-vault) stay default-off until their callers are migrated; the
-    // flag is opt-in per vault to avoid breaking writes in tenants
-    // we don't control.
+    // Per-vault env. Provenance enforcement is opt-in via the
+    // vaults.provenance_required column (default 0). Tenants opt in
+    // when their callers — Claude.ai prompts, garden skills, CLI
+    // ingestion — have all been migrated to pass provenance on every
+    // write. Flip via `grove vault set-provenance-required <slug> true`.
     const serverEnv: Record<string, string> = {
       NODE_ENV: "production",
       GROVE_VAULT: v.git_repo_path,
@@ -133,7 +136,7 @@ export function generateEcosystemConfig(
       GROVE_VAULT_SLUG: v.slug,
       GROVE_SERVER_PORT: String(v.server_port),
     };
-    if (v.slug === "personal") {
+    if (v.provenance_required === 1) {
       serverEnv.GROVE_REQUIRE_PROVENANCE = "true";
     }
     apps.push({

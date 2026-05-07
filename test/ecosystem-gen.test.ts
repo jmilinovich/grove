@@ -21,6 +21,8 @@ describe("ecosystem-gen (P8-A4)", () => {
       git_repo_path: "/root/life",
       server_port: 8190,
       discovery_port: 8091,
+      // Migration seeds personal=1 to preserve the prior hardcoded behavior
+      provenance_required: 1,
     },
     {
       id: "vault_team",
@@ -28,6 +30,7 @@ describe("ecosystem-gen (P8-A4)", () => {
       git_repo_path: "/root/vaults/team",
       server_port: 8191,
       discovery_port: 8092,
+      provenance_required: 0,
     },
   ];
 
@@ -76,6 +79,25 @@ describe("ecosystem-gen (P8-A4)", () => {
     // Negative: proxy must NOT have flags for non-personal tenants.
     const proxyBlock = out.match(/"name": "grove-proxy"[\s\S]*?(?=\}\s*,?\s*\{)/);
     expect(proxyBlock?.[0] ?? "").not.toContain("GROVE_REQUIRE_PROVENANCE_team");
+  });
+
+  it("flips strict mode based on vaults.provenance_required, not slug", () => {
+    // Per-vault opt-in via the DB column. Take a fixture where `team`
+    // has provenance_required=1 and `personal` has =0 — the inverted
+    // case from the default — and confirm flag follows the column,
+    // not the slug.
+    const inverted: VaultRow[] = [
+      { ...vaults[0], provenance_required: 0 },
+      { ...vaults[1], provenance_required: 1 },
+    ];
+    const out = generateEcosystemConfig(inverted);
+    expect(out).toMatch(/"name": "grove-server-team"[\s\S]*?"GROVE_REQUIRE_PROVENANCE": "true"/);
+    const personalServer = out.match(/"name": "grove-server-personal"[\s\S]*?(?=\}\s*,?\s*\{)/);
+    expect(personalServer?.[0] ?? "").not.toContain("GROVE_REQUIRE_PROVENANCE");
+    // Proxy mirrors via per-vault env vars
+    expect(out).toMatch(/"name": "grove-proxy"[\s\S]*?"GROVE_REQUIRE_PROVENANCE_team": "true"/);
+    const proxyBlock = out.match(/"name": "grove-proxy"[\s\S]*?(?=\}\s*,?\s*\{)/);
+    expect(proxyBlock?.[0] ?? "").not.toContain("GROVE_REQUIRE_PROVENANCE_personal");
   });
 
   it("sets GROVE_REQUIRE_PROVENANCE=true on grove-server-personal only", () => {
