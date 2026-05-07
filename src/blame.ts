@@ -60,8 +60,14 @@ export async function computeProvenanceBlame(
   filePath: string,
   sourceHash: string,
 ): Promise<BlameSegment[]> {
-  // Cache hit fast-path.
-  const cached = getNoteBlame(filePath, sourceHash);
+  // Cache key combines source_hash with current HEAD sha. Stamp commits
+  // are --allow-empty, so source_hash alone doesn't rotate when a stamp
+  // lands; without the HEAD component the cache returns stale blame
+  // forever after a stamp. Including HEAD invalidates the cache on any
+  // new commit (stamp or content) reachable from the working tree.
+  const headSha = await getHeadSha(vaultPath);
+  const cacheKey = `${sourceHash}|${headSha}`;
+  const cached = getNoteBlame(filePath, cacheKey);
   if (cached !== null) {
     try {
       return JSON.parse(cached) as BlameSegment[];
@@ -71,8 +77,20 @@ export async function computeProvenanceBlame(
   }
 
   const segments = await computeFresh(vaultPath, filePath);
-  setNoteBlame(filePath, sourceHash, JSON.stringify(segments));
+  setNoteBlame(filePath, cacheKey, JSON.stringify(segments));
   return segments;
+}
+
+async function getHeadSha(vaultPath: string): Promise<string> {
+  try {
+    const { stdout } = await execFileP("git", ["rev-parse", "HEAD"], {
+      cwd: vaultPath,
+      maxBuffer: 64 * 1024,
+    });
+    return stdout.trim();
+  } catch {
+    return "no-head";
+  }
 }
 
 /** Force recomputation, bypassing cache. Tests + admin tooling. */
