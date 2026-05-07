@@ -525,7 +525,6 @@ export async function refreshStats(vaultPath: string): Promise<VaultStats> {
       const stats = await computeVaultStats(vaultPath);
       cachedByPath.set(vaultPath, stats);
       lastRefreshed = stats;
-      pingHeartbeat(stats);
       return stats;
     } finally {
       inFlightByPath.delete(vaultPath);
@@ -555,12 +554,24 @@ export function getLastRefreshedStats(): VaultStats | null {
 }
 
 // ── Better Stack Heartbeat ──────────────────────────────────────────
+//
+// The heartbeat is a service-level liveness signal. It MUST be decoupled
+// from the per-vault stats refresh — overnight 2026-05-06 the personal
+// vault's graph compute (1949 files, ~28-30s) consistently raced the 30s
+// timeout in computeVaultStats, refreshStats rejected, no heartbeat fired,
+// Better Stack paged. The fix: ping on a fixed interval whenever the
+// proxy's event loop is alive, regardless of stats compute outcome.
+// Successful refreshes still update `lastRefreshed`, which the timer reads
+// for a richer payload — but the *firing* is unconditional.
 
 const HEARTBEAT_URL = process.env.GROVE_HEARTBEAT_URL ??
   "https://uptime.betterstack.com/api/v1/heartbeat/yyvRTtMqKdSPp6ZMUXfYpHJb";
 
-function pingHeartbeat(stats: VaultStats): void {
-  const summary = [
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+function buildHeartbeatBody(stats: VaultStats | null): string {
+  if (!stats) return "alive | stats=unavailable";
+  return [
     `notes=${stats.vault.total_notes}`,
     `orphans=${stats.graph.orphan_count}`,
     `drift=${stats.index.drift}`,
@@ -574,10 +585,39 @@ function pingHeartbeat(stats: VaultStats): void {
     `branch=${stats.git?.branch ?? "unknown"}`,
     `uncommitted=${stats.git?.uncommitted_changes ?? "?"}`,
   ].join(" | ");
+}
 
-  fetch(HEARTBEAT_URL, { method: "POST", body: summary }).catch((err) =>
-    console.warn("[vault-stats] heartbeat ping failed:", (err as Error).message),
+export function pingHeartbeatNow(): Promise<void> {
+  const body = buildHeartbeatBody(lastRefreshed);
+  return fetch(HEARTBEAT_URL, { method: "POST", body }).then(
+    () => undefined,
+    (err) =>
+      console.warn("[vault-stats] heartbeat ping failed:", (err as Error).message),
   );
+}
+
+/**
+ * Start a fixed-interval heartbeat ping. Independent of stats refresh —
+ * fires whenever the host event loop is alive, with a minimal "alive"
+ * payload when stats are unavailable. Call once from the proxy at boot;
+ * per-vault grove-server processes should NOT call this (we only want
+ * one pinger for the service-level monitor).
+ */
+export function startHeartbeatTimer(intervalMs: number = 60_000): void {
+  stopHeartbeatTimer();
+  // Ping once immediately so a fresh boot reports liveness without
+  // waiting for the first interval tick.
+  pingHeartbeatNow();
+  heartbeatTimer = setInterval(() => {
+    pingHeartbeatNow();
+  }, intervalMs);
+}
+
+export function stopHeartbeatTimer(): void {
+  if (heartbeatTimer !== null) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
 }
 
 /**

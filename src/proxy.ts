@@ -72,7 +72,7 @@ import {
 } from "./rest.js";
 import { VaultLockedError } from "./index-crypto.js";
 import { parseMultipart, parseBoundary } from "./multipart.js";
-import { startStatsTimer } from "./vault-stats.js";
+import { startHeartbeatTimer, startStatsTimer } from "./vault-stats.js";
 import { inviteUser, inviteUserToVault } from "./invite.js";
 import {
   createShareLink,
@@ -3765,6 +3765,11 @@ startStatsTimer(() => {
   paths.add(VAULT_PATH_PROXY);
   return [...paths];
 });
+
+// Better Stack heartbeat — service-level liveness, decoupled from stats
+// refresh so a slow vault graph compute can't suppress the ping. Only the
+// proxy pings; per-vault grove-server processes don't call this.
+startHeartbeatTimer();
 
 const keyCount = getDb().prepare("SELECT COUNT(*) as count FROM api_keys").get() as { count: number };
 
