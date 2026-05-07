@@ -26,6 +26,12 @@ import {
   updateWikilinks,
 } from "./vault-ops.js";
 import { validatePath, validateNote, parseNote, serializeNote, contentHash } from "./notes-validate.js";
+import {
+  composeCommitMessage,
+  provenanceToTrailers,
+  validateCallerProvenance,
+  type Provenance,
+} from "./provenance.js";
 import { loadVaultConfig, entityFolders } from "./vault-config.js";
 import { filterByTrail, trailAllowsWrite, getTrailPublicInfo, getTrailConfig, type TrailConfig, type NoteMetadata } from "./trails.js";
 import { getStats } from "./vault-stats.js";
@@ -1103,8 +1109,9 @@ async function executeWriteInMutex(params: {
   isNew: boolean;
   keyName?: string;
   handle?: string;
+  provenance?: Provenance;
 }): Promise<WriteNoteResult> {
-  const { ctx, absPath, relPath, frontmatter, content, isNew, keyName, handle } = params;
+  const { ctx, absPath, relPath, frontmatter, content, isNew, keyName, handle, provenance } = params;
 
   const serialized = serializeNote(frontmatter, content);
   const dir = dirname(absPath);
@@ -1114,7 +1121,10 @@ async function executeWriteInMutex(params: {
 
   const action = isNew ? "create" : "update";
   const who = keyName ? `grove (${keyName})` : "grove (api)";
-  const commitMsg = `${who}: ${action} ${relPath}`;
+  const subject = `${who}: ${action} ${relPath}`;
+  const commitMsg = provenance
+    ? composeCommitMessage(subject, provenanceToTrailers(provenance))
+    : subject;
   const sha = await gitCommit(ctx.vaultPath, relPath, commitMsg);
 
   const sourceHash = contentHash(serialized);
@@ -1190,7 +1200,13 @@ export async function handleWriteNote(
   notePath: string,
   frontmatter: Record<string, unknown>,
   content: string,
-  options: { ifHash?: string; trail?: TrailConfig | null; keyName?: string; handle?: string },
+  options: {
+    ifHash?: string;
+    trail?: TrailConfig | null;
+    keyName?: string;
+    handle?: string;
+    provenance?: Provenance;
+  },
 ): Promise<WriteNoteResult> {
   // Trail write scope check
   if (options.trail) {
@@ -1214,6 +1230,18 @@ export async function handleWriteNote(
     throw Object.assign(new Error(`Validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}`), { code: "VALIDATION", errors });
   }
 
+  // Validate provenance (rejects legacy-unknown from callers, malformed timestamps, etc.)
+  if (options.provenance) {
+    try {
+      validateCallerProvenance(options.provenance);
+    } catch (err: any) {
+      throw Object.assign(new Error(`Provenance: ${err.message}`), {
+        code: "VALIDATION",
+        errors: [err.message],
+      });
+    }
+  }
+
   // Optimistic concurrency check (prefers provenance, falls back to disk).
   if (options.ifHash) assertIfHashMatches(relPath, absPath, options.ifHash);
 
@@ -1228,6 +1256,7 @@ export async function handleWriteNote(
     isNew: !options.ifHash,
     keyName: options.keyName,
     handle: options.handle,
+    provenance: options.provenance,
   }));
 
   // Enqueue for discovery processing — tag the row with the writing vault
@@ -1272,6 +1301,11 @@ export interface BatchOperation {
    * round-trip for the intermediate hash.
    */
   if_hash_from_op?: number;
+  /**
+   * Provenance for this op's commit. Each op gets its own commit and its
+   * own trailer set; ops in a single batch can mix human + claude voices.
+   */
+  provenance?: Provenance;
 }
 
 export interface WriteBatchResult {
@@ -1311,6 +1345,7 @@ export async function handleWriteBatch(
     content: string;
     if_hash?: string;
     if_hash_from_op?: number;
+    provenance?: Provenance;
   }> = [];
   const config = loadVaultConfig(ctx.vaultPath);
 
@@ -1343,6 +1378,16 @@ export async function handleWriteBatch(
         );
       }
     }
+    if (op.provenance) {
+      try {
+        validateCallerProvenance(op.provenance);
+      } catch (err: any) {
+        throw Object.assign(new Error(`op ${i}: provenance: ${err.message}`), {
+          code: "VALIDATION",
+          errors: [`op ${i}: ${err.message}`],
+        });
+      }
+    }
     validated.push({
       absPath,
       relPath,
@@ -1350,6 +1395,7 @@ export async function handleWriteBatch(
       content: op.content,
       if_hash: op.if_hash,
       if_hash_from_op: op.if_hash_from_op,
+      provenance: op.provenance,
     });
   }
 
@@ -1380,6 +1426,7 @@ export async function handleWriteBatch(
           isNew: !ifHash,
           keyName: options.keyName,
           handle: options.handle,
+          provenance: op.provenance,
         });
         collected.push(r);
       }

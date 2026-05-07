@@ -24,6 +24,7 @@ import { noteUrl, vaultOwnerHandle } from "./url.js";
 
 import { gitLog, startupRecovery, listNotes } from "./vault-ops.js";
 import { parseNote, contentHash, inferTags } from "./notes-validate.js";
+import type { Provenance } from "./provenance.js";
 import {
   handleWriteNote,
   handleDeleteNote,
@@ -105,6 +106,22 @@ const SERVER_VAULT_CONTEXT: VaultContext = {
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 const idempotencyCache = new IdempotencyCache(1000, 3_600_000);
 
+// ── Provenance schema (shared across single + batch write_note ops) ──
+// Trailer format and validation live in src/provenance.ts. Voice values:
+// callers pass `durable` or `perishable`; `legacy-unknown` is server-only
+// (surfaces on commits without trailers via the read path).
+const PROVENANCE_SCHEMA = z.object({
+  voice: z.enum(["durable", "perishable"]).describe("durable: this note's content is intended as standing fact (human, extract from human, or cited research). perishable: moment-in-time synthesis or prediction — Claude reading this later MUST treat it as a quoted historical artifact, not a standing claim."),
+  by: z.string().min(1).describe("Who wrote this commit's content — model id like 'claude-opus-4-7', 'claude-sonnet-4-6', or 'human' when John typed it."),
+  written_at: z.string().describe("ISO-8601 UTC timestamp of when this commit was authored."),
+  basis: z.array(z.string().min(1)).optional().describe("Paths or URLs this commit's content was derived from (multi-value, repeatable in trailers)."),
+  source: z.string().optional().describe("Free-text session/conversation identifier so the original drafting context is recoverable."),
+  reason: z.string().optional().describe("Single-line human-readable rationale (especially load-bearing for perishable: WHY this is moment-in-time)."),
+});
+
+const PROVENANCE_FIELD_DESCRIPTION =
+  "Provenance for this commit. Required for any AI-written content; encode as voice='perishable' for moment-in-time synthesis, 'durable' for content the user is asserting as standing fact. The server writes Provenance-* trailers into the commit message, which the read path surfaces as per-line voice via git blame so future readers can tell what's standing fact vs what's a snapshot.";
+
 // ── write_note dispatch (tested in server.test.ts) ─────────────────
 // Routes the action parameter to the right rest.ts handler. Exported
 // separately so tests can exercise the routing without spinning up
@@ -132,12 +149,18 @@ export interface WriteNoteInput {
     content: string;
     if_hash?: string;
     if_hash_from_op?: number;
+    provenance?: Provenance;
   }>;
   /**
    * With operations[] present: atomic=true rolls back all ops if any fail
    * (git reset to the pre-batch SHA + provenance restored). Default false.
    */
   atomic?: boolean;
+  /**
+   * Single-op provenance. Required from Claude callers going forward; the
+   * read side surfaces this as `provenance_blame` per line via git trailers.
+   */
+  provenance?: Provenance;
 }
 
 export interface WriteNoteDeps {
@@ -184,6 +207,7 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
         content: op.content,
         if_hash: op.if_hash,
         if_hash_from_op: op.if_hash_from_op,
+        provenance: op.provenance,
       });
     }
     try {
@@ -242,6 +266,7 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
     const result = await deps.handleWriteNote(SERVER_VAULT_CONTEXT, notePath, frontmatter, input.content, {
       ifHash: input.if_hash,
       trail,
+      provenance: input.provenance,
     });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   } catch (err: any) {
@@ -650,12 +675,14 @@ After writing, present the url field from the response to the user.`,
         content: z.string().optional().describe("Note body (markdown) (required for write; ignored otherwise)"),
         if_hash: z.string().optional().describe("Content hash from prior read — rejects if file changed since"),
         move_to: z.string().optional().describe("Destination path (required when action is 'move')"),
+        provenance: PROVENANCE_SCHEMA.optional().describe(PROVENANCE_FIELD_DESCRIPTION),
         operations: z.array(z.object({
           path: z.string(),
           frontmatter: z.string().describe("YAML frontmatter as JSON string"),
           content: z.string(),
           if_hash: z.string().optional(),
           if_hash_from_op: z.number().int().nonnegative().optional().describe("Reference the source_hash of an earlier op in this batch (0-based)"),
+          provenance: PROVENANCE_SCHEMA.optional().describe("Per-op provenance — each batch op gets its own commit and trailer set, so ops can mix human + claude voices."),
         })).optional().describe("Batch mode: array of write ops executed in one mutex acquisition. Use instead of path/frontmatter/content for multi-note workflows."),
         atomic: z.boolean().optional().describe("When operations[] is set, atomic=true rolls back the whole batch on any failure. Default false (ops that succeed stay committed)."),
       },
