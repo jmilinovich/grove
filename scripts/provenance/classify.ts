@@ -16,7 +16,7 @@
 // The manifest is the input to the review TUI / report (B1.2). The CLI
 // never modifies the vault — it's a pure read-and-classify pass.
 
-import { readdirSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 import { classifyNote, type ClassifierResult } from "./rules.js";
@@ -71,14 +71,27 @@ function globToRegex(glob: string): RegExp {
 }
 
 function* walkMd(root: string, current = root): Generator<string> {
-  for (const entry of readdirSync(current)) {
+  let entries: string[];
+  try {
+    entries = readdirSync(current);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
     if (entry === ".git" || entry === ".obsidian" || entry === "_media") continue;
+    if (entry.startsWith(".")) continue; // skip dotfiles/dotdirs
     const full = join(current, entry);
-    const stat = statSync(full);
+    let stat;
+    try {
+      // lstatSync: don't follow symlinks (broken symlinks would crash).
+      stat = lstatSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) continue; // skip symlinks entirely
     if (stat.isDirectory()) {
       yield* walkMd(root, full);
-    } else if (entry.endsWith(".md")) {
-      // Yield vault-relative path with forward slashes (consistent across OSes).
+    } else if (stat.isFile() && entry.endsWith(".md")) {
       yield relative(root, full).split(sep).join("/");
     }
   }

@@ -72,7 +72,11 @@ import {
 } from "./rest.js";
 import { VaultLockedError } from "./index-crypto.js";
 import { parseMultipart, parseBoundary } from "./multipart.js";
-import { startHeartbeatTimer, startStatsTimer } from "./vault-stats.js";
+import {
+  startHeartbeatTimer,
+  startStatsTimer,
+  warmStatsFromDisk,
+} from "./vault-stats.js";
 import { inviteUser, inviteUserToVault } from "./invite.js";
 import {
   createShareLink,
@@ -118,6 +122,7 @@ import {
   waitlistCount,
   InvalidWaitlistEmailError,
 } from "./waitlist.js";
+import { getUsageSummary, renderUsageHtml } from "./admin-usage.js";
 
 installCrashHandlers("grove-proxy");
 
@@ -1359,6 +1364,36 @@ const server = createServer(async (req, res) => {
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 500;
     const entries = listWaitlist(limit);
     sendJson(res, 200, { count: waitlistCount(), entries });
+    return;
+  }
+
+  // ── Admin usage dashboard ──────────────────────────────────────────
+  // Per-user/per-vault activity from sqlite + pm2 log + stats cache. JSON
+  // when ?format=json or Accept: application/json; otherwise the HTML
+  // page (default — operator opens it in a browser via SSH tunnel or
+  // with an admin Bearer header).
+  if (url.pathname === "/admin/usage" && req.method === "GET") {
+    const admin = adminAuth(req);
+    if (!admin.ok) {
+      sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" });
+      return;
+    }
+    const wantJson =
+      url.searchParams.get("format") === "json" ||
+      (req.headers.accept ?? "").includes("application/json");
+    try {
+      const summary = getUsageSummary();
+      if (wantJson) {
+        sendJson(res, 200, summary);
+      } else {
+        const html = renderUsageHtml(summary);
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(html);
+      }
+    } catch (err) {
+      console.error("[admin-usage] computation failed:", err);
+      sendJson(res, 500, { error: "internal", message: (err as Error).message });
+    }
     return;
   }
 
@@ -3758,6 +3793,20 @@ const VAULT_PATH_PROXY = process.env.GROVE_VAULT ?? join(homedir(), "life");
 // returns the primary's numbers. Uses a thunk so newly-provisioned
 // vaults picked up by SIGHUP start refreshing on the next tick without
 // bouncing the timer.
+// Warm the in-memory stats cache from disk BEFORE starting the timer so
+// getStats() returns useful data during the 5-15s window before the first
+// fresh refresh completes. Otherwise every restart re-enters a "stats
+// unavailable" gap that breaks the dashboard and forces the MCP graph
+// cold-path through a live analyzeGraph() (which on a 1949-node vault
+// would still be ~30s with bridges enabled).
+{
+  const db = getDb();
+  const rows = db.prepare(`SELECT git_repo_path FROM vaults`).all() as { git_repo_path: string }[];
+  const paths = new Set<string>(rows.map((r) => r.git_repo_path).filter(Boolean));
+  paths.add(VAULT_PATH_PROXY);
+  warmStatsFromDisk([...paths]);
+}
+
 startStatsTimer(() => {
   const db = getDb();
   const rows = db.prepare(`SELECT git_repo_path FROM vaults`).all() as { git_repo_path: string }[];

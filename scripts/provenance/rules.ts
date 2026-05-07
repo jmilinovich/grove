@@ -81,17 +81,41 @@ interface Rule {
 }
 
 const RULES: Rule[] = [
-  // ── Highest-precision: explicit `prose_by: Claude` frontmatter ──
+  // ── ExecuSystems convention: prose_by + confidence ───────────────
+  // The ExecuSystems vault uses `prose_by: Claude` to mean "Claude
+  // transcribed the prose from John's input" (durable when paired with
+  // `confidence: established`) and `confidence: inferred` to mean
+  // "Claude constructed the claim" (perishable). The two fields TOGETHER
+  // distinguish durable extractions from perishable inferences. Per the
+  // ExecuSystems CHARTER: "confidence: inferred means Claude constructed
+  // the claim — treat as proposal, not fact."
   {
-    id: "prose_by_claude",
+    id: "prose_by_claude_inferred",
     apply: (_input, sig) => {
       const v = sig.frontmatter.prose_by ?? sig.frontmatter.last_edited_by ?? "";
-      if (/Claude/i.test(v)) {
+      const conf = (sig.frontmatter.confidence ?? "").toLowerCase();
+      if (/Claude/i.test(v) && conf === "inferred") {
         return {
-          rule: "prose_by_claude",
+          rule: "prose_by_claude_inferred",
           voice: "perishable",
           confidence: "high",
-          rationale: `frontmatter.prose_by = ${JSON.stringify(v)} — explicit Claude authorship`,
+          rationale: `prose_by=${JSON.stringify(v)} + confidence=inferred — Claude-constructed claim per ExecuSystems CHARTER`,
+        };
+      }
+      return null;
+    },
+  },
+  {
+    id: "prose_by_claude_established",
+    apply: (_input, sig) => {
+      const v = sig.frontmatter.prose_by ?? sig.frontmatter.last_edited_by ?? "";
+      const conf = (sig.frontmatter.confidence ?? "").toLowerCase();
+      if (/Claude/i.test(v) && (conf === "established" || conf === "")) {
+        return {
+          rule: "prose_by_claude_established",
+          voice: "durable",
+          confidence: "high",
+          rationale: `prose_by=${JSON.stringify(v)} + confidence=${conf || "(none)"} — Claude transcribed established fact from John's input`,
         };
       }
       return null;

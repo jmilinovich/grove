@@ -131,27 +131,32 @@ function parseReview(text: string): ReviewParseResult {
     if (!entryMatch) continue;
     const [, char, proposedVoice, path] = entryMatch;
 
-    if (char === "p" || char === "d") {
+    if (char === "p") {
       decisions.push({
         path,
-        voice: char === "p" ? "perishable" : "durable",
+        voice: "perishable",
         proposedVoice,
-        rationale: `explicit checkbox: ${char}`,
+        rationale: "explicit checkbox: p",
       });
+    } else if (char === "d") {
+      // Durable is the read-side default — stamping it adds commits
+      // without changing behavior, AND risks overriding earlier perishable
+      // stamps on the same file. Skip durable stamps by design.
+      skips.push({ path, reason: "durable is default — no stamp needed" });
     } else if (char === "u") {
       skips.push({ path, reason: "marked unknown" });
     } else if (char === " ") {
       if (inSectionConfirmed) {
-        // Bucket-confirm: use proposed voice
-        if (proposedVoice === "perishable" || proposedVoice === "durable") {
+        // Bucket-confirm: only stamp perishable; durable falls through.
+        if (proposedVoice === "perishable") {
           decisions.push({
             path,
-            voice: proposedVoice,
+            voice: "perishable",
             proposedVoice,
-            rationale: `bucket-confirmed (section status: confirmed)`,
+            rationale: "bucket-confirmed (section status: confirmed)",
           });
         } else {
-          skips.push({ path, reason: `bucket-confirmed but proposed=${proposedVoice}` });
+          skips.push({ path, reason: `bucket-confirmed proposed=${proposedVoice} (only perishable stamped)` });
         }
       } else {
         unresolved.push(path);
