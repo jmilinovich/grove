@@ -29,6 +29,16 @@
  * missing post-run.
  */
 import { regenerateEcosystem } from "../src/vault-provision.js";
+import { createSchema } from "../src/db.js";
+
+// Apply pending DB migrations before reading the vaults table. CI runs
+// this script BEFORE `pm2 reload` (which is what otherwise triggers
+// the per-process createSchema() on grove-server startup), so a deploy
+// that adds a vaults column needs the migration to run here first or
+// the SELECT fails with "no such column".
+//
+// Idempotent — running it on an already-migrated DB is a no-op.
+createSchema();
 
 const args = process.argv.slice(2);
 let pathArg: string | undefined;
