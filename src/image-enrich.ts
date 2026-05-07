@@ -82,6 +82,17 @@ export async function enrichImageNote(
 
   await handleWriteNote(ctx, notePath, newFrontmatter, newContent, {
     keyName: "image-enrich",
+    provenance: {
+      // Image enrichment auto-fills alt-text + tags + description from
+      // the image's pixel content. The output is a stable AI-extract of
+      // a public-source-bound asset (the image), not a moment-in-time
+      // synthesis or prediction. Treat as durable cited research.
+      voice: "durable",
+      by: "image-enrich",
+      written_at: new Date().toISOString(),
+      source: "image-enrich auto-enrichment",
+      reason: "AI-generated alt-text + tags + description derived from the image's pixel content",
+    },
   });
 
   return {

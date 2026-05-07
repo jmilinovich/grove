@@ -167,6 +167,25 @@ export function provenanceEnabled(): boolean {
   return v !== "false" && v !== "0";
 }
 
+// ── Strict-mode flag ────────────────────────────────────────────────
+//
+// GROVE_REQUIRE_PROVENANCE makes provenance MANDATORY on every
+// handleWriteNote / handleWriteBatch call. When on, callers must pass
+// `options.provenance` or the write is rejected with a 400 VALIDATION
+// error. Default OFF — flip to "true" only after every caller in the
+// ecosystem has been migrated to pass provenance (this CLI's garden
+// skills, image-enrich, REST consumers).
+//
+// Internal subsystems that bypass handleWriteNote (discovery worker,
+// graph-health auto-heal) write via gitCommit directly — they are NOT
+// affected by this flag. Their commits surface as legacy-unknown at
+// read time, which the blame walker treats as transparent.
+export function provenanceRequired(): boolean {
+  const v = process.env.GROVE_REQUIRE_PROVENANCE;
+  if (v === undefined) return false;
+  return v === "true" || v === "1";
+}
+
 // ── Internals ───────────────────────────────────────────────────────
 
 interface BlameLine {

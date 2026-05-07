@@ -34,6 +34,7 @@ import {
 } from "./provenance.js";
 import {
   computeProvenanceFields,
+  provenanceRequired,
   type BlameSegment,
 } from "./blame.js";
 import { loadVaultConfig, entityFolders } from "./vault-config.js";
@@ -1262,6 +1263,23 @@ export async function handleWriteNote(
     throw Object.assign(new Error(`Validation errors:\n${errors.map((e) => `- ${e}`).join("\n")}`), { code: "VALIDATION", errors });
   }
 
+  // Phase C2: when GROVE_REQUIRE_PROVENANCE is on, callers MUST pass a
+  // provenance arg. Off by default for safe rollout — flip to "true"
+  // once all callers in the ecosystem have migrated. Discovery worker
+  // and graph-health bypass handleWriteNote and write via gitCommit
+  // directly, so they're unaffected (their commits surface as
+  // legacy-unknown at read time, which the blame walker treats as
+  // transparent).
+  if (provenanceRequired() && !options.provenance) {
+    throw Object.assign(
+      new Error(
+        "Provenance is required for write_note (GROVE_REQUIRE_PROVENANCE=true). " +
+          "Pass a provenance arg with at least: voice (durable | perishable), by, written_at.",
+      ),
+      { code: "VALIDATION", errors: ["missing required provenance"] },
+    );
+  }
+
   // Validate provenance (rejects legacy-unknown from callers, malformed timestamps, etc.)
   if (options.provenance) {
     try {
@@ -1419,6 +1437,14 @@ export async function handleWriteBatch(
           errors: [`op ${i}: ${err.message}`],
         });
       }
+    } else if (provenanceRequired()) {
+      throw Object.assign(
+        new Error(
+          `op ${i}: provenance required (GROVE_REQUIRE_PROVENANCE=true). ` +
+            "Pass a provenance with at least: voice (durable | perishable), by, written_at.",
+        ),
+        { code: "VALIDATION", errors: [`op ${i}: missing required provenance`] },
+      );
     }
     validated.push({
       absPath,

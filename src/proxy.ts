@@ -2827,7 +2827,11 @@ const server = createServer(async (req, res) => {
         res.end(JSON.stringify({ error: "read error" }));
         return;
       }
-      let parsed: { frontmatter?: Record<string, unknown>; content?: string };
+      let parsed: {
+        frontmatter?: Record<string, unknown>;
+        content?: string;
+        provenance?: import("./provenance.js").Provenance;
+      };
       try { parsed = JSON.parse(body); } catch {
         res.writeHead(400, restHeaders);
         res.end(JSON.stringify({ error: "invalid json" }));
@@ -2849,6 +2853,7 @@ const server = createServer(async (req, res) => {
           ifHash: ifMatch,
           trail: restTrail,
           keyName: restKey.name,
+          provenance: parsed.provenance,
         });
         const status = result.action === "create" ? 201 : 200;
         res.writeHead(status, { ...restHeaders, "ETag": `"${result.source_hash}"` });
