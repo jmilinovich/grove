@@ -32,6 +32,10 @@ import {
   validateCallerProvenance,
   type Provenance,
 } from "./provenance.js";
+import {
+  computeProvenanceFields,
+  type BlameSegment,
+} from "./blame.js";
 import { loadVaultConfig, entityFolders } from "./vault-config.js";
 import { filterByTrail, trailAllowsWrite, getTrailPublicInfo, getTrailConfig, type TrailConfig, type NoteMetadata } from "./trails.js";
 import { getStats } from "./vault-stats.js";
@@ -374,6 +378,30 @@ export interface NoteResponse {
   links: Record<string, { path: string | null; exists: boolean }>;
   backlinks: string[];
   resolved_from?: string;
+  /**
+   * Per-segment authorship attribution computed via git blame +
+   * Provenance-* trailer parse from each blame commit. Present when the
+   * GROVE_PROVENANCE_ENABLED feature flag is on. Each segment covers a
+   * contiguous run of lines; voice="legacy-unknown" means the originating
+   * commit had no Provenance-* trailers (pre-rollout, discovery worker,
+   * external manual write) and the read directive treats those as
+   * transparent.
+   */
+  provenance_blame?: BlameSegment[];
+  /**
+   * True when any segment in provenance_blame has voice="perishable".
+   * Lifted to the response envelope so a Claude consumer can branch on it
+   * without scanning the full blame array. The read-site directive in the
+   * MCP tool description requires Claude to name perishable segments
+   * before extending or building on them.
+   */
+  has_perishable_segments?: boolean;
+  /**
+   * Imperative usage directive emitted only when has_perishable_segments
+   * is true. Mirrors the language in the MCP tool description so the
+   * directive is reinforced per-call, not just once-per-conversation.
+   */
+  usage_directive?: string;
 }
 
 export interface SearchResult {
@@ -550,15 +578,19 @@ export async function handleGetNote(
     });
   }
 
+  const sourceHash = getSourceHash(note.path) ?? note.content_hash;
+  const provFields = await computeProvenanceFields(ctx.vaultPath, note.path, sourceHash);
+
   return {
     path: note.path,
     frontmatter: note.frontmatter,
     content: note.content,
-    source_hash: getSourceHash(note.path) ?? note.content_hash,
+    source_hash: sourceHash,
     content_hash: note.content_hash,
     links,
     backlinks,
     ...(note.resolved_from && { resolved_from: note.resolved_from }),
+    ...provFields,
   };
 }
 
