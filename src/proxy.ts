@@ -72,7 +72,11 @@ import {
 } from "./rest.js";
 import { VaultLockedError } from "./index-crypto.js";
 import { parseMultipart, parseBoundary } from "./multipart.js";
-import { startHeartbeatTimer, startStatsTimer } from "./vault-stats.js";
+import {
+  startHeartbeatTimer,
+  startStatsTimer,
+  warmStatsFromDisk,
+} from "./vault-stats.js";
 import { inviteUser, inviteUserToVault } from "./invite.js";
 import {
   createShareLink,
@@ -3758,6 +3762,20 @@ const VAULT_PATH_PROXY = process.env.GROVE_VAULT ?? join(homedir(), "life");
 // returns the primary's numbers. Uses a thunk so newly-provisioned
 // vaults picked up by SIGHUP start refreshing on the next tick without
 // bouncing the timer.
+// Warm the in-memory stats cache from disk BEFORE starting the timer so
+// getStats() returns useful data during the 5-15s window before the first
+// fresh refresh completes. Otherwise every restart re-enters a "stats
+// unavailable" gap that breaks the dashboard and forces the MCP graph
+// cold-path through a live analyzeGraph() (which on a 1949-node vault
+// would still be ~30s with bridges enabled).
+{
+  const db = getDb();
+  const rows = db.prepare(`SELECT git_repo_path FROM vaults`).all() as { git_repo_path: string }[];
+  const paths = new Set<string>(rows.map((r) => r.git_repo_path).filter(Boolean));
+  paths.add(VAULT_PATH_PROXY);
+  warmStatsFromDisk([...paths]);
+}
+
 startStatsTimer(() => {
   const db = getDb();
   const rows = db.prepare(`SELECT git_repo_path FROM vaults`).all() as { git_repo_path: string }[];

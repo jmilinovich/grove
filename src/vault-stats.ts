@@ -6,9 +6,17 @@
  * in a cache layer so stats are precomputed rather than per-request.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  readdirSync,
+  readFileSync,
+  statSync,
+  mkdirSync,
+  writeFileSync,
+  renameSync,
+} from "node:fs";
 import { execSync } from "node:child_process";
 import { join, relative, basename } from "node:path";
+import { homedir } from "node:os";
 import { parse as yamlParse } from "yaml";
 import Database from "better-sqlite3";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
@@ -530,6 +538,7 @@ export async function refreshStats(vaultPath: string): Promise<VaultStats> {
       const stats = await computeVaultStats(vaultPath);
       cachedByPath.set(vaultPath, stats);
       lastRefreshed = stats;
+      writeCachedStatsToDisk(vaultPath, stats);
       return stats;
     } finally {
       inFlightByPath.delete(vaultPath);
@@ -537,6 +546,100 @@ export async function refreshStats(vaultPath: string): Promise<VaultStats> {
   })();
   inFlightByPath.set(vaultPath, promise);
   return promise;
+}
+
+// ── Persistent Cache (cross-restart warm boot) ───────────────────────
+//
+// Without this, every PM2 restart re-enters a 5-15s window where every
+// vault's stats are null — getStats() returns null, the MCP cold-path
+// falls through to live analyzeGraph() which can take 30s on a big vault,
+// and the dashboard shows "stats=unavailable" until the first refresh
+// completes. We write each successful refresh to disk and read on boot,
+// so a restart serves cached data instantly while the first fresh
+// refresh runs in the background.
+
+const STATS_CACHE_VERSION = 1;
+const STATS_CACHE_DIR =
+  process.env.GROVE_STATS_CACHE_DIR ??
+  join(homedir(), ".grove", "stats-cache");
+
+interface CachedStatsFile {
+  version: number;
+  vaultPath: string;
+  stats: VaultStats;
+  written_at: string;
+}
+
+function statsCacheFilePath(vaultPath: string): string {
+  // Use the vault directory's basename as the filename — same identity
+  // shape as the QMD collection name and the snapshot blob keys.
+  const slug = basename(vaultPath) || "default";
+  return join(STATS_CACHE_DIR, `${slug}.json`);
+}
+
+function writeCachedStatsToDisk(vaultPath: string, stats: VaultStats): void {
+  try {
+    mkdirSync(STATS_CACHE_DIR, { recursive: true });
+    const wrapper: CachedStatsFile = {
+      version: STATS_CACHE_VERSION,
+      vaultPath,
+      stats,
+      written_at: new Date().toISOString(),
+    };
+    const target = statsCacheFilePath(vaultPath);
+    const tmp = `${target}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(wrapper));
+    // Atomic rename so a crash mid-write can't corrupt the cache file.
+    renameSync(tmp, target);
+  } catch (err) {
+    console.warn(
+      `[vault-stats] cache write failed for ${vaultPath}:`,
+      (err as Error).message,
+    );
+  }
+}
+
+function readCachedStatsFromDisk(vaultPath: string): VaultStats | null {
+  try {
+    const raw = readFileSync(statsCacheFilePath(vaultPath), "utf-8");
+    const parsed = JSON.parse(raw) as Partial<CachedStatsFile>;
+    if (parsed.version !== STATS_CACHE_VERSION) return null;
+    if (parsed.vaultPath !== vaultPath) return null;
+    if (!parsed.stats || typeof parsed.stats !== "object") return null;
+    return parsed.stats as VaultStats;
+  } catch {
+    // Missing file, malformed JSON, or any read error — treat as no cache.
+    return null;
+  }
+}
+
+/**
+ * Populate the in-memory cache from disk for the given vault paths.
+ * Idempotent — paths already in `cachedByPath` are not overwritten so a
+ * fresh refresh in flight at boot wins. Call once before startStatsTimer
+ * so getStats() / the heartbeat see warm data immediately, even before
+ * the first refresh completes.
+ */
+export function warmStatsFromDisk(vaultPaths: string[]): { warmed: number; missing: number } {
+  let warmed = 0;
+  let missing = 0;
+  for (const vaultPath of vaultPaths) {
+    if (cachedByPath.has(vaultPath)) continue;
+    const cached = readCachedStatsFromDisk(vaultPath);
+    if (cached) {
+      cachedByPath.set(vaultPath, cached);
+      lastRefreshed = cached;
+      warmed += 1;
+    } else {
+      missing += 1;
+    }
+  }
+  if (warmed > 0) {
+    console.log(
+      `[vault-stats] warmed ${warmed} vault(s) from disk cache (${missing} missing)`,
+    );
+  }
+  return { warmed, missing };
 }
 
 /**

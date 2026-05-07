@@ -34,7 +34,7 @@ import {
   type BatchOperation,
 } from "./rest.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
-import { getStats, startStatsTimer } from "./vault-stats.js";
+import { getStats, startStatsTimer, warmStatsFromDisk } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
 import { log as structuredLog, auditRead } from "./logger.js";
 import { installCrashHandlers } from "./crash-handlers.js";
@@ -1111,6 +1111,11 @@ async function start() {
   } catch (err) {
     console.warn("[grove] startup recovery failed:", (err as Error).message);
   }
+
+  // Warm the stats cache from disk so the MCP `vault_status` cold-path
+  // doesn't fall through to a live analyzeGraph() in the boot window
+  // before the first refresh completes.
+  warmStatsFromDisk([VAULT_PATH]);
 
   // Start background stats computation (every 5 min)
   startStatsTimer(VAULT_PATH);
