@@ -69,7 +69,22 @@ function stem(link: string): string {
 
 // ── Graph Analysis ───────────────────────────────────────────────────
 
-export async function analyzeGraph(vaultPath: string): Promise<GraphAnalysis> {
+export interface AnalyzeGraphOptions {
+  /**
+   * Skip Brandes betweenness centrality. Drops `bridges` to []. Use this
+   * for the periodic vault-stats refresh — the dashboard / heartbeat
+   * payload never reads `bridges`, but Brandes is O(n·(n+e)) and on a
+   * 1949-node vault costs the entire 30s graph-section budget. The MCP
+   * `vault_status mode=graph` tool keeps the default (false) so explicit
+   * graph queries still return bridges.
+   */
+  skipBridges?: boolean;
+}
+
+export async function analyzeGraph(
+  vaultPath: string,
+  options: AnalyzeGraphOptions = {},
+): Promise<GraphAnalysis> {
   const files = walkMd(vaultPath);
 
   // Build node index: stem → NoteNode
@@ -188,18 +203,21 @@ export async function analyzeGraph(vaultPath: string): Promise<GraphAnalysis> {
     members: members.slice(0, 20), // cap member list
   }));
 
-  // Betweenness centrality — Brandes' algorithm on undirected view
-  const betweenness = brandes(outgoing, incoming);
-
-  const bridgeSorted = [...betweenness.entries()]
-    .filter(([name]) => realNames.has(name))
-    .sort((a, b) => b[1] - a[1]);
-
-  const bridges = bridgeSorted.slice(0, 10).map(([name, score]) => ({
-    name,
-    path: nodeByName.get(name)?.path ?? "",
-    score: Math.round(score * 1000) / 1000,
-  }));
+  // Betweenness centrality — Brandes' algorithm on undirected view.
+  // O(n·(n+e)); the dominant cost on big vaults. Skipped when the caller
+  // doesn't need bridges (timer-driven vault-stats refresh).
+  let bridges: GraphAnalysis["bridges"] = [];
+  if (!options.skipBridges) {
+    const betweenness = brandes(outgoing, incoming);
+    const bridgeSorted = [...betweenness.entries()]
+      .filter(([name]) => realNames.has(name))
+      .sort((a, b) => b[1] - a[1]);
+    bridges = bridgeSorted.slice(0, 10).map(([name, score]) => ({
+      name,
+      path: nodeByName.get(name)?.path ?? "",
+      score: Math.round(score * 1000) / 1000,
+    }));
+  }
 
   return { nodes: nodeCount, edges: edgeCount, density, most_connected, orphans, clusters, bridges };
 }
