@@ -64,6 +64,20 @@ describe("ecosystem-gen (P8-A4)", () => {
     expect(out).toMatch(/"name": "grove-discovery-team"[\s\S]*?"GROVE_VAULT_SLUG": "team"/);
   });
 
+  it("sets GROVE_REQUIRE_PROVENANCE_personal=true on grove-proxy (multi-tenant REST path)", () => {
+    // The proxy hosts REST writes for all tenants in one process. To
+    // enforce strict mode for the personal vault but NOT for ryan/etc,
+    // it gets a per-vault env var. The slug-aware
+    // provenanceRequired(slug) helper in src/blame.ts checks
+    // GROVE_REQUIRE_PROVENANCE_<slug> first, falling back to the
+    // global flag.
+    const out = generateEcosystemConfig(vaults);
+    expect(out).toMatch(/"name": "grove-proxy"[\s\S]*?"GROVE_REQUIRE_PROVENANCE_personal": "true"/);
+    // Negative: proxy must NOT have flags for non-personal tenants.
+    const proxyBlock = out.match(/"name": "grove-proxy"[\s\S]*?(?=\}\s*,?\s*\{)/);
+    expect(proxyBlock?.[0] ?? "").not.toContain("GROVE_REQUIRE_PROVENANCE_team");
+  });
+
   it("sets GROVE_REQUIRE_PROVENANCE=true on grove-server-personal only", () => {
     // Phase C2: only the `personal` vault has all callers migrated to
     // pass provenance on every write (this CLI's garden skills,

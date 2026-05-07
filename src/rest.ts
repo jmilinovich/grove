@@ -1270,7 +1270,10 @@ export async function handleWriteNote(
   // directly, so they're unaffected (their commits surface as
   // legacy-unknown at read time, which the blame walker treats as
   // transparent).
-  if (provenanceRequired() && !options.provenance) {
+  // Pass the vault slug so per-vault overrides (GROVE_REQUIRE_PROVENANCE_<slug>)
+  // work in shared-process callers like grove-proxy. Per-vault servers can
+  // continue setting the global flag — the slug check just falls through.
+  if (provenanceRequired(ctx.vaultSlug) && !options.provenance) {
     throw Object.assign(
       new Error(
         "Provenance is required for write_note (GROVE_REQUIRE_PROVENANCE=true). " +
@@ -1437,7 +1440,7 @@ export async function handleWriteBatch(
           errors: [`op ${i}: ${err.message}`],
         });
       }
-    } else if (provenanceRequired()) {
+    } else if (provenanceRequired(ctx.vaultSlug)) {
       throw Object.assign(
         new Error(
           `op ${i}: provenance required (GROVE_REQUIRE_PROVENANCE=true). ` +
