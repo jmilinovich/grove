@@ -64,8 +64,13 @@ afterEach(() => {
 });
 
 describe("provenanceRequired() helper", () => {
-  it("defaults to false", () => {
+  beforeEach(() => {
     delete process.env.GROVE_REQUIRE_PROVENANCE;
+    delete process.env.GROVE_REQUIRE_PROVENANCE_personal;
+    delete process.env.GROVE_REQUIRE_PROVENANCE_ryan;
+  });
+
+  it("defaults to false", () => {
     expect(provenanceRequired()).toBe(false);
   });
 
@@ -83,6 +88,25 @@ describe("provenanceRequired() helper", () => {
     expect(provenanceRequired()).toBe(false);
     process.env.GROVE_REQUIRE_PROVENANCE = "";
     expect(provenanceRequired()).toBe(false);
+  });
+
+  it("per-vault override: GROVE_REQUIRE_PROVENANCE_<slug>=true wins for that slug only", () => {
+    process.env.GROVE_REQUIRE_PROVENANCE_personal = "true";
+    expect(provenanceRequired("personal")).toBe(true);
+    expect(provenanceRequired("ryan")).toBe(false);
+    expect(provenanceRequired()).toBe(false);
+  });
+
+  it("per-vault override does not affect calls without a slug", () => {
+    process.env.GROVE_REQUIRE_PROVENANCE_personal = "true";
+    expect(provenanceRequired()).toBe(false);
+  });
+
+  it("global flag still applies to vaults without a per-vault override", () => {
+    process.env.GROVE_REQUIRE_PROVENANCE = "true";
+    expect(provenanceRequired("personal")).toBe(true);
+    expect(provenanceRequired("ryan")).toBe(true);
+    expect(provenanceRequired()).toBe(true);
   });
 });
 

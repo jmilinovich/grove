@@ -80,16 +80,28 @@ export function generateEcosystemConfig(
 
   // Proxy — one process, not vault-scoped. `env_static` is the static,
   // per-process override that sits on top of `.env` at PM2 load time.
+  // The proxy hosts REST writes for ALL tenants in one process, so
+  // GROVE_REQUIRE_PROVENANCE is set per-vault via
+  // `GROVE_REQUIRE_PROVENANCE_<slug>` env vars (mirrors the slug-aware
+  // check in src/blame.ts:provenanceRequired). Per-vault servers
+  // (grove-server-<slug>) keep using the global flag — their process
+  // is already vault-pinned.
+  const proxyEnv: Record<string, string> = {
+    NODE_ENV: "production",
+    GROVE_PORT: String(proxyPort),
+    QMD_PORT: String(qmdPort),
+  };
+  for (const v of vaults) {
+    if (v.slug === "personal") {
+      proxyEnv[`GROVE_REQUIRE_PROVENANCE_${v.slug}`] = "true";
+    }
+  }
   apps.push({
     name: "grove-proxy",
     script: tsxRunner,
     args: tsxArgs("proxy.ts"),
     cwd: repoRoot,
-    env_static: {
-      NODE_ENV: "production",
-      GROVE_PORT: String(proxyPort),
-      QMD_PORT: String(qmdPort),
-    },
+    env_static: proxyEnv,
     autorestart: true,
     max_restarts: 10,
   });
