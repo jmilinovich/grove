@@ -41,10 +41,10 @@ const INVARIANTS: Invariant[] = [
     pattern: '\\?\\? "(personal|life)"',
     allowlist: [
       'src/proxy.ts:292:  return { kind: "ok", vaultId: membership?.vault_id ?? "life" };',
-      'src/rest.ts:65:    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
-      'src/rest.ts:1793:let vaultIdResolver: VaultIdResolver = () => process.env.GROVE_VAULT_ID ?? "life";',
+      'src/rest.ts:75:    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
+      'src/rest.ts:1872:let vaultIdResolver: VaultIdResolver = () => process.env.GROVE_VAULT_ID ?? "life";',
       'src/discovery.ts:57:    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
-      'src/server.ts:102:  vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
+      'src/server.ts:108:  vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
     ],
   },
   {

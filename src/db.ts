@@ -288,6 +288,21 @@ CREATE TABLE IF NOT EXISTS write_provenance (
 
 CREATE INDEX IF NOT EXISTS idx_write_provenance_written_at ON write_provenance(written_at);
 
+-- Per-note blame cache. Computed on demand by the get/query/list read paths
+-- via git blame plus Provenance-* trailer parse from each blame commit.
+-- Keyed by (path, source_hash); when the source_hash changes on the next
+-- write, a new row is computed and the old row becomes unreachable but
+-- harmless (cleaned by periodic vacuum). No active invalidation — the
+-- natural source_hash rotation handles it.
+CREATE TABLE IF NOT EXISTS note_blame (
+  path TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  blame_json TEXT NOT NULL,
+  computed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (path, source_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_note_blame_computed_at ON note_blame(computed_at);
+
 CREATE TABLE IF NOT EXISTS waitlist (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL UNIQUE,
@@ -1431,6 +1446,70 @@ export function getProvenance(path: string): ProvenanceRow | null {
 export function deleteProvenance(path: string): void {
   const database = getDb();
   database.prepare("DELETE FROM write_provenance WHERE path = ?").run(path);
+}
+
+// ── note_blame cache ───────────────────────────────────────────────
+// Cached output of git-blame + Provenance-trailer parsing for a single
+// note version. Keyed by (path, source_hash); recomputed on miss. No
+// active invalidation — the source_hash naturally rotates on every
+// write, so old rows become unreachable and are cleaned by periodic
+// vacuum (idx_note_blame_computed_at supports the sweep query).
+
+/**
+ * Read the cached blame for a note at a specific source_hash. Returns the
+ * stored JSON string verbatim — callers parse into BlameSegment[]. Returns
+ * null on cache miss (caller must compute and setNoteBlame).
+ */
+export function getNoteBlame(path: string, sourceHash: string): string | null {
+  const database = getDb();
+  const row = database
+    .prepare("SELECT blame_json FROM note_blame WHERE path = ? AND source_hash = ?")
+    .get(path, sourceHash) as { blame_json: string } | undefined;
+  return row?.blame_json ?? null;
+}
+
+/**
+ * Cache a freshly-computed blame. JSON serialization is the caller's job —
+ * this function just persists the opaque string. Idempotent on (path,
+ * source_hash) — re-running with identical inputs is a no-op via the PK.
+ */
+export function setNoteBlame(path: string, sourceHash: string, blameJson: string): void {
+  const database = getDb();
+  database
+    .prepare(
+      `INSERT INTO note_blame (path, source_hash, blame_json, computed_at)
+       VALUES (?, ?, ?, datetime('now'))
+       ON CONFLICT(path, source_hash) DO UPDATE SET
+         blame_json = excluded.blame_json,
+         computed_at = excluded.computed_at`,
+    )
+    .run(path, sourceHash, blameJson);
+}
+
+/**
+ * Drop ALL cached blame for a path (used on hard_delete + move). The path
+ * may have multiple rows (one per historical source_hash); this clears all.
+ */
+export function deleteNoteBlame(path: string): void {
+  const database = getDb();
+  database.prepare("DELETE FROM note_blame WHERE path = ?").run(path);
+}
+
+/**
+ * Periodic vacuum: drop blame rows older than `olderThanDays`. Returns the
+ * number of rows deleted. Safe to call from a cron — the read path will
+ * recompute on next access.
+ */
+export function vacuumNoteBlame(olderThanDays: number): number {
+  const database = getDb();
+  const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .replace("T", " ")
+    .replace(/\.\d+Z$/, "");
+  const result = database
+    .prepare("DELETE FROM note_blame WHERE computed_at < ?")
+    .run(cutoff);
+  return result.changes;
 }
 
 /**
