@@ -196,8 +196,125 @@ async function computeFresh(
   );
   const provBySha = new Map(provByShaEntries);
 
-  // Group consecutive same-sha lines into segments.
-  return groupIntoSegments(lines, provBySha);
+  // Find override stamps for this path. A stamp is an empty commit whose
+  // message body contains a `Provenance-Stamp-Path: <filePath>` trailer.
+  // The most recent stamp (by topological order on HEAD — NOT by
+  // Provenance.written_at, which is backdated for backfills, NOR by
+  // git author-time, which can collide within a second) overrides any
+  // segment whose introducing commit has voice="legacy-unknown" AND
+  // is an ancestor of the stamp.
+  //
+  // Stamps DON'T override commits that already declared explicit voice —
+  // those are immutable per the design (callers can re-stamp with a new
+  // voice if they want; "most recent stamp wins" applies to legacy only).
+  const stamp = await findLatestStampForPath(vaultPath, filePath);
+  const headRanks = stamp ? await getHeadCommitRanks(vaultPath) : null;
+
+  // Group consecutive same-sha lines into segments, applying stamp
+  // override where applicable.
+  return groupIntoSegments(lines, provBySha, stamp, headRanks);
+}
+
+/**
+ * Build a rank map of every commit reachable from HEAD: sha → index in
+ * `git log HEAD --format=%H` output (0 = HEAD itself, N = oldest
+ * ancestor). Used by groupIntoSegments to decide "is the stamp commit
+ * topologically more recent than the segment's introducing commit?"
+ *
+ * Single subprocess call, O(1) lookups. Returns an empty map on error.
+ */
+async function getHeadCommitRanks(vaultPath: string): Promise<Map<string, number>> {
+  try {
+    const { stdout } = await execFileP(
+      "git",
+      ["log", "HEAD", "--format=%H"],
+      { cwd: vaultPath, maxBuffer: 16 * 1024 * 1024 },
+    );
+    const map = new Map<string, number>();
+    let i = 0;
+    for (const line of stdout.split("\n")) {
+      const sha = line.trim();
+      if (sha) {
+        map.set(sha, i);
+        i++;
+      }
+    }
+    return map;
+  } catch {
+    return new Map();
+  }
+}
+
+/**
+ * Stamp commit metadata. Carries both the parsed Provenance (for voice
+ * + by + written_at + basis + source + reason) AND the commit's git
+ * author-time (the wall-clock moment of the stamp, used for "is this
+ * stamp newer than the legacy line's commit" comparisons).
+ *
+ * Distinct from Provenance.written_at — that field is backdated to
+ * record the original drafting time of the content, which for legacy
+ * backfill is in the PAST (e.g., 2026-04-30 even though the stamp
+ * commit is happening today). For "stamp overrides legacy" semantics
+ * we need git-author-time, not written_at.
+ */
+interface StampCommit {
+  prov: CachedCommitProvenance;
+  /** Stamp commit's git author-time (unix seconds). */
+  author_time: number;
+}
+
+async function findLatestStampForPath(
+  vaultPath: string,
+  filePath: string,
+): Promise<StampCommit | null> {
+  // %H = commit sha; %at = author-time (unix epoch). %B = full commit body.
+  // We use null-byte separators so multi-line bodies don't tangle with
+  // line-based parsing.
+  let stdout: string;
+  try {
+    const result = await execFileP(
+      "git",
+      [
+        "log",
+        "HEAD",
+        "--format=%H%x00%at%x00%B%x00END%x00",
+      ],
+      { cwd: vaultPath, maxBuffer: 16 * 1024 * 1024 },
+    );
+    stdout = result.stdout;
+  } catch {
+    return null;
+  }
+
+  // Split on the END marker.
+  const records = stdout.split("\x00END\x00");
+  let best: { sha: string; author_time: number; message: string } | null = null;
+
+  for (const record of records) {
+    if (!record.trim()) continue;
+    const parts = record.split("\x00");
+    if (parts.length < 3) continue;
+    const sha = parts[0].trim();
+    const at = Number(parts[1]);
+    const message = parts.slice(2).join("\x00").replace(/^\n+/, "");
+    if (!sha || !Number.isFinite(at)) continue;
+
+    // Cheap filter — skip commits without the marker before parsing trailers.
+    if (!message.includes("Provenance-Stamp-Path:")) continue;
+
+    const trailers = parseTrailers(message);
+    const stampPaths = trailers["Provenance-Stamp-Path"] ?? [];
+    if (!stampPaths.includes(filePath)) continue;
+    if (!trailers["Provenance-Voice"]) continue;
+
+    if (!best || at > best.author_time) {
+      best = { sha, author_time: at, message };
+    }
+  }
+
+  if (!best) return null;
+  const prov = await fetchCommitProvenance(vaultPath, best.sha);
+  return { prov, author_time: best.author_time };
 }
 
 /**
@@ -352,23 +469,67 @@ async function fetchCommitProvenance(
 function groupIntoSegments(
   lines: BlameLine[],
   provBySha: Map<string, CachedCommitProvenance>,
+  stamp: StampCommit | null,
+  headRanks: Map<string, number> | null,
 ): BlameSegment[] {
   // Sort by line_number — git blame doesn't always emit in file order
   // when -M / -C / --follow are active.
   const sorted = [...lines].sort((a, b) => a.line_number - b.line_number);
 
+  const stampRank = stamp && headRanks ? headRanks.get(stamp.prov.sha) : undefined;
+
+  // Decide effective provenance per (line, original commit). A stamp
+  // overrides ONLY when the segment's voice is legacy-unknown AND the
+  // stamp is topologically more recent on HEAD than the segment's
+  // introducing commit (rank < segment-rank — lower rank = closer to
+  // HEAD). Commits with explicit voice are immutable.
+  const effectiveBySha = new Map<string, CachedCommitProvenance>();
+  for (const [sha, prov] of provBySha) {
+    const segRank = headRanks?.get(sha);
+    const stampOverrides =
+      stamp &&
+      stampRank !== undefined &&
+      segRank !== undefined &&
+      stampRank < segRank &&
+      prov.voice === "legacy-unknown";
+
+    if (stampOverrides) {
+      // Use the stamp commit's sha so the segment metadata is
+      // self-consistent: voice + by + written_at + commit_sha all
+      // describe the SAME authority (the stamp). The introducing
+      // commit's sha remains recoverable via direct `git blame` if
+      // needed.
+      effectiveBySha.set(sha, {
+        sha: stamp.prov.sha,
+        voice: stamp.prov.voice,
+        by: stamp.prov.by,
+        written_at: stamp.prov.written_at,
+        basis: stamp.prov.basis,
+        source: stamp.prov.source,
+        reason: stamp.prov.reason,
+      });
+    } else {
+      effectiveBySha.set(sha, prov);
+    }
+  }
+
   const out: BlameSegment[] = [];
   let current: BlameSegment | null = null;
 
   for (const ln of sorted) {
-    const prov = provBySha.get(ln.commit_sha);
+    const prov = effectiveBySha.get(ln.commit_sha);
     if (!prov) continue;
 
-    if (
+    // Use the EFFECTIVE provenance for grouping — adjacent segments that
+    // got overridden by the same stamp now coalesce into one segment.
+    // (prov.sha is the EFFECTIVE sha — after override it's the stamp's,
+    // not the introducing commit's.)
+    const segKey = `${prov.voice}|${prov.by}|${prov.written_at}|${prov.sha}`;
+    const currentKey =
       current &&
-      current.commit_sha === ln.commit_sha &&
-      current.line_end + 1 === ln.line_number
-    ) {
+      `${current.voice}|${current.by}|${current.written_at}|${current.commit_sha}`;
+
+    if (current && segKey === currentKey && current.line_end + 1 === ln.line_number) {
       current.line_end = ln.line_number;
       continue;
     }
