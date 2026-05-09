@@ -116,12 +116,18 @@ describe("priorVoice — body watermark evidence", () => {
     expect(out.p_perishable).toBeCloseTo(0.7 / 1.2, 9);
   });
 
-  it("'claude:' prelude watermark bumps perishable", () => {
-    // Regex requires \b on each side. `claude:` followed by a word char
-    // satisfies it (`:`→`s` is a word boundary); a literal `claude: …`
-    // followed by whitespace would not. Spec's regex accepts the
-    // `claude:something` shape, which is what we test here.
+  it("'claude:' prelude watermark bumps perishable (no-space variant)", () => {
     const out = priorVoice(neutral({ bodyText: "claude:synthesis follows." }));
+    expect(out.p_perishable).toBeGreaterThan(0.5);
+    expect(out.p_perishable).toBeCloseTo(0.7 / 1.2, 9);
+  });
+
+  it("'claude: ' (space-after-colon, the most-common in-the-wild form) bumps perishable [v3.1 regex fix]", () => {
+    // Pre-fix: trailing \b after `:` only matches when next char is word.
+    // "claude: foo" has space after colon → no \b → no match. The fix drops
+    // the trailing \b on the AI_WATERMARK_RE alternation. This test guards
+    // the fix from regressing.
+    const out = priorVoice(neutral({ bodyText: "claude: here is the synthesis." }));
     expect(out.p_perishable).toBeGreaterThan(0.5);
     expect(out.p_perishable).toBeCloseTo(0.7 / 1.2, 9);
   });
