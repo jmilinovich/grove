@@ -996,18 +996,43 @@ function resolveVaultIdFromEnv(): string {
  * personal vault's id for code paths that don't know any better — notably
  * the shared proxy, which still services only the personal vault for
  * REST writes until vault-scoped REST lands.
+ *
+ * **Dedup**: if a row for the same (vault_id, path, trigger) is already
+ * `pending` or `processing`, the new enqueue is skipped and `false` is
+ * returned. This prevents the back-to-back-extraction amplification we saw
+ * in 2026-05 (PR #140) where a stable `HEAD~1` cron diff plus rapid
+ * REST writes pushed the same path into the queue 4–7 times before the
+ * worker drained it. Dedup is safe because the in-flight extraction
+ * always reads the file fresh from disk — if the note changed again
+ * between the two enqueues, the running extraction picks up the latest
+ * content. Once an entry transitions to `done` or `error`, a subsequent
+ * enqueue for the same path is allowed through.
+ *
+ * Returns `true` if a row was inserted, `false` if it was deduped.
  */
 export function enqueueDiscovery(
   path: string,
   trigger: DiscoveryTrigger,
   vaultId: string = resolveVaultIdFromEnv(),
-): void {
+): boolean {
   const database = getDb();
+  const existing = database
+    .prepare(
+      `SELECT id FROM discovery_queue
+        WHERE vault_id = ? AND path = ? AND trigger = ?
+          AND status IN ('pending', 'processing')
+        LIMIT 1`,
+    )
+    .get(vaultId, path, trigger) as { id: number } | undefined;
+  if (existing) {
+    return false;
+  }
   database
     .prepare(
       "INSERT INTO discovery_queue (path, trigger, vault_id) VALUES (?, ?, ?)",
     )
     .run(path, trigger, vaultId);
+  return true;
 }
 
 /**

@@ -62,5 +62,9 @@ for row in "${vaults[@]}"; do
     echo "[sync-all-vaults] ${slug}: git pull failed — skipping discovery trigger"
     continue
   fi
-  "$POST_SYNC" "$path" HEAD~1 "$port" || true
+  # Pass the vault slug so post-sync-discover.sh can persist a per-vault
+  # last-processed ref under /root/.grove/sync-state/. Without the slug,
+  # it falls back to a SHA of the path which still works but is harder
+  # to read in the filesystem.
+  "$POST_SYNC" "$path" HEAD~1 "$port" "$slug" || true
 done
