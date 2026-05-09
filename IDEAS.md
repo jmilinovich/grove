@@ -206,6 +206,39 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 
 ---
 
+### Embedding-Driven Vocab Retrieval for Discovery
+
+**Problem:** Discovery's entity-extraction call ships the full vault vocabulary on every prompt. At today's vault size (~2,713 entity notes) that's ~68K input tokens per call. PR #145 wires `cache_control` so repeats within a drain hit cache cheap, but every cache miss still re-bills the full payload, and the vocab grows linearly: at 5K entities it's ~125K tokens; at 10K, ~250K. Caching softens the cost curve; it doesn't flatten it. The curve needs to be vault-size-independent.
+
+**Sketch:**
+- Every note already carries a Voyage embedding (1024-dim, written by `embed-single.ts`). Reuse it as the discovery query.
+- Pull top-k nearest vocab entries from the existing SQLite vector index by cosine; ship only those (start k=50, tune to k=100 if recall drops).
+- Append a small fixed-or-derived **bonus list** of the top-N most-linked vault entities (by inbound wikilink count) so the common misses — "Karpathy", "Anthropic", staple concepts — are always included regardless of cosine.
+- Net prompt: from ~68K → ~3–5K input tokens. Cost-per-note becomes O(1) in vault size; only the bonus list grows, and it grows on a schedule we control.
+- Keep the full-vocab path behind a `GROVE_DISCOVERY_FULL_VOCAB=1` flag for spot-checking and the offline eval baseline.
+
+**Trade-off:** False negatives — an entity mentioned in the note that isn't in the top-k *and* isn't on the bonus list won't get linked. Mitigated by (a) bonus list, (b) tuned k, (c) vault is forgiving (next note that mentions the entity at higher cosine will catch it). Periodic full-vocab sweep (e.g. weekly cron) backfills missed links.
+
+**Dependencies:**
+- Voyage embeddings on every note (exists — `embed-single.ts`)
+- SQLite vector index with cosine top-k (exists — used by hybrid-search)
+- `src/discovery-extract.ts` — the call site; pass note embedding through `extractFromNote` → `extractEntities`, replace `buildVocabulary`'s full-vocab return with a top-k fetch
+- New offline eval harness: a labeled set of 50–100 known-good extractions (entity recall vs. full-vocab baseline)
+- Bonus-list builder: `SELECT to_path, COUNT(*) FROM wikilinks GROUP BY to_path ORDER BY 2 DESC LIMIT 100` (or equivalent — graph-health may already compute this)
+
+**Success signal:** After ship, average input tokens per Discovery call drops from ~68K to <5K (measure via Anthropic API usage). Entity recall on the labeled eval is within 5% of the full-vocab baseline at k=50, within 2% at k=100. Cost per extracted note becomes constant as the vault grows past 5K, then 10K entities.
+
+**Open questions:**
+- Right `k`? Likely 50–100; needs the eval set to settle.
+- Bonus-list size and refresh cadence — daily? On vocab change?
+- Should we cache the top-k result by note-embedding-hash so repeated extractions on the same note (e.g. retry path) skip the vector lookup?
+- Per-type retrieval: pull top-k per entity type (people, concepts, projects, companies) instead of one global top-k, to avoid one type swamping the slate?
+- Ranking blend: cosine-only, or cosine + recency + inbound-link-count?
+
+**When to spec:** Worth `/mili:spec` once the cache PR (#145) ships and we have ~2 weeks of usage data showing how often the cache busts in practice. If cache hit rate is consistently >80% the urgency drops; if it's <50%, this is the next thing to ship.
+
+---
+
 ## Ready
 
 <!-- Fully shaped ideas waiting to be moved into PLAN.md -->
