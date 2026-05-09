@@ -1,6 +1,6 @@
 # V3 plan — provenance & age-aware ranking in Grove
 
-**Status:** v3 draft, pre-panel-review-round-3.
+**Status:** v3-final — round-3 panel critiques folded in (10 spec edits below). Implementation-ready.
 **Date:** 2026-05-09.
 **Supersedes:** V2_PLAN.md (kept on disk as iteration trail).
 **Eval target:** the same 12-threshold A+ locked 2026-05-09. Two thresholds tightened by panel feedback: PPR-cold tolerance 0.10 → **0.05**, soak window 7 → **14 days with 7-day learning gate**.
@@ -89,6 +89,10 @@ function stampPathsInRange(vaultPath, fromSha, toSha): Promise<string[]>
 ```
 Single `git log --format=%B fromSha..toSha` invocation; regex over output.
 
+**B2 false-positive note (round-3 Prod panel):** the regex matches any commit body containing the literal string `Provenance-Stamp-Path: <path>` — e.g. a future PR description quoting the format that gets squashed into a commit body. False positive: warm-up tries to recompute for a non-existent path. Failure mode is safe — `recomputeProvenanceBlame` throws on missing-file, the warm-up wrapper catches it and increments `grove_warmup_path_errors` (see §L). No harm done; metric exists to detect runaway false-positive rate.
+
+**B1 step-3 failure note (round-3 Prod panel):** `recomputeProvenanceBlame` is fire-and-forget in `stampOneAtomic`. If it throws (git timeout, OOM, malformed trailer), the cache is left empty and the next read-path call to `computeProvenanceBlame` will recompute. This is the same state as a step-2 crash, which §B explicitly handles correctly. No try/catch with rollback needed — there is nothing to roll back; `setNoteBlame` uses `INSERT … ON CONFLICT DO UPDATE` (db.ts:1530-1540).
+
 **B3 fix — Coverage of all mutators.** Two-pronged:
 - Discovery worker MUST call `clearNoteBlame(path)` before any frontmatter mutation. Add to `discovery-extract.ts` and `discovery-link.ts`.
 - Warm-up worker walks BOTH `git diff --name-only fromSha..toSha` (file changes) AND `stampPathsInRange(...)` (stamp commits). Belt and suspenders — covers any mutator that forgets to call `clearNoteBlame`.
@@ -142,6 +146,9 @@ Before flag-on: simulate a sync that touches 200 paths, run warm-up, confirm:
 
 Test in `test/blame.test.ts` with a synthetic 200-note vault.
 
+### Concurrency benchmark (round-3 Prod must-fix)
+Default `PROV_WARMUP_CONCURRENCY=4` is panel intuition derived from "pLimit + g4dn vCPU count," not measured. **Rollout step 12 (staging day) MUST sweep N∈{2, 4, 8} on the 200-note synthetic vault under 50 RPS synthetic load** and pick the N that minimizes `max(p99_during_warmup, warmup_duration)`. **The chosen N is persisted in `runtime_config.warmup_concurrency`, NOT in env**, so it can be tuned without a deploy. This is the difference between "ships and gets paged" and "ships clean" on first prod sync — git-blame is CPU-bound on the 4-vCPU box and saturating it during a sync collapses request-handler p99.
+
 ---
 
 ## §D — `usage_directive` on search hits + multi-segment straddle rule
@@ -194,8 +201,20 @@ Why "perishable wins" is the right rule (KG panel posture): a single perishable 
 - Threshold #5 (envelope completeness) extended: every search hit MUST also include `usage_directive` if matched voice is perishable.
 - New test fixture: VAULT_STRADDLE in `test-set.ts` — note where line ranges 1-10 are durable, 11-15 perishable, 16-30 durable; query whose match spans lines 8-13 (crosses boundary). Expected: voice=perishable, directive present.
 
+### Soft-directive on high-prior-perishable legacy-unknown (round-3 KG must-fix)
+A legacy-unknown note with §E-computed `p_perishable > 0.6` (e.g. an Inbox note with AI-watermark text) gets ranking demoted but, without this addition, would receive NO `usage_directive` because its literal voice is `legacy-unknown`. §E and §D would then work against each other on the highest-risk class of unstamped notes: ranking treats them as suspect, but the consumer reads them with no framing warning.
+
+v3-final addition: when matched voice is `legacy-unknown` AND `priorVoice(note).p_perishable > 0.6`, emit a *soft* directive with explicit hedging:
+```
+PERISHABLE_USAGE_DIRECTIVE_SOFT =
+  "This note is unstamped, but its location and content suggest it may be
+   perishable (AI synthesis or moment-in-time snapshot). Verify the content
+   reflects current understanding before extending it."
+```
+Stored alongside `PERISHABLE_USAGE_DIRECTIVE` in `provenance.ts` (per §Q). The `0.6` threshold matches §E's neutral-vs-evidence cutoff; tunable via `PROV_SOFT_DIRECTIVE_THRESHOLD` env.
+
 ### Non-goal change
-"Not touching the read-side directive" → **REMOVED**. v3 explicitly extends the directive surface to search results. Phase A's text remains; v3 reuses it.
+"Not touching the read-side directive" → **REMOVED**. v3 explicitly extends the directive surface to search results AND adds a soft-directive variant for high-prior-perishable legacy-unknown. Phase A's text remains; v3 reuses it and adds a hedged sibling.
 
 ---
 
@@ -258,7 +277,8 @@ This:
 
 ### Implementation
 - New file: `src/provenance-prior.ts`. Pure function. Imported by `hybrid-search.ts` reweight.
-- Heuristic weights (the 0.2, 0.15 etc.) calibrated once on the 183 stamped notes; refresh when stamp coverage doubles or quarterly, whichever first. Cron worker writes weights to `runtime_config` table (§7 plumbing).
+- **Heuristic weights are HAND-CODED PRIORS, not fit weights.** Round-3 KG panel correctly noted that all 183 currently-stamped notes are perishable (zero durable stamps as of 2026-05-09), so the 183-note population can validate the perishable-detection rules but cannot fit a `p_durable` axis. Until Phase B3 lands ≥30 durable stamps (enough for sign validation), §E weights are panel/folder-semantics priors. Once B3 lands, the cron worker fits weights against the now-balanced labeled set and writes them to `runtime_config` (§7 plumbing) — refresh when stamp coverage doubles or quarterly, whichever first.
+- **Age source for `priorVoice` MUST come from segment-level blame `written_at`**, NOT `get_first_commit_for(path)` — round-3 KG panel flagged the inconsistency. For legacy-unknown notes, blame.ts falls back to git author-date of the introducing commit (defined behavior at `blame.ts:497-509`). This makes §A's age curve and §E's age covariate consistent in the same code path. The pseudocode line `const age_days = days_since(get_first_commit_for(path))` should read `const age_days = days_since(segment.written_at)` once implemented.
 - Test fixtures: `test/provenance-prior.test.ts` covers each evidence rule independently.
 
 ---
@@ -269,14 +289,14 @@ This:
 v2 said "ADD adversarial fixtures" but didn't enumerate them. The ranking-unit sweep has been hitting 100% across all configs because fixtures are too easy.
 
 ### v3 fixture set
-12 new candidate fixtures (3 per IR shape) + 1 vault-straddle fixture. Added to `test-set.ts` as named exports `ADV_OLD_PERISHABLE_NEW_DURABLE`, `ADV_SAME_AGE_CROSS`, `ADV_SAME_VOICE_OLD_NEW`, `ADV_INTENT_CONFLICTING`, `VAULT_STRADDLE`.
+20 new candidate fixtures (5 per IR shape) + 1 vault-straddle fixture. **(N raised from 3 to 5 per shape after round-3 IR panel: N=3 leaves a single fixture flake at 33% swing, below the ~5% PPR resolution the sweep needs to differentiate configs.)** Added to `test-set.ts` as named exports `ADV_OLD_PERISHABLE_NEW_DURABLE`, `ADV_SAME_AGE_CROSS`, `ADV_SAME_VOICE_OLD_NEW`, `ADV_INTENT_CONFLICTING`, `VAULT_STRADDLE`.
 
 | Shape | What it tests | Expected outcome | # fixtures |
 |---|---|---|---|
-| **Old-perishable / New-durable cross** | Decoupling voice from age. 200-day-old perishable competes with 5-day-old durable. | Durable wins via voice (decay-only would also win, but for the wrong reason — voice-only would too). Both must be active. | 3 |
-| **Same-age cross** | Pure voice signal isolation. Two notes within 24h of each other; one durable journal entry, one perishable Claude-synth. Same RRF. Same age. | Durable wins via voice multiplier alone. PPR on this set directly measures voice magnitude. | 3 |
-| **Same-voice old-vs-new** | Pure age signal isolation. Two perishable notes, 7d vs 180d, same query. | Recent wins via age curve. RPR-p directly tests piecewise breakpoints. | 3 |
-| **Intent-conflicting** | Freshness intent must override voice penalty. "What's the model lineup today" + perishable from yesterday + durable concept. | Recent perishable wins because regex auto-detect bumps to `voice_preference=recent`, disabling decay. Tests §G. | 3 |
+| **Old-perishable / New-durable cross** | Decoupling voice from age. 200-day-old perishable competes with 5-day-old durable. | Durable wins via voice (decay-only would also win, but for the wrong reason — voice-only would too). Both must be active. | 5 |
+| **Same-age cross** | Pure voice signal isolation. Two notes within 24h of each other; one durable journal entry, one perishable Claude-synth. Same RRF. Same age. | Durable wins via voice multiplier alone. PPR on this set directly measures voice magnitude. | 5 |
+| **Same-voice old-vs-new** | Pure age signal isolation. Two perishable notes, 7d vs 180d, same query. | Recent wins via age curve. RPR-p directly tests piecewise breakpoints. | 5 |
+| **Intent-conflicting** | Freshness intent must override voice penalty. "What's the model lineup today" + perishable from yesterday + durable concept. | Recent perishable wins because regex auto-detect bumps to `voice_preference=recent`, disabling decay. Tests §G. | 5 |
 | **Multi-voice straddle (vault)** | Match span crosses voice boundary. Note: lines 1-10 durable, 11-15 perishable, 16-30 durable. Query matches lines 8-13. | voice=perishable in envelope, usage_directive present. SVF tests §D. | 1 |
 
 ### Pass requirement update
@@ -285,18 +305,27 @@ The 12 thresholds remain. But for thresholds 1-3 (PPR / RPR-p / RI-d), the eval 
 - RPR-p on canonical + RPR-p on same-voice-old-new fixtures
 - RI-d on canonical + RI-d on old-perishable-new-durable fixtures
 
-A config passes only if BOTH subsets clear the threshold. This is what stops the "every config hits 100%" smoke alarm.
+**Adversarial thresholds are explicitly relaxed vs canonical** (round-3 IR panel: adversarial cases are structurally harder; holding them to canonical bars means almost no config passes, collapsing the sweep to "find the one that overfits adversarial"):
+
+| Subset | PPR | RPR-p | RI-d |
+|---|---|---|---|
+| Canonical (existing 28 fixtures) | ≥ 0.85 | ≥ 0.75 | ≥ 0.80 |
+| Adversarial (20 new fixtures) | **≥ 0.70** | **≥ 0.65** | **≥ 0.70** |
+
+A config passes only if BOTH subsets clear THEIR respective thresholds. The asymmetry is the point — canonical bar is ship-readiness, adversarial bar is no-collapse. The sweep reporting must call out config behavior on both subsets independently to stop the "every config hits 100%" smoke alarm.
 
 ---
 
 ## §G–§Q — Should-fix items folded in
 
 ### §G — Auto-detect regex hardened (IR)
-Drop `current/currently/now` from the freshness lexicon (false-positive on durable-intent queries like "current understanding of X"). Add **negative gate**: if query also contains `understanding|theory|definition|concept|history|origin|principles?|fundamentals?`, force `voice_preference=mixed`.
+Drop `current/currently/now` from the freshness lexicon (false-positive on durable-intent queries like "current understanding of X"). Add **negative gate**: if query also contains durable-intent terms, force `voice_preference=mixed`.
+
+**Round-3 IR panel hardening:** durable-intent set must include nominalized-thinking terms or the regex flunks its own falsifier on queries like "what's the latest thinking on parametric design" (where `latest` triggers freshness but no durable term fires):
 
 ```
 const FRESHNESS_TERMS = /\b(today|yesterday|right now|this (week|month|quarter)|latest|recent(ly)?|lately|\d{4}-\d{2}-\d{2}|\b(jan|feb|...)\b\s+\d{4})\b/i
-const DURABLE_INTENT_TERMS = /\b(understanding|theory|definition|concept|history|origin|principles?|fundamentals?)\b/i
+const DURABLE_INTENT_TERMS = /\b(understanding|theory|definition|concept|history|origin|principles?|fundamentals?|thinking|approach|view|stance|framework|philosophy|paradigm|methodology|model of|take on)\b/i
 
 function detectVoicePreference(query):
   if DURABLE_INTENT_TERMS.test(query) return "mixed"
@@ -313,31 +342,36 @@ Already folded into §A. Fresh window 14→7 days. Floor 0.85 (asymptotic, not m
 Threshold #10 update. If PPR-warm is 0.85 and PPR-cold can be 0.75 (v2's 0.10 gap), cold drops below RPR-p's threshold. Tightening to 0.05 means cold ≥ 0.80 — still passing all three rate metrics. With v3's atomic invalidate + warm-up, achievable.
 
 ### §J — Soak reason chips (Prod)
-Threshold #11 update. Each thumbs-down requires a reason chip:
+Threshold #11 update. Each thumbs-down requires a reason chip. **Round-3 Prod panel: 5th chip added** so "the new top-5 is fine, just feels different" doesn't get dumped into `other` and trip auto-revert on a non-quality-regression:
+
 - `wrong-result` — the new top-5 contains no relevant content
 - `wrong-by-design` — design suppressed something I expected to see; design is wrong
 - `freshness-intent-misfire` — auto-detect picked recent when I wanted canonical (or vice versa)
-- `other`
+- `expectation-only` — top-5 is fine, just feels different from before (NEW — explicitly excluded from auto-revert gate)
+- `other` — none of the above; I'm uncomfortable but can't articulate why
 
-Auto-revert fires only on `(wrong-result + other) / total > 0.20`. The other categories are intentional behavior or detector bugs; they trigger a separate "expectation drift" report that shapes v3.1 tuning, not rollback.
+Auto-revert fires only on `(wrong-result + other) / total > 0.20`. `wrong-by-design`, `freshness-intent-misfire`, and `expectation-only` are intentional behavior, detector bugs, or user-behavior-change; they feed an "expectation drift" report that shapes v3.1 tuning, not rollback.
 
 ### §K — Per-backend defaults symmetric (IR)
 v2 defaults `vec_perishable=0.75, bm25_perishable=0.90` were panel intuition. v3 ships with `bm25_perishable = vec_perishable = 0.85` (symmetric). Per-backend asymmetry becomes v3.1 once the observability triplet has 7 days of `voice_at_rank{list}` data showing the bias direction empirically.
 
 ### §L — Observability additions (Prod)
-v2's 5 metrics + 3 new from round-2 Prod panel:
+v2's 5 metrics + 3 new from round-2 Prod panel + 2 new from round-3 Prod panel:
 - `grove_warmup_seconds_since_last_completion` (gauge) — liveness
 - `grove_warmup_paths_completed_per_sync` (histogram) — coverage / budget overflow
+- `grove_warmup_path_errors` (counter) — increments when `recomputeProvenanceBlame` throws inside the warm-up worker; covers §B's body-parse false-positive case where a non-existent path is queued
 - `grove_stamp_invalidation_drift` (counter) — incremented when post-sync stamp count ≠ matching cache delete count. Should be 0; >0 pages.
 - `grove_reweight_auto_revert_total` (counter) — incremented when soak triggers auto-revert. Should be 0 in steady state.
+- **`grove_search_voice_preference{mode}` (counter, labels: `recent | mixed | manual`)** — increments per search. **(NEW from round-3 Prod panel: without this, soak data is uninterpretable. If the §G regex picks `recent` for 80% of queries, every PPR/RPR-p number in the soak is conditioned on a config the panels never agreed to.)**
 
 Alert rules wired in `/health` config:
 - `legacy_unknown_share > 0.7 for 5m` → page
 - `grove_stamp_invalidation_drift > 0 for 1m` → page
 - `grove_reweight_auto_revert_total increased` → page
+- **`rate(voice_preference{mode="recent"}) / rate(voice_preference{mode=*}) > 0.5 for 1h` → page** (regex over-firing — the §G falsifier failed in production)
 
 ### §M — Soak window 7 → 14 days with 7-day learning gate (Prod)
-Threshold #11 update. Soak runs 14 days. **Auto-revert disabled before day 7** unless `legacy_unknown_share > 0.7` or `voice_at_rank` rank-1-distribution flattens to corpus class rate (i.e. PPR collapsed to identity). After day 7, normal auto-revert rules apply (§J).
+Threshold #11 update. Soak runs 14 days. **Days 1-6 are human-review-only; days 7-14 are automation-eligible.** Soak metrics (thumbs-up/down + reason chips) are recorded continuously from day 4 — but the auto-revert decision is gated until day 7 except for hard-fail metrics (`legacy_unknown_share > 0.7` or `voice_at_rank` rank-1-distribution flattening to corpus class rate, which indicate PPR has collapsed to identity). After day 7, normal auto-revert rules apply (§J). The extra week before automation is for human-in-the-loop sanity checking, not for collecting different data.
 
 ### §N — Stronger §6 falsifier (Prod)
 Beyond "post-sync `note_blame` row count > 0," add:
@@ -386,10 +420,10 @@ Pre-merge:
 Post-merge (rollout):
 10. Day 0: PR + flag off in prod, on in staging.
 11. Day 1: Merge. Deploy. Confirm prod identity behavior unchanged.
-12. Day 2: Flag on for `john-life` in staging via runtime_config. Run E2E + rollback-bench in staging.
+12. Day 2: Flag on for `john-life` in staging via runtime_config. Run E2E + rollback-bench in staging. **Sweep `PROV_WARMUP_CONCURRENCY` ∈ {2, 4, 8} on the 200-note synthetic vault under 50 RPS synthetic load. Pick the N minimizing `max(p99_during_warmup, warmup_duration)`. Persist to `runtime_config.warmup_concurrency`.** (Round-3 Prod must-fix.)
 13. Day 3: Capture top-50 baseline. Flag on for `john-life` in prod.
-14. Day 4-10: Daily soak query replay; John reviews via reason-chip UI.
-15. Day 7: Learning-gate boundary. Auto-revert enabled (was disabled days 1-6 except for hard-fail metrics).
+14. Day 4-10: Daily soak query replay; John reviews via 5-chip UI (`wrong-result | wrong-by-design | freshness-intent-misfire | expectation-only | other`).
+15. Day 7: Learning-gate boundary. Auto-revert enabled (was disabled days 1-6 except for hard-fail metrics — `legacy_unknown_share > 0.7` or `voice_at_rank` collapse to corpus class rate).
 16. Day 14: If `(wrong-result + other) / total ≤ 0.20`: continue. Flag becomes default at day 21. Begin folder-boost auto-sunset deployment.
 
 ---
@@ -407,32 +441,48 @@ Post-merge (rollout):
 
 ---
 
-## Open questions for v3 panels
+## Open questions resolved by round-3 panels
 
-1. **§A interpolation shape** — linear from day-7 to day-90 toward the floor. Is linear right, or should it be sigmoid? At what point does the perishable curve intersect the durable factor (currently ~day-30 if floor=0.85 and durable_factor=1.0)?
+| # | Question | Round-3 verdict |
+|---|---|---|
+| 1 | §A interpolation linear vs sigmoid | Linear is fine as v3 baseline; sigmoid is tuning, not architecture. Sweep range documented for v3.1 calibration. (IR) |
+| 2 | §B "always recompute after stamp" latency | Acceptable for stamp.ts: stamps are infrequent + serialized + atomic-with-commit means user-perceived latency only on stamp itself, not on subsequent reads. Async queue would re-introduce the cold window §B closed. (Prod implicit) |
+| 3 | §C concurrency cap of 4 | **Resolved as rollout step 12 benchmark — runtime_config.warmup_concurrency.** (Prod must-fix) |
+| 4 | §D durable+legacy mix ordering | "perishable > legacy-unknown > durable" confirmed. legacy-unknown beats durable because legacy MAY be perishable per §E's prior; conservative-honest matches Phase A posture. (KG) |
+| 5 | §E covariate weights regularization | **Hand-coded priors only until B3 lands ≥30 durables; no regularization needed pre-fit.** (KG must-fix folded in §E.) |
+| 6 | §F adversarial N=3 vs 5+ | **N=5/shape; explicit relaxed adversarial thresholds.** (IR must-fix folded in §F.) |
+| 7 | §J reason-chip taxonomy | **5th chip `expectation-only` added.** (Prod must-fix folded in §J.) |
+| 8 | §M learning gate scope | Applies only to subjective-acceptance auto-revert. PPR-cold and other automated metrics (the hard-fail ones) fire days 1-6. Clarified in §M. (Prod) |
 
-2. **§B "always recompute after stamp"** adds latency to every stamp commit. With 183 existing stamps + B3 backfill bringing potentially thousands more, is the recompute cost in stamp.ts acceptable? Or should recompute be queued asynchronously?
+## Open questions for v3.1 (post-launch tuning)
 
-3. **§C concurrency cap of 4** — empirically derived from "pLimit + g4dn vCPU count"? Should be benchmarked, not chosen.
+These were raised in panel critiques as tunable, not blocking. Address after the 14-day soak provides production data:
 
-4. **§D "perishable wins" rule** — KG panel posture. But durable+legacy mix: does legacy-unknown win? v3 says yes (perishable > legacy > durable). Right ordering?
-
-5. **§E covariate weights** — calibration on 183 notes. Is this enough labeled data? Should the rule weights be regularized (e.g., max contribution per evidence = 0.15 to prevent any single rule from dominating)?
-
-6. **§F adversarial fixture realism** — are 3 per shape enough to be robust against tuning, or is 5+ needed?
-
-7. **§J reason-chip taxonomy** — 4 categories proposed. Missing one for "query understood but ranking is just wrong, can't say why?"
-
-8. **§M 14-day soak with 7-day learning gate** — does the 7-day gate also apply to PPR-cold and other automated metrics, or only to subjective acceptance?
+1. **§A day-0 perishable factor** — currently 1.00 (matches durable). IR panel suggests 0.97 to encode "still AI synthesis" while preserving FIR. Sweep candidate.
+2. **§K floor value** — currently 0.85. IR panel suggests 0.90 baseline with sweep range 0.80-0.95. Calibrate from `voice_at_rank{list}` data after 7 days of production.
+3. **Per-backend asymmetry** — currently symmetric (vec=bm25=0.85). IR panel will revisit once 7 days of `voice_at_rank{list}` data shows whether vec actually over-retrieves perishable.
+4. **§D vec-chunk overlap rule** — current worst-case-voice rule may over-fire on vec hits where chunk spans 30-50 lines. KG panel: separate vec-chunk-resolution path that requires ≥2 lines of overlap before perishable-wins triggers.
+5. **§E backlink-count covariate** — KG panel's cheapest version of graph-distance. Add as pre-registered v3.1 covariate.
+6. **`written_at` semantics doc** — KG panel: trailer time-of-content, not stamp-commit-time. One-line clarification in §D pseudocode.
 
 ---
 
-## What I'm asking the v3 panels
+## Round 3 verdict (final)
 
-Same three lenses. Specifically:
+All three panels (IR / KG / Prod) returned **ITERATE to v4 — but only spec-tightening, no architecture changes**. Total 7 must-fixes across panels, zero cross-panel consensus on any single item, zero blocking bugs (vs round-1's blocking sync-cache invalidation and round-2's three stamp-invalidation correctness bugs). Direct quotes:
 
-- **IR/ranking:** does §A's interpolation shape solve the double-counting cleanly? Are §F's adversarial fixtures structured the right way?
-- **KG/semantic-memory:** does §D's worst-case-voice rule honor Phase A's contract? Is §E's covariate set the right starting point or are there critical evidence sources missing?
-- **Production:** does §B's atomic-then-recompute close the cache-invalidation gap? Is §C's budgeted concurrent warm-up safe under realistic load? Is §J's reason-chip taxonomy implementable in the soak UI?
+- IR: *"The architecture is sound. One spec tightening and v4 ships."*
+- KG: *"The architecture is sound. The remaining issues are calibration honesty, internal consistency, and one cross-section gap — all closable in a focused v4 pass without redesign."*
+- Prod: 5 of 6 critique items explicitly labeled *"1-line spec addition that doesn't need a v4 round."*
 
-Goal of round 3: **SHIP decision**. If panels agree v3 is structurally complete, this becomes the implementation spec. If structural issues remain, v4 closes them — but at this point I expect the remaining work to be tuning, not architecture.
+**All 7 must-fixes folded directly into V3_PLAN.md as in-place edits** (no separate V4_PLAN.md). The 10 tuning items deferred to v3.1 are enumerated under "Open questions for v3.1" above.
+
+**Convergence trajectory:**
+
+| Round | Total must-fixes | Architecture changes | Cross-panel consensus | Blocking bugs |
+|---|---|---|---|---|
+| 1 | 9 | Yes (full v2 redesign) | 4 themes ≥2 panels | 1 (sync-cache invalidation) |
+| 2 | 9 | Partial (correctness in spec) | 2 themes ≥2 panels | 3 (stamp invalidation sub-bugs) |
+| 3 | 7 | None | 0 themes ≥2 panels | 0 |
+
+**Status: implementation-ready spec.** This file becomes the source of truth for the Search Quality component (GOAL.md component pending operator addition). Implementation owner picks up §A-§Q and the harness extensions (test-set additions, FIR/SVF/--cold runner flags, soak directory, rollback-bench) from here.
