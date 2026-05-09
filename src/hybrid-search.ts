@@ -10,7 +10,7 @@
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
-import { searchMetrics } from "./metrics.js";
+import { searchMetrics, searchQualityMetrics } from "./metrics.js";
 import { assertUnlocked, indexWorkingPath } from "./index-crypto.js";
 import { getNoteVoicesAndAges } from "./db.js";
 import { priorVoice } from "./provenance-prior.js";
@@ -583,12 +583,30 @@ function applyProvenanceReweight(
   fused: HybridResult[],
   query: string,
   referenceTime: Date = new Date(),
+  manualVoicePreference?: VoicePreference,
 ): HybridResult[] {
   if (!PROV_RANKING_ENABLED) return fused;
   if (fused.length === 0) return fused;
 
-  const voicePreference = detectVoicePreference(query);
+  const voicePreference = manualVoicePreference ?? detectVoicePreference(query);
+  // V3 §L observability — record the voice_preference mode this call landed in.
+  // Auto-detect only ever returns 'recent' or 'mixed'; an explicit caller can
+  // also pass 'canonical', but the metrics taxonomy is auto-detect-shaped, so
+  // any caller-supplied value collapses to 'manual'.
+  searchQualityMetrics.recordVoicePreference(
+    manualVoicePreference !== undefined
+      ? "manual"
+      : (voicePreference as "recent" | "mixed"),
+  );
+
+  const lookupStart = Date.now();
   const provMap = getNoteVoicesAndAges(fused.map((r) => r.vault_path));
+  searchQualityMetrics.recordProvenanceLookupLatency(Date.now() - lookupStart);
+
+  const preTop5 = fused.slice(0, 5).map((r) => ({
+    vault_path: r.vault_path,
+    rrf_score: r.rrf_score,
+  }));
 
   function perishableFactor(ageDays: number): number {
     const base = piecewiseFactor(ageDays, PROV_PIECEWISE_CFG);
@@ -663,8 +681,36 @@ function applyProvenanceReweight(
   });
 
   reweighted.sort((a, b) => b.rrf_score - a.rrf_score);
+
+  // V3 §L observability — voice-by-rank histogram + legacy-unknown share +
+  // 1% reweight-delta JSONL sample. Cheap; cost negligible vs rrfFuse cost.
+  searchQualityMetrics.recordVoiceAtRank(reweighted);
+  searchQualityMetrics.recordLegacyUnknownShare(reweighted);
+  if (searchQualityMetrics.shouldSampleReweightDelta()) {
+    searchQualityMetrics.writeReweightDeltaSample({
+      ts: new Date().toISOString(),
+      query,
+      voice_preference: (manualVoicePreference !== undefined
+        ? "manual"
+        : (voicePreference as "recent" | "mixed")),
+      pre_top5: preTop5,
+      post_top5: reweighted.slice(0, 5).map((r) => ({
+        vault_path: r.vault_path,
+        rrf_score: r.rrf_score,
+        voice: r.voice ?? "legacy-unknown",
+      })),
+    });
+  }
+
   return reweighted;
 }
+
+/**
+ * Test-only export of the otherwise-internal reweight function. Used by
+ * test/metrics-search-quality.test.ts to verify metric wiring without
+ * spinning up the full hybridSearch pipeline.
+ */
+export const __applyProvenanceReweightForTest = applyProvenanceReweight;
 
 /**
  * Hybrid search: BM25 + vector with RRF fusion.
