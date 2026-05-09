@@ -145,6 +145,77 @@ describe("discovery queue (db helpers)", () => {
     expect(entry?.trigger).toBe("embed_retry");
     expect(entry?.attempts).toBe(1);
   });
+
+  // Regression coverage for the 2026-05 amplification bug (PR #140):
+  // grove-discovery-personal was re-extracting the same notes 4–7
+  // times per tick because (a) the cron post-sync script always
+  // diffed against HEAD~1 and (b) the queue had no in-flight dedup,
+  // so REST writes + cron re-enqueues stacked on each other.
+  // Per-(vault_id, path, trigger) dedup against the live (pending +
+  // processing) set kills both classes at once.
+  it("enqueueDiscovery dedups same (vault, path, trigger) when prior entry is still pending", () => {
+    expect(enqueueDiscovery("dup.md", "commit")).toBe(true);
+    expect(enqueueDiscovery("dup.md", "commit")).toBe(false);
+    expect(enqueueDiscovery("dup.md", "commit")).toBe(false);
+    expect(discoveryQueueDepth()).toBe(1);
+  });
+
+  it("enqueueDiscovery dedups while an entry is processing (in-flight)", () => {
+    enqueueDiscovery("flight.md", "write");
+    const claimed = dequeueDiscovery();
+    expect(claimed?.status).toBe("processing");
+
+    // Second enqueue arriving mid-flight (e.g. another REST write or
+    // the cron tick re-emitting) must be dropped — the in-flight
+    // extraction will read the latest disk state when it runs.
+    expect(enqueueDiscovery("flight.md", "write")).toBe(false);
+    expect(discoveryQueueDepth()).toBe(0); // 0 pending; the one we have is processing
+  });
+
+  it("enqueueDiscovery allows re-enqueue once the prior entry has completed", () => {
+    enqueueDiscovery("again.md", "write");
+    const first = dequeueDiscovery()!;
+    markDiscoveryDone(first.id);
+
+    // The note was edited again post-completion — must enqueue a new
+    // row so the next change actually extracts.
+    expect(enqueueDiscovery("again.md", "write")).toBe(true);
+    expect(discoveryQueueDepth()).toBe(1);
+  });
+
+  it("enqueueDiscovery allows re-enqueue after an errored entry", () => {
+    enqueueDiscovery("oops.md", "commit");
+    const first = dequeueDiscovery()!;
+    markDiscoveryError(first.id, "transient JSON parse fail");
+
+    // Errored entries shouldn't gate future enqueues — otherwise a
+    // single bad extraction would stall the path forever.
+    expect(enqueueDiscovery("oops.md", "commit")).toBe(true);
+    expect(discoveryQueueDepth()).toBe(1);
+  });
+
+  it("dedup is per-vault — same path in two vaults enqueues independently", () => {
+    expect(enqueueDiscovery("shared.md", "commit", "vault_00000000")).toBe(true);
+    expect(enqueueDiscovery("shared.md", "commit", "vault_team")).toBe(true);
+    // …but a second enqueue in the same vault collapses.
+    expect(enqueueDiscovery("shared.md", "commit", "vault_00000000")).toBe(false);
+
+    expect(discoveryQueueDepth("vault_00000000")).toBe(1);
+    expect(discoveryQueueDepth("vault_team")).toBe(1);
+  });
+
+  it("dedup is per-trigger — write and commit for same path can both enqueue", () => {
+    // Different triggers represent different code paths (REST write vs
+    // git post-commit cron). Treating them as distinct makes triage
+    // logs meaningful and avoids dropping the cron path when a REST
+    // write is already in flight (or vice versa). The downstream
+    // processor handles them identically, so the worst case is two
+    // back-to-back extractions on the same content — bounded, not
+    // unbounded like the original bug.
+    expect(enqueueDiscovery("multi.md", "write")).toBe(true);
+    expect(enqueueDiscovery("multi.md", "commit")).toBe(true);
+    expect(discoveryQueueDepth()).toBe(2);
+  });
 });
 
 describe("discovery loop (tick)", () => {
