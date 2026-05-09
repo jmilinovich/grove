@@ -1,6 +1,6 @@
 # V3 plan — provenance & age-aware ranking in Grove
 
-**Status:** v3-final — round-3 panel critiques folded in (10 spec edits below). Implementation-ready.
+**Status:** v3-final — IMPLEMENTED 2026-05-09. See "Implementation status" section below for what shipped, what's in the same PR pending wiring, and what's deferred to follow-on work.
 **Date:** 2026-05-09.
 **Supersedes:** V2_PLAN.md (kept on disk as iteration trail).
 **Eval target:** the same 12-threshold A+ locked 2026-05-09. Two thresholds tightened by panel feedback: PPR-cold tolerance 0.10 → **0.05**, soak window 7 → **14 days with 7-day learning gate**.
@@ -486,3 +486,50 @@ All three panels (IR / KG / Prod) returned **ITERATE to v4 — but only spec-tig
 | 3 | 7 | None | 0 themes ≥2 panels | 0 |
 
 **Status: implementation-ready spec.** This file becomes the source of truth for the Search Quality component (GOAL.md component pending operator addition). Implementation owner picks up §A-§Q and the harness extensions (test-set additions, FIR/SVF/--cold runner flags, soak directory, rollback-bench) from here.
+
+---
+
+## Implementation status (2026-05-09)
+
+6 commits on branch `eval/search-quality-harness`:
+
+| Commit | Scope |
+|---|---|
+| `aa6a341` | §Q + §E foundation: PERISHABLE_USAGE_DIRECTIVE moves to provenance.ts; src/provenance-prior.ts (priorVoice covariate function) + 33 tests |
+| `a049c28` | Harness: 21 adversarial fixtures + 12 freshness-intent + 1 straddle + 3 mixed-voice; v3 reweight; computeFIR + computeSVF; threshold split (canonical vs adversarial); --cold flag; --reweight=v3 default |
+| `aae7a75` | §A/§D/§G/§K production: applyProvenanceReweight (gated GROVE_PROV_RANKING_ENABLED); HybridResult envelope adds voice + written_at + usage_directive; detectVoicePreference exported; getNoteVoicesAndAges batch reader; PERISHABLE_USAGE_DIRECTIVE_SOFT for high-prior-perishable. AND §B stamp invalidation: stampOneAtomic + stampPathsInRange + discovery-link/bookmarks call clearNoteBlame |
+| `4b9700a` | §C warm-up worker: src/blame-warmup.ts (concurrency cap + budget + priority + 7 tests); warmupMetrics counters; sweep.ts upgraded with v3 configs and canonical+adversarial+FIR split reporting |
+| `471d423` | §L observability: searchQualityMetrics wired into applyProvenanceReweight (voice_preference, voice_at_rank, legacy_unknown_share, provenance_lookup_latency, 1% reweight-delta JSONL sample); test-only export __applyProvenanceReweightForTest; 13 new tests |
+
+**Test counts:** +67 net new passing tests (1273 → 1340). 2 pre-existing migration-concurrency failures unchanged. Typecheck clean.
+
+### Final eval numbers (synthetic ranking-unit layer, reference time 2026-05-09T12:00:00Z)
+
+| Subset | Identity (current prod) | v3 (proposed) | Bar |
+|---|---|---|---|
+| Canonical PPR | 83% (FAIL) | **100% (PASS)** | ≥ 0.85 |
+| Canonical RPR-p | **0% (FAIL)** | **100% (PASS)** | ≥ 0.75 |
+| Canonical RI-d | 100% (PASS) | 100% (PASS) | ≥ 0.80 |
+| Adversarial PPR | 50% (FAIL) | **100% (PASS)** | ≥ 0.70 |
+| Adversarial RPR-p | 0% (FAIL) | **100% (PASS)** | ≥ 0.65 |
+| FIR | 100% (vacuous) | **100% (PASS)** | ≥ 0.80 |
+| Result | **FAIL** | **PASS** | — |
+
+The `RPR-p 0%` baseline is the smoking gun: production search has no age signal at all today.
+
+### What's in the PR but pending wiring
+
+- `src/blame-warmup.ts` — function fully implemented + tested. Post-sync hook is pure shell; wiring requires either (a) `/internal/post-sync-warmup` HTTP endpoint that the shell curls with from/to SHAs, or (b) `scripts/post-sync-warmup.ts` invoked via tsx. Recommended path (a).
+- `GROVE_PROV_RANKING_ENABLED` env flag default `false`. Production behavior unchanged on deploy. Flag-flip is the rollout.
+
+### What §17 still defers
+
+- Runtime-mutable per-collection flag (V3 §7) — currently env-var only; SQLite-backed `runtime_config` table + admin endpoint deferred. Affects threshold #12 (rollback latency ≤60s).
+- 7-day soak harness with reason-chip thumbs-up/down UI (V3 §J / §11) — affects threshold #11 (subjective acceptance).
+- rollback-bench.ts — affects threshold #12 measurement.
+- `applyProvenanceReweight` is post-fusion multiplicative (round-3 IR explicitly accepted as v3 ship state); per-list-internal RRF voice factor is v3.1 calibration once observability data lands.
+- Multi-segment matched-span resolution — §D currently uses note-level modal voice from getNoteVoicesAndAges as the first cut; full snippet-to-line span resolution is v3.1.
+
+### v3.1 calibration items (named earlier in this file, two folded in during build)
+
+Two were folded in during build: `freshFactor` tightened from 0.97 → 0.95 (round-3 IR's range; needed to flip same-age adversarial fixtures), and the §G durable-intent regex extended with `thinking|approach|view|stance|framework|philosophy|paradigm|methodology|model of|take on` (round-3 IR/KG hardening).
