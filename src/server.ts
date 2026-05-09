@@ -10,7 +10,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -26,6 +26,7 @@ import { gitLog, startupRecovery, listNotes } from "./vault-ops.js";
 import { parseNote, contentHash, inferTags } from "./notes-validate.js";
 import { PERISHABLE_USAGE_DIRECTIVE, type Provenance } from "./provenance.js";
 import { computeProvenanceFields, provenanceEnabled } from "./blame.js";
+import { postSyncWarmup, type PostSyncWarmupResult } from "./blame-warmup.js";
 import {
   handleWriteNote,
   handleDeleteNote,
@@ -273,6 +274,121 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
   } catch (err: any) {
     return { content: [{ type: "text", text: err.message }], isError: true };
   }
+}
+
+// ── /internal/post-sync-warmup endpoint plumbing ───────────────────
+//
+// V3 §C wiring (closes the TODO in blame-warmup.ts). Cron's
+// `post-sync-discover.sh` curls this endpoint once per sync after the
+// per-path discovery loop, with the pre/post HEAD SHAs captured around
+// `git pull --ff-only`. The endpoint resolves the changed paths via
+// `postSyncWarmup` and pre-computes their `note_blame` rows so the next
+// user query hits a warm cache.
+//
+// Auth: bearer-token gated against GROVE_INTERNAL_TOKEN. Localhost-only
+// by intent (the cron runs on the same box), but the bearer check is
+// still the gate — defense-in-depth, and it lets the discovery-trigger
+// (which trusts localhost via the X-Grove-Vault-Id bypass on /internal/)
+// keep its existing contract while warmup uses an explicit credential.
+//
+// Body validation: from_sha/to_sha must be either 40-char hex SHAs or
+// `HEAD~N` style refs. Permissive on parsing — we log invalid shapes
+// rather than 400, since git ultimately resolves the ref anyway and a
+// malformed ref will surface as an empty diff rather than a crash.
+
+const SHA_OR_REF = /^([0-9a-fA-F]{7,40}|HEAD(~\d+)?|[A-Za-z0-9_./-]+)$/;
+
+export type WarmupAuthOutcome =
+  | { ok: true }
+  | { ok: false; status: 401; reason: string };
+
+/**
+ * Check the bearer-token for /internal/post-sync-warmup. Pure decision
+ * — no I/O — so the test exercises the same path the handler does.
+ *
+ * Returns ok when the configured GROVE_INTERNAL_TOKEN matches the value
+ * in the `Authorization: Bearer <token>` header. Returns 401 otherwise,
+ * including when the env var is unset (we'd rather refuse all warmup
+ * traffic than silently no-op auth).
+ */
+export function checkInternalBearer(
+  authHeader: string | undefined,
+  configuredToken: string | undefined,
+): WarmupAuthOutcome {
+  if (!configuredToken) {
+    return { ok: false, status: 401, reason: "GROVE_INTERNAL_TOKEN not configured" };
+  }
+  if (!authHeader) {
+    return { ok: false, status: 401, reason: "missing Authorization header" };
+  }
+  const match = /^Bearer\s+(.+)$/i.exec(authHeader);
+  if (!match) {
+    return { ok: false, status: 401, reason: "Authorization header is not a Bearer token" };
+  }
+  const presented = match[1]!.trim();
+  // timingSafeEqual requires equal-length buffers; pad the shorter side
+  // (with a constant) to keep the compare timing-independent on the
+  // length signal. Mismatched lengths still fail the equality check.
+  const a = Buffer.from(presented);
+  const b = Buffer.from(configuredToken);
+  if (a.length !== b.length) {
+    return { ok: false, status: 401, reason: "bearer token mismatch" };
+  }
+  if (!timingSafeEqual(a, b)) {
+    return { ok: false, status: 401, reason: "bearer token mismatch" };
+  }
+  return { ok: true };
+}
+
+export type WarmupBodyOutcome =
+  | { ok: true; fromSha: string; toSha: string }
+  | { ok: false; status: 400; reason: string };
+
+/**
+ * Validate the JSON body of a /internal/post-sync-warmup request.
+ * Permissive on ref shape — see SHA_OR_REF above.
+ */
+export function parseWarmupBody(raw: string): WarmupBodyOutcome {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, status: 400, reason: "invalid JSON body" };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { ok: false, status: 400, reason: "body must be a JSON object" };
+  }
+  const obj = parsed as Record<string, unknown>;
+  const fromSha = obj.from_sha;
+  const toSha = obj.to_sha;
+  if (typeof fromSha !== "string" || !fromSha) {
+    return { ok: false, status: 400, reason: "from_sha is required" };
+  }
+  if (typeof toSha !== "string" || !toSha) {
+    return { ok: false, status: 400, reason: "to_sha is required" };
+  }
+  if (!SHA_OR_REF.test(fromSha)) {
+    console.warn(`[grove] warmup: from_sha shape looks invalid: ${fromSha}`);
+  }
+  if (!SHA_OR_REF.test(toSha)) {
+    console.warn(`[grove] warmup: to_sha shape looks invalid: ${toSha}`);
+  }
+  return { ok: true, fromSha, toSha };
+}
+
+/**
+ * Format a successful warmup result as the JSON shape the shell hook
+ * (and any future operator tooling) expects: snake_case counts +
+ * duration_ms. Kept separate from the http handler so tests can pin it.
+ */
+export function formatWarmupResponse(r: PostSyncWarmupResult) {
+  return {
+    paths_total: r.pathsTotal,
+    paths_completed: r.pathsCompleted,
+    paths_dropped: r.pathsDropped,
+    paths_errored: r.pathsErrored,
+    duration_ms: r.durationMs,
+  };
 }
 
 // ── Server instructions (what Claude.ai sees) ─────────────────────
@@ -1081,6 +1197,60 @@ const httpServer = createServer(async (req, res) => {
     } catch (err) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: (err as Error).message }));
+    }
+    return;
+  }
+
+  // V3 §C: post-sync warm-up. Bearer-gated; called once per cron tick by
+  // post-sync-discover.sh after the per-path discovery loop. Pre-warms
+  // note_blame for the (file-changed ∪ stamp-touched) paths in the new
+  // commit range so the next user query hits a hot cache row.
+  if (req.url === "/internal/post-sync-warmup" || req.url?.startsWith("/internal/post-sync-warmup?")) {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "Content-Type": "application/json", "Allow": "POST" });
+      res.end(JSON.stringify({ error: "method not allowed" }));
+      return;
+    }
+    const auth = checkInternalBearer(
+      req.headers["authorization"] as string | undefined,
+      process.env.GROVE_INTERNAL_TOKEN,
+    );
+    if (!auth.ok) {
+      res.writeHead(auth.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: auth.reason }));
+      return;
+    }
+    let raw: string;
+    try {
+      raw = await readBody(req);
+    } catch (err) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: (err as Error).message }));
+      return;
+    }
+    const parsed = parseWarmupBody(raw);
+    if (!parsed.ok) {
+      res.writeHead(parsed.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: parsed.reason }));
+      return;
+    }
+    try {
+      const result = await postSyncWarmup({
+        vaultPath: VAULT_PATH,
+        fromSha: parsed.fromSha,
+        toSha: parsed.toSha,
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(formatWarmupResponse(result)));
+    } catch (err) {
+      // postSyncWarmup is best-effort and never throws by contract, but
+      // belt-and-suspenders here so an upstream regression surfaces as
+      // a 500 (with the message echoed for ops debugging) instead of
+      // an unhandled rejection that crashes the worker.
+      const message = (err as Error)?.message ?? String(err);
+      console.error(`[grove] post-sync-warmup handler crashed: ${message}`);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: message }));
     }
     return;
   }
