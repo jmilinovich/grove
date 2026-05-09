@@ -55,12 +55,21 @@ for row in "${vaults[@]}"; do
     continue
   fi
   echo "[sync-all-vaults] ${slug} (${path}, port=${port})"
-  # git pull --ff-only — if the upstream has diverged (unlikely because the
-  # server is the sole writer per CLAUDE.md rule #2), we'd rather fail
-  # loudly than auto-merge and corrupt state.
-  if ! git -C "$path" pull --ff-only; then
-    echo "[sync-all-vaults] ${slug}: git pull failed — skipping discovery trigger"
-    continue
+  # No remote configured? Mirror the silent-skip behavior of vault-ops.gitPush
+  # (see src/vault-ops.ts:hasGitRemote). Vaults provisioned without
+  # GROVE_VAULT_REMOTE_TEMPLATE are deliberately remote-less and have nothing
+  # to pull — but they still get local writes from grove-server, so we still
+  # want to run post-sync-discover so those new commits are picked up.
+  if [[ -z "$(git -C "$path" remote)" ]]; then
+    echo "[sync-all-vaults] ${slug}: no git remote configured — skipping pull, still running discovery"
+  else
+    # git pull --ff-only — if the upstream has diverged (unlikely because the
+    # server is the sole writer per CLAUDE.md rule #2), we'd rather fail
+    # loudly than auto-merge and corrupt state.
+    if ! git -C "$path" pull --ff-only; then
+      echo "[sync-all-vaults] ${slug}: git pull failed — skipping discovery trigger"
+      continue
+    fi
   fi
   # Pass the vault slug so post-sync-discover.sh can persist a per-vault
   # last-processed ref under /root/.grove/sync-state/. Without the slug,
