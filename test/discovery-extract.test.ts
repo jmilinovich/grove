@@ -127,10 +127,21 @@ describe("extractEntities", () => {
   });
 
   function mockClient(response: ExtractionResult) {
+    // Mirrors the tool-use response shape from anthropic.messages.create —
+    // a single tool_use block whose `input` is the structured payload.
+    // Mirrors what we get back when we force tool_choice on extract_entities.
     const mock = {
       messages: {
         create: vi.fn().mockResolvedValue({
-          content: [{ type: "text", text: JSON.stringify(response) }],
+          stop_reason: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_test_01",
+              name: "extract_entities",
+              input: response,
+            },
+          ],
         }),
       },
     } as any;
@@ -302,5 +313,101 @@ describe("extractEntities", () => {
 
     // Should resolve via alias matching
     expect(result.entities[0].existing_path).toBe("Resources/Concepts/Machine Learning.md");
+  });
+
+  it("invokes the API with extract_entities tool and forced tool_choice", async () => {
+    const mock = mockClient({
+      entities: [],
+      suggested_links: [],
+      new_notes: [],
+    });
+    await extractEntities("Note body.", vocab);
+
+    const call = mock.messages.create.mock.calls[0][0];
+    expect(call.tools).toBeDefined();
+    expect(call.tools).toHaveLength(1);
+    expect(call.tools[0].name).toBe("extract_entities");
+    expect(call.tools[0].input_schema.required).toContain("entities");
+    expect(call.tool_choice).toEqual({ type: "tool", name: "extract_entities" });
+    // 8K headroom for large notes that previously truncated at 4K.
+    expect(call.max_tokens).toBeGreaterThanOrEqual(8192);
+  });
+
+  it("parses a large extraction (~50 entities, ~50 links) without error", async () => {
+    // Reproduces the shape that chronically truncated under the previous
+    // free-form-JSON path on notes like
+    // Resources/Concepts/public-company-role-candidates.md and
+    // Resources/Concepts/role-candidates-impact-lens.md (~40-50 entities,
+    // ~40+ wikilinks each). Tool-use returns input as a parsed object
+    // regardless of payload size — there's no JSON.parse step left to fail.
+    const N = 50;
+    const big: ExtractionResult = {
+      entities: Array.from({ length: N }, (_, i) => ({
+        name: `Entity Number ${i}`,
+        type: (["person", "concept", "project", "company"] as const)[i % 4],
+        confidence: 0.6 + ((i * 7) % 40) / 100,
+      })),
+      suggested_links: Array.from({ length: N }, (_, i) => ({
+        from_text: `Entity Number ${i}`,
+        to_path: `Resources/Concepts/Entity Number ${i}.md`,
+      })),
+      new_notes: Array.from({ length: 10 }, (_, i) => ({
+        path: `Resources/Concepts/New Concept ${i}.md`,
+        type: "concept",
+        tags: ["auto"],
+        content: "---\ntype: concept\n---\nA new concept.",
+      })),
+    };
+
+    mockClient(big);
+    const result = await extractEntities("(large note body)", vocab);
+
+    expect(result.entities).toHaveLength(N);
+    expect(result.suggested_links).toHaveLength(N);
+    expect(result.new_notes).toHaveLength(10);
+  });
+
+  it("throws a clear error when the model emits no tool_use block", async () => {
+    // Defensive: should never happen with forced tool_choice, but guard
+    // so the worker logs a useful message instead of a TypeError.
+    const mock = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "I refuse." }],
+        }),
+      },
+    } as any;
+    setClient(mock);
+
+    await expect(
+      extractEntities("Some content.", vocab),
+    ).rejects.toThrow(/extract_entities/);
+  });
+
+  it("survives a malformed tool call missing array fields", async () => {
+    // If the model somehow emits a tool_use with a partial input, we
+    // shouldn't crash with `TypeError: cannot iterate undefined`.
+    const mock = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          stop_reason: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_test_partial",
+              name: "extract_entities",
+              input: { entities: [{ name: "Foo", type: "concept", confidence: 0.5 }] },
+            },
+          ],
+        }),
+      },
+    } as any;
+    setClient(mock);
+
+    const result = await extractEntities("note body", vocab);
+    expect(result.entities).toHaveLength(1);
+    expect(result.suggested_links).toEqual([]);
+    expect(result.new_notes).toEqual([]);
   });
 });
