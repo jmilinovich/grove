@@ -24,12 +24,8 @@ import { noteUrl, vaultOwnerHandle } from "./url.js";
 
 import { gitLog, startupRecovery, listNotes } from "./vault-ops.js";
 import { parseNote, contentHash, inferTags } from "./notes-validate.js";
-import type { Provenance } from "./provenance.js";
-import {
-  computeProvenanceFields,
-  PERISHABLE_READ_DIRECTIVE,
-  provenanceEnabled,
-} from "./blame.js";
+import { PERISHABLE_USAGE_DIRECTIVE, type Provenance } from "./provenance.js";
+import { computeProvenanceFields, provenanceEnabled } from "./blame.js";
 import {
   handleWriteNote,
   handleDeleteNote,
@@ -368,7 +364,7 @@ Sub-query types:
 Always provide intent to disambiguate. Combine lex + vec for best results.
 Example: searches=[{type:'lex', query:'salary'}, {type:'vec', query:'how much do I make'}], intent='compensation details'
 
-PROVENANCE: Snippets are surface-level. To check provenance for a result you intend to use, follow up with \`get\` on the path — that response surfaces \`provenance_blame\` + \`has_perishable_segments\` + \`usage_directive\` so you can apply the read-time directive before extending or quoting. ${PERISHABLE_READ_DIRECTIVE}`,
+PROVENANCE: Snippets are surface-level. To check provenance for a result you intend to use, follow up with \`get\` on the path — that response surfaces \`provenance_blame\` + \`has_perishable_segments\` + \`usage_directive\` so you can apply the read-time directive before extending or quoting. ${PERISHABLE_USAGE_DIRECTIVE}`,
       inputSchema: {
         searches: z.array(z.object({
           type: z.enum(["lex", "vec", "hyde"]),
@@ -481,7 +477,7 @@ Use the content_hash as if_hash when updating the note.
 
 PROVENANCE: Responses may include \`provenance_blame\` (per-segment authorship from git blame + commit trailers), \`has_perishable_segments\` (boolean), and \`usage_directive\` (instructions, present only when perishable segments exist).
 
-When \`has_perishable_segments\` is true: ${PERISHABLE_READ_DIRECTIVE}`,
+When \`has_perishable_segments\` is true: ${PERISHABLE_USAGE_DIRECTIVE}`,
       inputSchema: {
         file: z.string().describe("File path relative to vault root, or note title"),
       },
@@ -594,7 +590,7 @@ Examples: "${entityPath(VAULT_CONFIG, "person")}*.md", "${VAULT_CONFIG.structure
 
 PROVENANCE: Each result may include \`provenance_blame\`, \`has_perishable_segments\`, and \`usage_directive\` (when perishable). The directive applies per-result, not per-batch — handle each note's perishable status individually.
 
-When \`has_perishable_segments\` is true on any result: ${PERISHABLE_READ_DIRECTIVE}`,
+When \`has_perishable_segments\` is true on any result: ${PERISHABLE_USAGE_DIRECTIVE}`,
       inputSchema: {
         pattern: z.string().describe("Glob pattern or comma-separated file paths"),
       },

@@ -18,6 +18,7 @@ import { promisify } from "node:util";
 import {
   parseTrailers,
   trailersToProvenance,
+  PERISHABLE_USAGE_DIRECTIVE,
   type Voice,
 } from "./provenance.js";
 import { getNoteBlame, setNoteBlame } from "./db.js";
@@ -134,25 +135,11 @@ export async function computeProvenanceFields(
   const out: ProvenanceFields = { provenance_blame: blame };
   if (blame.some((s) => s.voice === "perishable")) {
     out.has_perishable_segments = true;
-    out.usage_directive = PERISHABLE_READ_DIRECTIVE;
+    out.usage_directive = PERISHABLE_USAGE_DIRECTIVE;
   }
   return out;
 }
 
-// ── Read-site directive (also embedded in MCP tool descriptions) ────
-//
-// This text is emitted on every NoteResponse with a perishable segment
-// AND embedded in the get/query/multi_get/list_notes MCP tool
-// descriptions. Belt + suspenders: tool descriptions reach Claude at
-// conversation start; this in-response field reaches Claude at every
-// individual read.
-//
-// The "name it explicitly" clause is what makes compliance eval-able —
-// a verbal acknowledgment either occurred in the response or it didn't.
-//
-// Wording locked 2026-05-07.
-export const PERISHABLE_READ_DIRECTIVE =
-  "This note contains perishable segments — moment-in-time synthesis or prediction by an AI agent that may now be stale. You MUST: (1) before using or quoting any perishable segment, name it explicitly to the user (e.g., \"lines 5-12 were synthesis on 2026-04-30; this may be stale\"); (2) not extend, refine, or build on perishable segments without first asking the user to confirm the framing still holds; (3) prefer durable segments when there's a conflict; (4) treat perishable content as a quoted historical artifact, not a standing claim.";
 
 // ── Feature flag ────────────────────────────────────────────────────
 //

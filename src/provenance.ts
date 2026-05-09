@@ -244,3 +244,20 @@ export function trailersToProvenance(trailers: Trailers): Provenance | null {
   if (trailers["Provenance-Reason"]) prov.reason = trailers["Provenance-Reason"][0];
   return prov;
 }
+
+// ── Read/search-side directives ────────────────────────────────────
+//
+// Single source of truth for the perishable-handling instructions emitted
+// by Grove. Used by the read path (computeProvenanceFields → NoteResponse)
+// AND the search path (HybridResult envelope) so the same wording governs
+// both surfaces. Wording locked 2026-05-07; soft variant added 2026-05-09
+// for legacy-unknown notes that §E priorVoice flags as likely perishable.
+//
+// Moved here from blame.ts as part of v3 search-quality work so search-side
+// callers don't have to reach into the blame module just for a string.
+
+export const PERISHABLE_USAGE_DIRECTIVE =
+  "This note contains perishable segments — moment-in-time synthesis or prediction by an AI agent that may now be stale. You MUST: (1) before using or quoting any perishable segment, name it explicitly to the user (e.g., \"lines 5-12 were synthesis on 2026-04-30; this may be stale\"); (2) not extend, refine, or build on perishable segments without first asking the user to confirm the framing still holds; (3) prefer durable segments when there's a conflict; (4) treat perishable content as a quoted historical artifact, not a standing claim.";
+
+export const PERISHABLE_USAGE_DIRECTIVE_SOFT =
+  "This note is unstamped, but its location and content suggest it may be perishable (AI synthesis or moment-in-time snapshot). Verify the content reflects current understanding before extending it.";
