@@ -273,6 +273,56 @@ describe("formatResults", () => {
     expect(output).toContain("(https://grove.md/a/b)");
     expect(output).not.toContain("/@");
   });
+
+  // V3 §D — envelope additions (voice + written_at + usage_directive)
+  it("renders voice + written_at + usage_directive when present", () => {
+    const output = formatResults([
+      {
+        vault_path: "Inbox/perishable.md",
+        title: "Recent Synth",
+        rrf_score: 0.7,
+        snippet: "snippet body",
+        sources: ["bm25"],
+        voice: "perishable",
+        written_at: "2026-04-15T00:00:00Z",
+        usage_directive: "PAUSE AND NAME IT before extending",
+      },
+    ]);
+    expect(output).toContain("_voice: perishable, written 2026-04-15T00:00:00Z_");
+    expect(output).toContain("> PAUSE AND NAME IT before extending");
+    expect(output).toContain("**Recent Synth**");
+  });
+
+  it("omits envelope fields when reweight didn't run (dark-launch / flag off)", () => {
+    const output = formatResults([
+      {
+        vault_path: "a.md",
+        title: "Plain",
+        rrf_score: 0.5,
+        snippet: "",
+        sources: ["bm25"],
+      },
+    ]);
+    expect(output).not.toContain("_voice:");
+    expect(output).not.toContain("> ");
+  });
+
+  it("renders durable voice without a directive", () => {
+    const output = formatResults([
+      {
+        vault_path: "Resources/Concepts/parametric-design.md",
+        title: "Parametric Design",
+        rrf_score: 0.9,
+        snippet: "",
+        sources: ["bm25", "vector"],
+        voice: "durable",
+        written_at: "2024-03-12T00:00:00Z",
+        // no usage_directive — durable doesn't get one
+      },
+    ]);
+    expect(output).toContain("_voice: durable, written 2024-03-12T00:00:00Z_");
+    expect(output).not.toContain("> ");
+  });
 });
 
 // ── Alias index: filepath uses row.collection, never hardcoded "life/" ──

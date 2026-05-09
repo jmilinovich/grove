@@ -13,18 +13,26 @@
  *   tsx scripts/eval-search-quality/sweep.ts --json
  */
 
-import { CANDIDATE_FIXTURES } from "./test-set.js";
+import { ALL_CANDIDATE_FIXTURES, CANDIDATE_FIXTURES, ADVERSARIAL_FIXTURES, FRESHNESS_INTENT_FIXTURES } from "./test-set.js";
 import {
   v1ProvenanceReweight,
+  v3ProvenanceReweight,
   identityReweight,
   runFixtures,
   type ReweightFn,
 } from "./metrics.js";
 
 interface ConfigEnv {
+  // v1 knobs
   PROV_DURABLE_BOOST?: string;
   PROV_PERISHABLE_PENALTY?: string;
   PROV_PERISHABLE_HALFLIFE_DAYS?: string;
+  // v3 knobs
+  PROV_DURABLE_FACTOR?: string;
+  PROV_PERISHABLE_FRESH_FACTOR?: string;
+  PROV_PERISHABLE_FLOOR?: string;
+  PROV_AGE_FRESH_DAYS?: string;
+  PROV_AGE_DECAY_END_DAYS?: string;
 }
 
 interface Config {
@@ -60,6 +68,51 @@ const CONFIGS: Config[] = [
     reweight: v1ProvenanceReweight,
     env: { PROV_DURABLE_BOOST: "1.40", PROV_PERISHABLE_PENALTY: "0.75", PROV_PERISHABLE_HALFLIFE_DAYS: "9999" },
   },
+  // V3 configs — asymptotic floor + piecewise interpolation, no exponential decay
+  {
+    label: "v3-default",
+    reweight: v3ProvenanceReweight,
+    env: {
+      PROV_DURABLE_FACTOR: "1.0",
+      PROV_PERISHABLE_FRESH_FACTOR: "0.95",
+      PROV_PERISHABLE_FLOOR: "0.85",
+      PROV_AGE_FRESH_DAYS: "7",
+      PROV_AGE_DECAY_END_DAYS: "90",
+    },
+  },
+  {
+    label: "v3-aggressive-floor",
+    reweight: v3ProvenanceReweight,
+    env: {
+      PROV_DURABLE_FACTOR: "1.0",
+      PROV_PERISHABLE_FRESH_FACTOR: "0.92",
+      PROV_PERISHABLE_FLOOR: "0.70",
+      PROV_AGE_FRESH_DAYS: "3",
+      PROV_AGE_DECAY_END_DAYS: "60",
+    },
+  },
+  {
+    label: "v3-conservative-floor",
+    reweight: v3ProvenanceReweight,
+    env: {
+      PROV_DURABLE_FACTOR: "1.0",
+      PROV_PERISHABLE_FRESH_FACTOR: "0.97",
+      PROV_PERISHABLE_FLOOR: "0.92",
+      PROV_AGE_FRESH_DAYS: "14",
+      PROV_AGE_DECAY_END_DAYS: "180",
+    },
+  },
+  {
+    label: "v3-with-durable-boost",
+    reweight: v3ProvenanceReweight,
+    env: {
+      PROV_DURABLE_FACTOR: "1.05",
+      PROV_PERISHABLE_FRESH_FACTOR: "0.95",
+      PROV_PERISHABLE_FLOOR: "0.85",
+      PROV_AGE_FRESH_DAYS: "7",
+      PROV_AGE_DECAY_END_DAYS: "90",
+    },
+  },
 ];
 
 function withEnv<T>(env: ConfigEnv | undefined, fn: () => T): T {
@@ -87,25 +140,41 @@ async function main(): Promise<void> {
   const json = process.argv.includes("--json");
   const referenceTime = new Date("2026-05-09T12:00:00Z");
 
-  const rows: { label: string; ppr: number; rpr_p: number; ri_d: number }[] = [];
+  interface Row {
+    label: string;
+    canonical: { ppr: number; rpr_p: number; ri_d: number };
+    adversarial: { ppr: number; rpr_p: number; ri_d: number };
+    fir: number;
+  }
+  const rows: Row[] = [];
   for (const cfg of CONFIGS) {
-    const m = withEnv(cfg.env, () => runFixtures(CANDIDATE_FIXTURES, cfg.reweight, referenceTime));
-    rows.push({ label: cfg.label, ppr: m.ppr.rate, rpr_p: m.rpr_perishable.rate, ri_d: m.ri_durable.rate });
+    const canonical = withEnv(cfg.env, () => runFixtures(CANDIDATE_FIXTURES, cfg.reweight, referenceTime));
+    const adversarial = withEnv(cfg.env, () => runFixtures(ADVERSARIAL_FIXTURES, cfg.reweight, referenceTime));
+    const freshness = withEnv(cfg.env, () => runFixtures(FRESHNESS_INTENT_FIXTURES, cfg.reweight, referenceTime));
+    rows.push({
+      label: cfg.label,
+      canonical: { ppr: canonical.ppr.rate, rpr_p: canonical.rpr_perishable.rate, ri_d: canonical.ri_durable.rate },
+      adversarial: { ppr: adversarial.ppr.rate, rpr_p: adversarial.rpr_perishable.rate, ri_d: adversarial.ri_durable.rate },
+      fir: freshness.fir.rate,
+    });
   }
 
   if (json) {
-    console.log(JSON.stringify({ schema_version: 1, reference_time: referenceTime.toISOString(), rows }, null, 2));
+    console.log(JSON.stringify({ schema_version: 2, reference_time: referenceTime.toISOString(), rows }, null, 2));
     return;
   }
 
   console.log("");
-  console.log("Sweep — search-quality reweight configs");
-  console.log("=".repeat(72));
-  console.log(`  ${"config".padEnd(24)}  PPR     RPR-p   RI-d    overall`);
-  console.log(`  ${"-".repeat(24)}  ------  ------  ------  -------`);
+  console.log("Sweep — search-quality reweight configs (canonical | adversarial | FIR)");
+  console.log("=".repeat(110));
+  console.log(`  ${"config".padEnd(26)}  c.PPR  c.RPR-p c.RI-d  a.PPR  a.RPR-p a.RI-d  FIR     overall`);
+  console.log(`  ${"-".repeat(26)}  ------ ------- ------- ------ ------- ------- ------- -------`);
   for (const r of rows) {
-    const overall = (r.ppr + r.rpr_p + r.ri_d) / 3;
-    console.log(`  ${r.label.padEnd(24)}  ${fmt(r.ppr)}%  ${fmt(r.rpr_p)}%  ${fmt(r.ri_d)}%  ${fmt(overall)}%`);
+    const overall = (r.canonical.ppr + r.canonical.rpr_p + r.canonical.ri_d +
+                     r.adversarial.ppr + r.adversarial.rpr_p + r.fir) / 6;
+    console.log(
+      `  ${r.label.padEnd(26)}  ${fmt(r.canonical.ppr)}% ${fmt(r.canonical.rpr_p)}%  ${fmt(r.canonical.ri_d)}%  ${fmt(r.adversarial.ppr)}% ${fmt(r.adversarial.rpr_p)}%  ${fmt(r.adversarial.ri_d)}%  ${fmt(r.fir)}%  ${fmt(overall)}%`,
+    );
   }
   console.log("");
 }
