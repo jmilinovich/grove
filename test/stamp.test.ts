@@ -12,20 +12,33 @@ import { recomputeProvenanceBlame } from "../src/blame.js";
 import { stampMany, stampOne } from "../scripts/provenance/stamp.js";
 
 let vaultPath: string;
+let originalEnv: typeof process.env;
 function git(args: string[]): string {
   return execFileSync("git", args, { cwd: vaultPath, encoding: "utf8" }).trim();
 }
 
-beforeAll(() => {
+beforeAll(async () => {
+  originalEnv = { ...process.env };
   vaultPath = mkdtempSync(join(tmpdir(), "grove-stamp-test-"));
   git(["init", "-q", "-b", "main"]);
   git(["config", "user.email", "test@grove.local"]);
   git(["config", "user.name", "Grove Stamp Test"]);
   git(["config", "commit.gpgsign", "false"]);
+
+  // V3 §B1 — stampOne now calls deleteNoteBlame, which hits the SQLite
+  // db. Point GROVE_DB_PATH at a per-test file so we don't pollute the
+  // real ~/.grove/grove.db.
+  process.env.GROVE_DB_PATH = join(vaultPath, "test.db");
+  const db = await import("../src/db.js");
+  db.resetDb();
+  db.createSchema();
 });
 
-afterAll(() => {
+afterAll(async () => {
+  const db = await import("../src/db.js");
+  db.resetDb();
   rmSync(vaultPath, { recursive: true, force: true });
+  process.env = originalEnv;
 });
 
 function createLegacyNote(rel: string, body: string): void {

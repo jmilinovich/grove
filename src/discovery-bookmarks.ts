@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { parseNote, serializeNote, inferTags } from "./notes-validate.js";
-import { enqueueDiscovery } from "./db.js";
+import { deleteNoteBlame, enqueueDiscovery } from "./db.js";
 import { loadVaultConfig, sourcePath, type VaultConfig } from "./vault-config.js";
 
 /** Where bookmarked tweets live, relative to the vault root. */
@@ -151,6 +151,8 @@ function writeBookmarkNote(
 ): void {
   const fullPath = join(vaultPath, note.path);
   mkdirSync(join(fullPath, ".."), { recursive: true });
+  // V3 §B3 — invalidate blame cache before mutation; HEAD-in-key was masking this previously
+  deleteNoteBlame(note.path);
   const raw = serializeNote(note.frontmatter, note.content);
   writeFileSync(fullPath, raw, "utf-8");
 }

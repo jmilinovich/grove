@@ -103,6 +103,56 @@ export async function recomputeProvenanceBlame(
 }
 
 /**
+ * V3 §B2 — discover paths affected by Provenance-Stamp commits in a git
+ * range. Stamp commits are --allow-empty so file-diff returns empty;
+ * the only signal is the Provenance-Stamp-Path trailer in the commit
+ * BODY. Used by the post-sync warm-up worker to know which paths need
+ * blame recomputation, on top of the file-diff path list.
+ *
+ * Returns deduplicated, vault-relative paths. Paths that appear in
+ * multiple stamps in the range collapse to one. Order is unspecified.
+ *
+ * Bad/missing paths are NOT filtered — caller (warm-up worker) wraps
+ * recomputeProvenanceBlame in try/catch + grove_warmup_path_errors metric
+ * (V3 §L). Per V3 §B2 the regex matches any commit body containing
+ * `Provenance-Stamp-Path: <path>` — false positives (e.g. PR descriptions
+ * quoting the format that get squashed into commit bodies) are safe by
+ * design: the warm-up wrapper catches the missing-file throw.
+ *
+ * If git fails (no repo, bad shas, etc.), returns [] — warm-up worker
+ * shouldn't die over a discovery error.
+ */
+export async function stampPathsInRange(
+  vaultPath: string,
+  fromSha: string,
+  toSha: string,
+): Promise<string[]> {
+  let stdout: string;
+  try {
+    const result = await execFileP(
+      "git",
+      ["log", "--format=%B", `${fromSha}..${toSha}`],
+      { cwd: vaultPath, maxBuffer: 16 * 1024 * 1024 },
+    );
+    stdout = result.stdout;
+  } catch (err: any) {
+    console.error(
+      `[grove] stampPathsInRange(${fromSha}..${toSha}) failed: ${err.message}`,
+    );
+    return [];
+  }
+
+  const paths = new Set<string>();
+  const re = /^Provenance-Stamp-Path:\s*(.+)$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(stdout)) !== null) {
+    const p = match[1].trim();
+    if (p) paths.add(p);
+  }
+  return [...paths];
+}
+
+/**
  * The bundle of fields a read response surfaces when provenance is
  * enabled. Lifted to a shared helper so the get/multi_get/list/REST
  * handlers all enrich identically.

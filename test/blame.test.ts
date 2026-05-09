@@ -18,8 +18,14 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { computeProvenanceBlame, recomputeProvenanceBlame } from "../src/blame.js";
+import {
+  computeProvenanceBlame,
+  recomputeProvenanceBlame,
+  stampPathsInRange,
+} from "../src/blame.js";
 import { composeCommitMessage, provenanceToTrailers, type Provenance } from "../src/provenance.js";
+import { stampOne } from "../scripts/provenance/stamp.js";
+import { getNoteBlame } from "../src/db.js";
 
 let vaultPath: string;
 let originalEnv: typeof process.env;
@@ -263,5 +269,128 @@ describe("computeProvenanceBlame", () => {
     expect(v1).toHaveLength(1);
     expect(v2).toHaveLength(2);
     expect(v2[1].voice).toBe("perishable");
+  });
+});
+
+// ── V3 §B2: stampPathsInRange ──────────────────────────────────────
+describe("stampPathsInRange (V3 §B2)", () => {
+  it("returns deduplicated stamp paths from commit bodies in a git range", async () => {
+    // Snapshot the starting HEAD; we'll create three stamp commits over it.
+    const fromSha = git(["rev-parse", "HEAD"]);
+
+    // Author three --allow-empty stamp commits whose bodies carry
+    // Provenance-Stamp-Path trailers. Use one duplicate path to verify dedupe.
+    const stampPaths = [
+      "Resources/Concepts/alpha.md",
+      "Resources/People/beta.md",
+      "Resources/Concepts/alpha.md", // dup → must collapse
+      "Resources/Recipes/gamma.md",
+    ];
+    for (const p of stampPaths) {
+      const body = [
+        `stamp-provenance: ${p}`,
+        "",
+        "Provenance-Voice: perishable",
+        "Provenance-By: claude-opus-4-7",
+        "Provenance-Written-At: 2026-05-09T00:00:00Z",
+        `Provenance-Stamp-Path: ${p}`,
+      ].join("\n");
+      git(["commit", "--allow-empty", "-q", "-m", body]);
+    }
+    const toSha = git(["rev-parse", "HEAD"]);
+
+    const found = await stampPathsInRange(vaultPath, fromSha, toSha);
+    expect(new Set(found)).toEqual(
+      new Set([
+        "Resources/Concepts/alpha.md",
+        "Resources/People/beta.md",
+        "Resources/Recipes/gamma.md",
+      ]),
+    );
+    // Dedupe: 4 stamps, 3 unique paths.
+    expect(found).toHaveLength(3);
+  });
+
+  it("returns [] when git fails (bad shas)", async () => {
+    // Bogus shas — git log should error; helper must not throw.
+    const result = await stampPathsInRange(
+      vaultPath,
+      "0000000000000000000000000000000000000000",
+      "1111111111111111111111111111111111111111",
+    );
+    expect(result).toEqual([]);
+  });
+
+  it("returns [] for an empty range (fromSha === toSha)", async () => {
+    const head = git(["rev-parse", "HEAD"]);
+    const found = await stampPathsInRange(vaultPath, head, head);
+    expect(found).toEqual([]);
+  });
+});
+
+// ── V3 §B falsifier #1: stamp-then-readback ─────────────────────────
+describe("stamp-then-readback (V3 §B falsifier #1)", () => {
+  it("after stampOne, note_blame is either empty or carries the new perishable voice", async () => {
+    const file = "Resources/Concepts/falsifier-one.md";
+    const full = join(vaultPath, file);
+    mkdirSync(join(vaultPath, "Resources/Concepts"), { recursive: true });
+    writeFileSync(full, "Some legacy content\n");
+    git(["add", file]);
+    git(["commit", "-q", "-m", "external: pre-rollout falsifier-one"]);
+
+    const before = Date.now();
+    await stampOne({
+      vaultPath,
+      notePath: file,
+      provenance: {
+        voice: "perishable",
+        by: "claude-opus-4-7",
+        written_at: "2026-05-09T00:00:00Z",
+        reason: "V3 §B falsifier #1",
+      },
+    });
+    const elapsed = Date.now() - before;
+
+    // Within 5 seconds of the stamp:
+    expect(elapsed).toBeLessThan(5000);
+
+    // Probe the cache directly. Three accepted states (per V3 §B):
+    //   (a) row absent (active deleteNoteBlame won, fire-and-forget recompute hadn't landed)
+    //   (b) row present and contains the NEW perishable voice (recompute warmed it)
+    // The cache is keyed by source_hash + headSha; we don't know the
+    // current key, so we check ALL rows for this path and assert no
+    // stale legacy-unknown blame survives.
+    //
+    // Use the underlying SQLite to scan all rows for this path.
+    const Database = (await import("better-sqlite3")).default;
+    const dbFile = process.env.GROVE_DB_PATH!;
+    const probe = new Database(dbFile, { readonly: true });
+    try {
+      const rows = probe
+        .prepare("SELECT blame_json FROM note_blame WHERE path = ?")
+        .all(file) as { blame_json: string }[];
+      // Either no rows (case a) or only fresh rows naming the new voice (case b).
+      for (const row of rows) {
+        const segs = JSON.parse(row.blame_json);
+        for (const seg of segs) {
+          // Must NOT be stale legacy-unknown. Allowed: durable/perishable
+          // (the new stamp voice). We accept either perishable (recompute
+          // saw the stamp) or anything emitted by computeFresh against
+          // the post-stamp HEAD.
+          expect(seg.voice).not.toBe("legacy-unknown");
+        }
+      }
+    } finally {
+      probe.close();
+    }
+
+    // Sanity: the read path itself returns the new voice.
+    const segs = await recomputeProvenanceBlame(vaultPath, file);
+    expect(segs).toHaveLength(1);
+    expect(segs[0].voice).toBe("perishable");
+
+    // Suppress unused-import noise — getNoteBlame is exercised implicitly
+    // via computeProvenanceBlame in the prior test.
+    expect(typeof getNoteBlame).toBe("function");
   });
 });

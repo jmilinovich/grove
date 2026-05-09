@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { stripWikilinks, formatResults, rrfFuse, buildAliasEntries } from "../src/hybrid-search.js";
+import {
+  stripWikilinks,
+  formatResults,
+  rrfFuse,
+  buildAliasEntries,
+  detectVoicePreference,
+} from "../src/hybrid-search.js";
 
 interface SearchResult {
   title: string;
@@ -383,5 +389,46 @@ describe("alias collection isolation", () => {
     expect(entry.collection).toBe("alice-vault");
     // Filepath must be scoped to alice-vault, not "life" or any global default
     expect(entry.filepath).toBe("alice-vault/inbox/note.md");
+  });
+});
+
+// ── V3 §G: voice_preference auto-detection ──────────────────────────
+
+describe("detectVoicePreference (V3 §G)", () => {
+  it("returns 'mixed' for plain canonical queries", () => {
+    expect(detectVoicePreference("parametric design philosophy")).toBe("mixed");
+    expect(detectVoicePreference("attachment theory bids for connection")).toBe("mixed");
+  });
+
+  it("returns 'recent' for explicit freshness terms", () => {
+    expect(detectVoicePreference("today's recruiter calls")).toBe("recent");
+    expect(detectVoicePreference("what's the latest Claude lineup")).toBe("recent");
+    expect(detectVoicePreference("vault stats this week")).toBe("recent");
+    expect(detectVoicePreference("Claude releases lately")).toBe("recent");
+    expect(detectVoicePreference("recently announced features")).toBe("recent");
+  });
+
+  it("returns 'recent' for ISO date markers (full YYYY-MM-DD)", () => {
+    expect(detectVoicePreference("notes from 2026-04-22")).toBe("recent");
+    expect(detectVoicePreference("2026-05-09 retrospective")).toBe("recent");
+  });
+
+  it("returns 'recent' for month-year markers", () => {
+    expect(detectVoicePreference("April 2026 priorities")).toBe("recent");
+    expect(detectVoicePreference("February 2026 recruiter status")).toBe("recent");
+  });
+
+  it("returns 'mixed' when durable-intent terms override freshness terms (negative gate)", () => {
+    // round-3 IR + KG hardening: 'latest understanding of X' is canonical-intent
+    expect(detectVoicePreference("latest thinking on parametric design")).toBe("mixed");
+    expect(detectVoicePreference("recent understanding of attachment theory")).toBe("mixed");
+    expect(detectVoicePreference("today's framework for high agency")).toBe("mixed");
+    expect(detectVoicePreference("definition of taste graphs as of this month")).toBe("mixed");
+  });
+
+  it("does not match 'current' or 'now' as standalone freshness terms (round-3 IR fold-in)", () => {
+    // 'current' was dropped from FRESHNESS_TERMS to avoid false positives like
+    // 'current understanding of X' being mis-routed to recent.
+    expect(detectVoicePreference("current state of attachment theory")).toBe("mixed"); // 'understanding' not present, but 'current' alone shouldn't trigger
   });
 });
