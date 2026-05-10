@@ -333,6 +333,41 @@ describe("extractEntities", () => {
     expect(call.max_tokens).toBeGreaterThanOrEqual(8192);
   });
 
+  it("sets ephemeral cache_control on the tool schema and the static prefix", async () => {
+    // Cache breakpoints turn the per-call cost of the (large) vocab dump
+    // from full input rate into 0.1× cache-read on subsequent drains
+    // within the 5-min TTL. A regression here silently re-bills the
+    // full vocab on every Discovery call.
+    const mock = mockClient({
+      entities: [],
+      suggested_links: [],
+      new_notes: [],
+    });
+    await extractEntities("Some note body.", vocab);
+
+    const call = mock.messages.create.mock.calls[0][0];
+
+    // Tool schema is cached.
+    expect(call.tools[0].cache_control).toEqual({ type: "ephemeral" });
+
+    // The user message is structured as two text blocks: the static
+    // prefix (vocab + instructions) carries the cache breakpoint;
+    // the note-content block does not.
+    expect(call.messages).toHaveLength(1);
+    expect(call.messages[0].role).toBe("user");
+    expect(Array.isArray(call.messages[0].content)).toBe(true);
+    const blocks = call.messages[0].content;
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].type).toBe("text");
+    expect(blocks[0].cache_control).toEqual({ type: "ephemeral" });
+    expect(blocks[0].text).toContain("knowledge graph extraction engine");
+    expect(blocks[0].text).toContain("Existing vault entities");
+    // Note content lives in the uncached trailing block.
+    expect(blocks[1].type).toBe("text");
+    expect(blocks[1].cache_control).toBeUndefined();
+    expect(blocks[1].text).toContain("Some note body.");
+  });
+
   it("parses a large extraction (~50 entities, ~50 links) without error", async () => {
     // Reproduces the shape that chronically truncated under the previous
     // free-form-JSON path on notes like
