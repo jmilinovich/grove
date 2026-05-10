@@ -16,6 +16,7 @@ import {
   dequeueDiscovery,
   markDiscoveryDone,
   markDiscoveryError,
+  recoverOrphanedDiscoveryProcessing,
   type DiscoveryQueueEntry,
 } from "./db.js";
 import { extractFromNote } from "./discovery-extract.js";
@@ -129,6 +130,10 @@ export function startDiscoveryLoop(
 ): void {
   if (running) return;
   running = true;
+  const recovered = recoverOrphanedDiscoveryProcessing(vaultId);
+  if (recovered > 0) {
+    console.log(`[discovery] recovered ${recovered} orphaned 'processing' row(s) from prior worker exit`);
+  }
   console.log(`[discovery] loop started (poll every ${pollMs}ms, vault_id=${vaultId})`);
   scheduleTick(processor, pollMs, vaultId);
 }
