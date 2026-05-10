@@ -35,6 +35,8 @@ import {
   validateCallerProvenance,
   type Provenance,
 } from "../../src/provenance.js";
+import { recomputeProvenanceBlame } from "../../src/blame.js";
+import { deleteNoteBlame } from "../../src/db.js";
 
 const execFileP = promisify(execFile);
 
@@ -83,6 +85,19 @@ async function git(args: string[], cwd: string): Promise<string> {
  * `git commit --allow-empty` after staging. The commit is empty in
  * content but carries Provenance-* trailers in the message body, which
  * is the whole point.
+ *
+ * Invalidation ordering (V3 §B1 — closes the crash-mid-stamp stale-cache bug):
+ *   1. deleteNoteBlame(notePath)         — mark cache cold (idempotent)
+ *   2. git commit --allow-empty -m ...   — write the stamp
+ *   3. recomputeProvenanceBlame(...)     — fire-and-forget warm-up
+ *
+ * Crash between 1 and 2: cache is cold, next read recomputes — correct.
+ * Crash between 2 and 3: cache is cold (step 1 ran), next read recomputes
+ * via computeProvenanceBlame using the new HEAD — correct. Step 3 is
+ * fire-and-forget per V3 §B1's explicit note: failure here leaves the
+ * cache cold, which is the same state as the step-2-crash path that the
+ * design already handles correctly. There is nothing to roll back —
+ * setNoteBlame uses INSERT … ON CONFLICT DO UPDATE (db.ts:1530-1540).
  */
 export async function stampOne(input: StampInput): Promise<StampResult> {
   validateCallerProvenance(input.provenance);
@@ -129,10 +144,38 @@ export async function stampOne(input: StampInput): Promise<StampResult> {
   trailers["Provenance-Stamp-Path"] = [input.notePath];
   const message = composeCommitMessage(subject, trailers);
 
-  // --allow-empty so the trailer-bearing commit is recorded even though
-  // disk content is unchanged. This is the canonical override pattern.
+  // V3 §B1 step 1 — invalidate the cache BEFORE writing the stamp.
+  // Crash window between this and the commit below is safe: an empty
+  // cache row triggers recompute on the next read (which will see the
+  // new HEAD if the commit landed, the old HEAD if it didn't — either
+  // way the read is correct).
+  try {
+    deleteNoteBlame(input.notePath);
+  } catch (err: any) {
+    // Non-fatal — the cache key includes HEAD sha, so a missed delete
+    // here will rotate naturally on next commit. Log and proceed.
+    console.error(`stamp: deleteNoteBlame(${input.notePath}) failed: ${err.message}`);
+  }
+
+  // V3 §B1 step 2 — --allow-empty so the trailer-bearing commit is
+  // recorded even though disk content is unchanged. This is the
+  // canonical override pattern.
   await git(["commit", "--allow-empty", "-m", message], input.vaultPath);
   const sha = await git(["rev-parse", "HEAD"], input.vaultPath);
+
+  // V3 §B1 step 3 — recompute fresh blame so the next read is warm
+  // rather than cold. Fire-and-forget: if recompute fails (git timeout,
+  // OOM, malformed trailer), the cache stays empty and the next read
+  // will recompute via computeProvenanceBlame. Same correct end-state
+  // as the step-2-crash path; no try/catch with rollback needed.
+  try {
+    await recomputeProvenanceBlame(input.vaultPath, input.notePath);
+  } catch (err: any) {
+    console.error(
+      `stamp: recomputeProvenanceBlame(${input.notePath}) failed: ${err.message} ` +
+        `(non-fatal — cache left cold, next read will recompute)`,
+    );
+  }
 
   return {
     notePath: input.notePath,

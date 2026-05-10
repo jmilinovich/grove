@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   composeCommitMessage,
   parseTrailers,
@@ -7,6 +11,7 @@ import {
   validateCallerProvenance,
   type Provenance,
 } from "../src/provenance.js";
+import { stampPathsInRange } from "../src/blame.js";
 
 describe("composeCommitMessage", () => {
   it("returns just the subject when no trailers", () => {
@@ -236,5 +241,64 @@ describe("validateCallerProvenance", () => {
     expect(() =>
       validateCallerProvenance({ ...ok, reason: "two\nlines" }),
     ).toThrow();
+  });
+});
+
+// ── V3 §B falsifier #2: post-sync stamp-coverage ──────────────────
+//
+// "Count of stamps in last sync window should equal count of paths
+// stampPathsInRange surfaces for the same range." If those don't agree,
+// the warm-up worker is missing stamp paths and the cache will go cold-
+// stale on stamped notes.
+describe("post-sync stamp-coverage (V3 §B falsifier #2)", () => {
+  let vaultPath: string;
+
+  function git(args: string[]): string {
+    return execFileSync("git", args, { cwd: vaultPath, encoding: "utf8" }).trim();
+  }
+
+  beforeAll(() => {
+    vaultPath = mkdtempSync(join(tmpdir(), "grove-stampcov-test-"));
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "test@grove.local"]);
+    git(["config", "user.name", "Grove Coverage Test"]);
+    git(["config", "commit.gpgsign", "false"]);
+    // An anchor commit so we have a non-empty starting HEAD.
+    git(["commit", "--allow-empty", "-q", "-m", "anchor"]);
+  });
+
+  afterAll(() => {
+    rmSync(vaultPath, { recursive: true, force: true });
+  });
+
+  it("returned-path SET equals the stamped-path SET exactly across a 5-stamp window", async () => {
+    const fromSha = git(["rev-parse", "HEAD"]);
+
+    // 5 stamp commits, each carrying a Provenance-Stamp-Path trailer
+    // for a distinct path. Bodies are author-composed (not via stamp.ts)
+    // so this test stays pure-blame and doesn't drag in the SQLite layer.
+    const stamped = [
+      "Resources/Concepts/one.md",
+      "Resources/Concepts/two.md",
+      "Resources/People/three.md",
+      "Sources/X/four.md",
+      "Resources/Recipes/five.md",
+    ];
+    for (const p of stamped) {
+      const body = [
+        `stamp-provenance: ${p}`,
+        "",
+        "Provenance-Voice: perishable",
+        "Provenance-By: claude-opus-4-7",
+        `Provenance-Written-At: 2026-05-09T00:00:00Z`,
+        `Provenance-Stamp-Path: ${p}`,
+      ].join("\n");
+      git(["commit", "--allow-empty", "-q", "-m", body]);
+    }
+    const toSha = git(["rev-parse", "HEAD"]);
+
+    const surfaced = await stampPathsInRange(vaultPath, fromSha, toSha);
+    expect(new Set(surfaced)).toEqual(new Set(stamped));
+    expect(surfaced).toHaveLength(stamped.length);
   });
 });
