@@ -1575,11 +1575,17 @@ export function getNoteVoicesAndAges(
   >();
   if (paths.length === 0) return out;
   const database = getDb();
-  const placeholders = paths.map(() => "?").join(",");
-  // Most-recent row per path (computed_at DESC). The window function would
-  // be cleaner but better-sqlite3's ROW_NUMBER() needs SQLite >= 3.25 which
-  // is fine here, but a self-join is portable + nearly as fast on the row
-  // counts we touch (≤50 paths per query).
+
+  // QMD vault_path is `resources/concepts/conviction-then-leave-pattern.md`
+  // (lowercase + hyphens for spaces). note_blame stores filesystem paths
+  // like `Resources/Concepts/Conviction-Then-Leave Pattern.md` (TitleCase
+  // + literal spaces). Match both forms by normalizing on read: lowercase
+  // the stored path and replace spaces with hyphens before comparing.
+  // This is the slugify-on-read shim until the QMD index path semantics
+  // converge with the filesystem (out of scope for V3).
+  const querySlugs = paths.map((p) => p.toLowerCase());
+  const placeholders = querySlugs.map(() => "?").join(",");
+
   const rows = database
     .prepare(
       `SELECT b.path, b.blame_json
@@ -1587,11 +1593,18 @@ export function getNoteVoicesAndAges(
        INNER JOIN (
          SELECT path, MAX(computed_at) AS max_at
          FROM note_blame
-         WHERE path IN (${placeholders})
+         WHERE LOWER(REPLACE(path, ' ', '-')) IN (${placeholders})
          GROUP BY path
        ) latest ON latest.path = b.path AND latest.max_at = b.computed_at`,
     )
-    .all(...paths) as { path: string; blame_json: string }[];
+    .all(...querySlugs) as { path: string; blame_json: string }[];
+
+  // Build the inverse map: slug → original-query-path so callers can
+  // index back by their input form rather than the filesystem casing.
+  const slugToInput = new Map<string, string>();
+  for (let i = 0; i < paths.length; i++) {
+    slugToInput.set(querySlugs[i], paths[i]);
+  }
 
   for (const row of rows) {
     let segments: Array<{ voice: string; written_at: string }>;
@@ -1624,7 +1637,12 @@ export function getNoteVoicesAndAges(
     if (modalVoice !== "durable" && modalVoice !== "perishable") {
       modalVoice = "legacy-unknown";
     }
-    out.set(row.path, {
+    // Index by the caller's input path (lowercase + hyphens), not the
+    // filesystem casing that note_blame stored. The slugToInput map
+    // tells us which input path slugified to row.path.
+    const rowSlug = row.path.toLowerCase().replace(/ /g, "-");
+    const inputKey = slugToInput.get(rowSlug) ?? row.path;
+    out.set(inputKey, {
       voice: modalVoice as "durable" | "perishable" | "legacy-unknown",
       written_at: maxWrittenAt,
     });
