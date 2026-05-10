@@ -16,6 +16,7 @@ import {
   getNewConceptsCreated,
   getSurprisingConnections,
   getLastProcessedAt,
+  recoverOrphanedDiscoveryProcessing,
   getDb,
   createSchema,
   closeDb,
@@ -122,6 +123,48 @@ describe("discovery queue (db helpers)", () => {
       "team/notes/y.md",
     ]);
     expect(teamThird).toBeNull();
+  });
+
+  it("recoverOrphanedDiscoveryProcessing resets stuck rows back to pending, scoped by vault", () => {
+    // Simulates a worker killed mid-tick (SIGINT during deploy, OOM, host
+    // reboot). Rows enter 'processing' on dequeue but never get marked
+    // done/error, so the next worker — which only claims 'pending' — leaves
+    // them abandoned. The watchdog fires hourly. Recovery runs on
+    // startDiscoveryLoop startup.
+    enqueueDiscovery("life/stuck.md", "write", "vault_00000000");
+    enqueueDiscovery("life/done.md", "write", "vault_00000000");
+    enqueueDiscovery("team/stuck.md", "write", "vault_team");
+
+    // Personal worker claims one and "crashes" before marking done.
+    const personalStuck = dequeueDiscovery("vault_00000000")!;
+    expect(personalStuck.status).toBe("processing");
+    // Team worker claims one and also "crashes".
+    const teamStuck = dequeueDiscovery("vault_team")!;
+    expect(teamStuck.status).toBe("processing");
+
+    // Personal worker restarts — recovery should only touch its own vault.
+    const recovered = recoverOrphanedDiscoveryProcessing("vault_00000000");
+    expect(recovered).toBe(1);
+
+    const db = getDb();
+    const personalRow = db
+      .prepare("SELECT status FROM discovery_queue WHERE id = ?")
+      .get(personalStuck.id) as { status: string };
+    expect(personalRow.status).toBe("pending");
+
+    // Team's stuck row is untouched — sibling vault recovery is not our job.
+    const teamRow = db
+      .prepare("SELECT status FROM discovery_queue WHERE id = ?")
+      .get(teamStuck.id) as { status: string };
+    expect(teamRow.status).toBe("processing");
+
+    // Re-running recovery is a no-op (the row is already pending).
+    expect(recoverOrphanedDiscoveryProcessing("vault_00000000")).toBe(0);
+
+    // Recovered row is dequeueable again.
+    const reclaimed = dequeueDiscovery("vault_00000000")!;
+    expect(reclaimed.id).toBe(personalStuck.id);
+    expect(reclaimed.path).toBe("life/stuck.md");
   });
 
   it("enqueueDiscovery picks up vault_id from GROVE_VAULT_ID env by default", () => {

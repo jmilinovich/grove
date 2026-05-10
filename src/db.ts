@@ -1082,6 +1082,32 @@ export function markDiscoveryError(id: number, message: string): void {
 }
 
 /**
+ * Reset rows stuck in 'processing' for `vaultId` back to 'pending'.
+ *
+ * A row enters 'processing' via `dequeueDiscovery` and exits via
+ * `markDiscoveryDone` / `markDiscoveryError`. When the worker dies
+ * mid-tick (SIGINT during a deploy, OOM, host reboot), the row stays
+ * 'processing' forever — the next worker only claims 'pending' rows,
+ * so the entry is silently abandoned.
+ *
+ * Called once on `startDiscoveryLoop` startup. Safe because each vault
+ * has exactly one discovery worker (pinned via PM2's per-vault
+ * `GROVE_VAULT_ID`), so at startup no sibling holds a 'processing' row
+ * for this vault. Returns the number of rows recovered.
+ */
+export function recoverOrphanedDiscoveryProcessing(
+  vaultId: string = resolveVaultIdFromEnv(),
+): number {
+  const database = getDb();
+  const result = database
+    .prepare(
+      "UPDATE discovery_queue SET status = 'pending' WHERE status = 'processing' AND vault_id = ?",
+    )
+    .run(vaultId);
+  return result.changes;
+}
+
+/**
  * Requeue an errored entry as pending again for a retry. Used by the
  * embed-retry path when a transient failure (network, Voyage API down)
  * merits another attempt. Returns true if the row was found.
