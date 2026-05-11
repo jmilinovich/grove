@@ -25,10 +25,16 @@ import {
 
 describe("discovery queue (db helpers)", () => {
   let tempDir: string;
+  const originalCooldown = process.env.GROVE_DISCOVERY_COOLDOWN_MIN;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "grove-discovery-test-"));
     process.env.GROVE_DB_PATH = join(tempDir, "grove.db");
+    // P7-COST-2 cooldown is exercised in its own describe block below.
+    // These tests cover the legacy pending/processing dedup semantics, which
+    // require successive enqueues right after a `done` to land — explicitly
+    // disable the cooldown so we don't conflate the two checks.
+    process.env.GROVE_DISCOVERY_COOLDOWN_MIN = "0";
     resetDb();
     createSchema();
   });
@@ -36,6 +42,11 @@ describe("discovery queue (db helpers)", () => {
   afterEach(() => {
     closeDb();
     delete process.env.GROVE_DB_PATH;
+    if (originalCooldown === undefined) {
+      delete process.env.GROVE_DISCOVERY_COOLDOWN_MIN;
+    } else {
+      process.env.GROVE_DISCOVERY_COOLDOWN_MIN = originalCooldown;
+    }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -563,5 +574,248 @@ describe("discovery queue/results vault scoping", () => {
 
     expect(aConn.map((c) => c.source)).toEqual(["a-src.md"]);
     expect(bConn.map((c) => c.source)).toEqual(["b-src.md"]);
+  });
+});
+
+// ── P7-COST-1: daily extraction cap ───────────────────────────────────────
+
+describe("P7-COST-1: daily extraction cap", () => {
+  let tempDir: string;
+  const originalCap = process.env.GROVE_DISCOVERY_DAILY_CAP;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "grove-discovery-cap-"));
+    process.env.GROVE_DB_PATH = join(tempDir, "grove.db");
+    resetDb();
+    createSchema();
+  });
+
+  afterEach(() => {
+    closeDb();
+    delete process.env.GROVE_DB_PATH;
+    if (originalCap === undefined) {
+      delete process.env.GROVE_DISCOVERY_DAILY_CAP;
+    } else {
+      process.env.GROVE_DISCOVERY_DAILY_CAP = originalCap;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("tick is a no-op once today's done+error count reaches the cap", async () => {
+    process.env.GROVE_DISCOVERY_DAILY_CAP = "2";
+    const processor: Processor = async () => {};
+
+    enqueueDiscovery("a.md", "write");
+    enqueueDiscovery("b.md", "write");
+    enqueueDiscovery("c.md", "write");
+
+    // Cap=2: first two ticks should process, third returns false (cap hit)
+    expect(await tick(processor)).toBe(true);
+    expect(await tick(processor)).toBe(true);
+    expect(await tick(processor)).toBe(false);
+
+    // The third row stays pending — it didn't get claimed
+    const db = getDb();
+    const pending = db
+      .prepare("SELECT path FROM discovery_queue WHERE status='pending'")
+      .all() as { path: string }[];
+    expect(pending.map((r) => r.path)).toEqual(["c.md"]);
+  });
+
+  it("error rows count against the cap (token cost still paid)", async () => {
+    process.env.GROVE_DISCOVERY_DAILY_CAP = "2";
+    const failOnce: Processor = async () => {
+      throw new Error("boom");
+    };
+    const succeed: Processor = async () => {};
+
+    enqueueDiscovery("a.md", "write");
+    enqueueDiscovery("b.md", "write");
+    enqueueDiscovery("c.md", "write");
+
+    expect(await tick(failOnce)).toBe(true); // a → error
+    expect(await tick(succeed)).toBe(true); // b → done
+    expect(await tick(succeed)).toBe(false); // cap reached (1 error + 1 done = 2)
+  });
+
+  it("vault counters are independent", async () => {
+    process.env.GROVE_DISCOVERY_DAILY_CAP = "1";
+    const VAULT_A = "vault_a";
+    const VAULT_B = "vault_b";
+    const processor: Processor = async () => {};
+
+    enqueueDiscovery("a1.md", "write", VAULT_A);
+    enqueueDiscovery("a2.md", "write", VAULT_A);
+    enqueueDiscovery("b1.md", "write", VAULT_B);
+
+    expect(await tick(processor, VAULT_A)).toBe(true); // a1 processed
+    expect(await tick(processor, VAULT_A)).toBe(false); // VAULT_A cap hit
+    expect(await tick(processor, VAULT_B)).toBe(true); // VAULT_B unaffected
+  });
+
+  it("cap=0 disables the check", async () => {
+    process.env.GROVE_DISCOVERY_DAILY_CAP = "0";
+    const processor: Processor = async () => {};
+
+    for (let i = 0; i < 5; i++) enqueueDiscovery(`n${i}.md`, "write");
+    let processed = 0;
+    while (await tick(processor)) processed++;
+    expect(processed).toBe(5);
+  });
+
+  it("rolling past UTC midnight re-opens the cap", async () => {
+    process.env.GROVE_DISCOVERY_DAILY_CAP = "1";
+    const processor: Processor = async () => {};
+
+    enqueueDiscovery("a.md", "write");
+    enqueueDiscovery("b.md", "write");
+
+    expect(await tick(processor)).toBe(true);
+    expect(await tick(processor)).toBe(false); // cap hit
+
+    // Backdate the 'a' row's processed_at to yesterday so it no longer
+    // counts against today's cap.
+    const db = getDb();
+    db.prepare(
+      `UPDATE discovery_queue SET processed_at = datetime('now', '-2 days') WHERE path='a.md'`,
+    ).run();
+
+    expect(await tick(processor)).toBe(true);
+  });
+
+  it("default cap is 100 when env var is unset", async () => {
+    delete process.env.GROVE_DISCOVERY_DAILY_CAP;
+    const processor: Processor = async () => {};
+
+    // 100 entries should all process under the default cap
+    for (let i = 0; i < 100; i++) enqueueDiscovery(`n${i}.md`, "write");
+    let processed = 0;
+    while (await tick(processor)) processed++;
+    expect(processed).toBe(100);
+
+    // The 101st enqueue should defer
+    enqueueDiscovery("n100.md", "write");
+    expect(await tick(processor)).toBe(false);
+  });
+});
+
+// ── P7-COST-2: per-note extraction cooldown ────────────────────────────────
+
+describe("P7-COST-2: per-note extraction cooldown", () => {
+  let tempDir: string;
+  const originalCooldown = process.env.GROVE_DISCOVERY_COOLDOWN_MIN;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "grove-cooldown-"));
+    process.env.GROVE_DB_PATH = join(tempDir, "grove.db");
+    resetDb();
+    createSchema();
+  });
+
+  afterEach(() => {
+    closeDb();
+    delete process.env.GROVE_DB_PATH;
+    if (originalCooldown === undefined) {
+      delete process.env.GROVE_DISCOVERY_COOLDOWN_MIN;
+    } else {
+      process.env.GROVE_DISCOVERY_COOLDOWN_MIN = originalCooldown;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("re-enqueue within cooldown window after success is refused", () => {
+    process.env.GROVE_DISCOVERY_COOLDOWN_MIN = "5";
+
+    // First enqueue + mark done, with processed_at = now
+    expect(enqueueDiscovery("note.md", "write")).toBe(true);
+    const db = getDb();
+    const row = db
+      .prepare("SELECT id FROM discovery_queue WHERE path='note.md'")
+      .get() as { id: number };
+    markDiscoveryDone(row.id);
+
+    // Immediate re-enqueue: cooled down
+    expect(enqueueDiscovery("note.md", "commit")).toBe(false);
+    expect(enqueueDiscovery("note.md", "write")).toBe(false);
+
+    // Only the original row exists
+    const count = db
+      .prepare("SELECT COUNT(*) as n FROM discovery_queue WHERE path='note.md'")
+      .get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  it("re-enqueue after cooldown expires succeeds", () => {
+    process.env.GROVE_DISCOVERY_COOLDOWN_MIN = "5";
+
+    expect(enqueueDiscovery("note.md", "write")).toBe(true);
+    const db = getDb();
+    const row = db
+      .prepare("SELECT id FROM discovery_queue WHERE path='note.md'")
+      .get() as { id: number };
+    markDiscoveryDone(row.id);
+
+    // Backdate processed_at past the cooldown window
+    db.prepare(
+      `UPDATE discovery_queue SET processed_at = datetime('now', '-10 minutes') WHERE id=?`,
+    ).run(row.id);
+
+    expect(enqueueDiscovery("note.md", "write")).toBe(true);
+  });
+
+  it("cooldown does not apply to error rows", () => {
+    process.env.GROVE_DISCOVERY_COOLDOWN_MIN = "5";
+
+    expect(enqueueDiscovery("note.md", "write")).toBe(true);
+    const db = getDb();
+    const row = db
+      .prepare("SELECT id FROM discovery_queue WHERE path='note.md'")
+      .get() as { id: number };
+    markDiscoveryError(row.id, "transient 503");
+
+    // Should re-enqueue immediately since prior row was error, not done
+    expect(enqueueDiscovery("note.md", "write")).toBe(true);
+  });
+
+  it("different paths are not blocked by each other's cooldown", () => {
+    process.env.GROVE_DISCOVERY_COOLDOWN_MIN = "5";
+
+    expect(enqueueDiscovery("a.md", "write")).toBe(true);
+    const db = getDb();
+    const row = db
+      .prepare("SELECT id FROM discovery_queue WHERE path='a.md'")
+      .get() as { id: number };
+    markDiscoveryDone(row.id);
+
+    expect(enqueueDiscovery("b.md", "write")).toBe(true);
+  });
+
+  it("cooldown is per-vault — same path in different vaults enqueues independently", () => {
+    process.env.GROVE_DISCOVERY_COOLDOWN_MIN = "5";
+
+    expect(enqueueDiscovery("shared.md", "write", "vault_a")).toBe(true);
+    const db = getDb();
+    const row = db
+      .prepare("SELECT id FROM discovery_queue WHERE vault_id='vault_a'")
+      .get() as { id: number };
+    markDiscoveryDone(row.id);
+
+    expect(enqueueDiscovery("shared.md", "write", "vault_a")).toBe(false);
+    expect(enqueueDiscovery("shared.md", "write", "vault_b")).toBe(true);
+  });
+
+  it("cooldown=0 disables the check", () => {
+    process.env.GROVE_DISCOVERY_COOLDOWN_MIN = "0";
+
+    expect(enqueueDiscovery("note.md", "write")).toBe(true);
+    const db = getDb();
+    const row = db
+      .prepare("SELECT id FROM discovery_queue WHERE path='note.md'")
+      .get() as { id: number };
+    markDiscoveryDone(row.id);
+
+    // With cooldown disabled, only the existing pending/processing dedup
+    // applies — and there's no pending/processing row, so this succeeds.
+    expect(enqueueDiscovery("note.md", "write")).toBe(true);
   });
 });

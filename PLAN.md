@@ -324,6 +324,266 @@ Active work only. Every phase before Phase 8 shipped, was deferred, or was remov
 ---
 
 
+### Phase 7 — Cost Hardening
+
+**Why this phase exists:** Through early May 2026 the discovery worker burned ~$30/day on Anthropic Haiku 4.5 (≥$137 on the 2026-05-07 spike), driven by three stacked issues:
+
+1. Cron amplification — `post-sync-discover.sh` diffing discovery's own commits and re-enqueueing the same paths. Fixed in PR #152 (filter `discovery: wire links` / `discovery: create` from the cron diff).
+2. No defensive budget — workers had no daily cap, per-note cooldown, or cascade depth limit. Cost grew monotonically with vault size, user count, and discovery's own stub-creation cascade.
+3. Prompt caching not effective — admin-API usage report shows `cache_read_input_tokens=0` across all May 2026 days for the discovery key (`apikey_01SCuYJ6WvYEZAiairRSsX53`), despite PR #145 wiring `cache_control` markers. ~10× cost amplifier on the cached prefix.
+
+This phase adds the structural backstops + telemetry so the next time cost drifts, the watchdog catches it before the bill does. P7-COST-1 and P7-COST-2 ship together as the immediate-pain defensive cap; P7-COST-3 through P7-COST-7 are independent and can land in any order.
+
+**Dependencies:** PR #152 (cron filter) already in main. PR #144 (watchdog Signal 2 mtime guard) already in main. Admin API key placed at `/root/.grove/watchdog.env` as `ANTHROPIC_ADMIN_API_KEY` (2026-05-11).
+
+#### P7-COST-1: Per-vault daily extraction cap (`src/discovery.ts`, `src/db.ts`) ✅ COMPLETE 2026-05-11
+
+Hard daily quota per vault as a defensive backstop against unbounded Anthropic Haiku spend in the discovery worker. The cap check sits BEFORE `dequeueDiscovery` so rows stay in `pending` for tomorrow rather than being claimed and dropped.
+
+**Behavior:**
+1. New env var `GROVE_DISCOVERY_DAILY_CAP` (default 100). Read once per `tick()` call so live changes don't require a restart.
+2. In `tick()` (`src/discovery.ts`), BEFORE `dequeueDiscovery`, call `countTodayProcessed(vaultId)`. If the count ≥ cap, log a throttled warning and return `false` — the `scheduleTick` drain loop treats `false` as "drain complete" and sleeps until the next poll. The row stays in queue for tomorrow.
+3. New helper `countTodayProcessed(vaultId)` in `src/db.ts` runs `SELECT COUNT(*) FROM discovery_queue WHERE vault_id = ? AND processed_at >= date('now') AND status IN ('done','error')`. SQLite's `date('now')` returns UTC by default.
+4. Error rows count against the cap — failed extractions still cost tokens.
+5. Log throttling: at most one warning per minute per vault via in-module `Map<vaultId, lastLoggedAt>`.
+
+**Schema migration:** none (uses existing `discovery_queue.processed_at`, `status`, `vault_id`).
+**Files:** `src/discovery.ts`, `src/db.ts`
+**Tests:** `test/discovery.test.ts` adds 6 cases — cap reached defers, error rows count, vault isolation, cap=0 disables, midnight roll re-opens, default=100.
+**Acceptance:**
+- [x] When cap reached, no Anthropic API calls fire for the rest of the UTC day
+- [x] Unrelated vaults are unaffected (each vault has its own counter)
+- [x] Env var override works; absence defaults to 100
+- [x] `tsc --noEmit` clean; `vitest run` 1376/1376 pass
+
+**Risks:** if a vault legitimately needs >100 extractions in a day (bulk import), operator raises `GROVE_DISCOVERY_DAILY_CAP` and `sudo pm2 restart grove-discovery-<slug>`. Default is intentionally conservative.
+
+#### P7-COST-2: Per-note extraction cooldown (`src/db.ts`) ✅ COMPLETE 2026-05-11
+
+Collapse edit storms into a single extraction by refusing to enqueue the same `(vault_id, path)` if it was processed successfully within the last N minutes. The check lives in `enqueueDiscovery` so storms die before they hit the LLM.
+
+**Behavior:**
+1. New env var `GROVE_DISCOVERY_COOLDOWN_MIN` (default 5).
+2. In `enqueueDiscovery`, BEFORE the existing pending/processing dedup, check whether a row exists with same `(vault_id, path)`, `status='done'`, and `processed_at > datetime('now', '-N minutes')`. If yes, return `false`.
+3. The check is keyed on `(vault_id, path)` only — different `trigger` values for the same path collapse together.
+4. Cooldown does NOT apply to `error` rows — transient failures remain immediately retryable.
+
+**Schema migration:** none.
+**Files:** `src/db.ts`
+**Tests:** `test/discovery.test.ts` adds 6 cases — within window refuses, after window succeeds, error rows skip cooldown, per-path independence, per-vault independence, cooldown=0 disables.
+**Acceptance:**
+- [x] Two `enqueueDiscovery` calls within N min for same `(vault_id, path)` → only 1 row inserted, second returns `false`
+- [x] After N min elapses → second call succeeds normally
+- [x] Different paths in same window are NOT blocked
+- [x] Cooldown does NOT apply to error rows
+
+**Risks:** if a user makes a real content change within the cooldown window, the new content won't be extracted until cooldown lapses. Mitigation: cooldown short by default (5 min); P7-COST-3 (content-hash dedup) layered on top makes this safe at 0 min because identical-content edits become no-ops.
+
+#### P7-COST-3: Content-hash dedup for discovery extraction (`src/discovery.ts`, `src/discovery-extract.ts`, `src/db.ts`)
+
+PR #145 cached the static prefix within a worker drain. But every commit still pays the uncached note-content rate plus output tokens, even when the file's bytes haven't changed — a one-character typo, a cron re-enqueue, or a touch-without-edit all re-spend Haiku tokens on an extraction whose inputs and outputs are identical. Persist the extraction result keyed by content hash so identical inputs short-circuit before the Anthropic call. Mirror the `note_blame` pattern that already keys cache rows on `(path, source_hash)`.
+
+**Behavior:**
+1. `extractFromNote` reads `content` via `readFileSync`, then computes `content_sha256 = sha256(content)`.
+2. Before calling Anthropic, look up `discovery_cache` by `(vault_id, path, content_sha256, cache_version)`. On hit: parse `result_json` into an `ExtractionResult`, log `[discovery] cache hit for ${path}`, return — no Anthropic call.
+3. On miss: call `extractEntities` as today. On success, `INSERT OR REPLACE INTO discovery_cache` the full `ExtractionResult` as JSON plus `model`, `cache_version`, and `cached_at`.
+4. `wireLinks` is still invoked on both hit and miss paths — the cache short-circuits the LLM, not the side-effecting writes.
+5. Failed extractions are NOT written to cache.
+6. `embed_retry` and `image_enrich` triggers bypass the cache.
+7. On cache hit, re-run the `matchEntity` pass over cached `entities[]` against current vocab so freshly-created notes get linked retroactively without a new LLM call.
+
+**Schema migration:**
+
+```sql
+CREATE TABLE IF NOT EXISTS discovery_cache (
+  vault_id TEXT NOT NULL REFERENCES vaults(id),
+  path TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  cache_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (vault_id, path, content_sha256, cache_version)
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_cache_cached_at ON discovery_cache(cached_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_cache_path ON discovery_cache(vault_id, path);
+```
+
+Down: `DROP TABLE IF EXISTS discovery_cache;`
+
+**Cache key:** `(vault_id, path, content_sha256, cache_version)`.
+- `cache_version` — `const DISCOVERY_CACHE_VERSION = 1` exported from `src/discovery-extract.ts`. Bumped in the same commit that changes `EXTRACTION_MODEL`, `EXTRACT_TOOL` schema, `buildPrompt` static prefix, or `ExtractionResult` shape. Enforced by `scripts/check-cache-version.ts` lint that fails CI if any of those four files changed without a version bump.
+- Manual flush via `grove discovery flush-cache [--path <p>] [--vault <slug>]` (new CLI subcommand).
+
+**Files:** `src/discovery-extract.ts`, `src/discovery.ts`, `src/db.ts`, `src/cli.ts`, `scripts/check-cache-version.ts`
+**Tests:** `test/discovery-cache.test.ts` — call sequence (mock client records calls): first hits Anthropic, second identical call hits 0 Anthropic calls; one-byte content change → cache miss; cache_version bump invalidates; cross-vault isolation; failed extraction does not write cache; wireLinks invoked on both paths. Extend `test/db.test.ts` for `flushDiscoveryCache`. Extend `test/discovery-extract.test.ts` to keep PR #145 prefix-caching behavior unchanged on miss.
+**Acceptance:**
+- [ ] Re-running discovery on an unchanged file makes 0 Anthropic API calls
+- [ ] A single-byte edit triggers a cache miss + exactly one Anthropic call
+- [ ] Bumping `DISCOVERY_CACHE_VERSION` invalidates prior entries
+- [ ] Cross-vault isolation: identical `(path, content)` under different `vault_id` cache independently
+- [ ] `migrateDiscoveryCache` is idempotent and transactional
+- [ ] `grove discovery flush-cache` removes targeted rows
+- [ ] `scripts/check-cache-version.ts` blocks any PR that edits cache-key surfaces without bumping `DISCOVERY_CACHE_VERSION`
+
+**Risks / open questions:** schema drift mid-cache-lifetime handled by version bump + lint; hash collisions negligible; vocab change isn't in cache key — `matchEntity` re-run on hit closes that staleness window; cache table growth is bounded (one row per `(vault_id, path, content_sha256)`).
+
+#### P7-COST-4a: Daily cost ingest job (`scripts/cost-ingest.sh`, `src/db.ts`)
+
+Pull Anthropic admin-API usage for the previous full UTC day, compute local cost from token counts × per-model pricing, persist to a new `discovery_cost_daily` table. Idempotent, cron-driven, no app code path depends on it (watchdog reads the table directly).
+
+**Behavior:**
+1. Source `/root/.grove/watchdog.env`. Refuse to run if `ANTHROPIC_ADMIN_API_KEY` is unset (exit 2).
+2. Compute the previous full UTC day window. Optional `--day YYYY-MM-DD` arg for backfill.
+3. Loop over `GET /v1/organizations/usage_report/messages?...&group_by[]=api_key_id`, paginating via `next_page`. Cap at 50 pages.
+4. For every `(api_key_id, model)` bucket, accumulate token counts and compute cost in USD:
+   - `uncached_input_tokens × 0.80 / 1_000_000`
+   - `cache_read_input_tokens × 0.08 / 1_000_000`
+   - `cache_creation.ephemeral_5m_input_tokens × 1.00 / 1_000_000`
+   - `cache_creation.ephemeral_1h_input_tokens × 1.60 / 1_000_000`
+   - `output_tokens × 4.00 / 1_000_000`
+5. Pricing table lives in the script as a `jq` object keyed by model id. Unknown model → log warning and store `estimated_cost_usd=NULL`.
+6. `INSERT OR REPLACE INTO discovery_cost_daily` per `(day, api_key_id, model)`. Single `BEGIN ... COMMIT`.
+7. Log one-line summary per run: `day=2026-05-10 keys=3 models=2 rows=4 total=$28.41`.
+
+**Schema migration** (added to `src/db.ts` `SCHEMA` const):
+
+```sql
+CREATE TABLE IF NOT EXISTS discovery_cost_daily (
+  day TEXT NOT NULL,
+  api_key_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_5m_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_1h_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_cost_usd REAL,
+  ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (day, api_key_id, model)
+);
+CREATE INDEX IF NOT EXISTS idx_cost_daily_day ON discovery_cost_daily(day);
+CREATE INDEX IF NOT EXISTS idx_cost_daily_key ON discovery_cost_daily(api_key_id, day);
+```
+
+Down: `DROP TABLE IF EXISTS discovery_cost_daily;`
+
+**Files:** `scripts/cost-ingest.sh` (new, ~120 lines bash), `src/db.ts` (schema), crontab (`0 6 * * * /root/grove/scripts/cost-ingest.sh >> /var/log/grove-cost-ingest.log 2>&1`).
+**Tests:** `test/db-migration.test.ts` (extend) — table + indexes after migration; idempotent. `test/scripts/cost-ingest.smoke.test.ts` (new) — feeds stubbed `ANTHROPIC_API_BASE` pointing at a `node:http` fixture; asserts row math matches hand-computed expected, idempotent re-runs, unknown-model warning.
+**Acceptance:**
+- [ ] `bash scripts/cost-ingest.sh` against prod populates ≥1 row for yesterday in <30s
+- [ ] Re-running for the same day is a no-op
+- [ ] Exits non-zero on missing admin key, HTTP 4xx/5xx, or >50 pages
+- [ ] `/var/log/grove-cost-ingest.log` rotates via existing logrotate config
+
+**Risks:** admin API rate limits (mitigate: 1s sleep between paginated calls); pagination edge cases; admin token revocation surfaces as 401 → exit non-zero; key-ID discrepancy with user (user named `apikey_014dvdW3aXSTDj3JqsFD12eG`; usage data shows `apikey_01SCuYJ6WvYEZAiairRSsX53` as the high-volume key — confirm before merging 4b).
+
+#### P7-COST-4b: Watchdog Signal 5 — daily Haiku cost alert (`scripts/watchdog.sh`)
+
+New signal block inserted after Signal 4. Reuses the existing `ALERTS=()` collector, throttle, Resend POST, and summary log line.
+
+**Behavior:**
+1. Read threshold: `COST_THRESHOLD_USD="${GROVE_COST_THRESHOLD_USD:-20}"`. Read optional key filter: `COST_KEY_ID="${GROVE_COST_WATCH_KEY_ID:-}"` (empty = sum across all keys).
+2. Compute yesterday and day-before in `YYYY-MM-DD` UTC.
+3. Skip if `discovery_cost_daily` is missing or empty for yesterday — log `Signal 5: no cost data for <day> yet, skipping`.
+4. Query yesterday's cost from `discovery_cost_daily`. Compute `DELTA = YESTERDAY - DAY_BEFORE`. Query top key by cost.
+5. If `YESTERDAY > COST_THRESHOLD_USD`, append to `ALERTS` with day-over-day delta + top key + inspect-query hint.
+6. Extend the summary line: `... dups=... cost=$<X>` — daily cost trace lands in `/var/log/grove-watchdog.log` even without an email.
+
+**Files:** `scripts/watchdog.sh`
+**Tests:** `test/scripts/watchdog-signal5.smoke.test.ts` — seeds temp sqlite, populates yesterday + day-before rows; runs `watchdog.sh` with stubbed `RESEND_API_KEY`; intercepts Resend POST via fixture; asserts threshold-not-exceeded → no Signal-5; threshold-exceeded → POST body contains Signal 5 + Δ + top key; empty table → script logs no-data and exits 0; throttle still respected.
+**Acceptance:**
+- [ ] On a prod day where cost > $20, watchdog sends one email per hour containing Signal 5
+- [ ] On a day where cost < $20, the no-alert summary line includes `cost=$X.XX`
+- [ ] `GROVE_COST_THRESHOLD_USD=5 bash scripts/watchdog.sh` against prod fires Signal 5 immediately
+- [ ] Signal 5 never fires when `discovery_cost_daily` has no row for yesterday
+
+**Risks:** threshold ergonomics ($20 placeholder — recommend $40 on confirm); per-key vs aggregate (defaults to aggregate, narrowable via env var); alert latency is daily-bucketed (floor on freshness is whatever Anthropic exposes).
+
+#### P7-COST-5: Batch API for non-urgent extractions (`src/discovery.ts`, `src/discovery-batch.ts`, `src/discovery-extract.ts`, `src/db.ts`)
+
+Route cron-driven (non-user-facing) extractions through Anthropic's Message Batches API at 50% off list. Real-time path stays as-is for user-driven writes; batch path runs on a slower poll cycle and resolves results back into the existing `wireLinks` flow.
+
+**Behavior:**
+1. Classify each enqueue as `urgent` or `batch-eligible` from its trigger:
+   - `commit` → batch-eligible (cron-driven, no user waiting)
+   - `write` → urgent (REST/MCP write from a live agent or user)
+   - `image_enrich`, `embed_retry`, `ingest` → urgent
+2. New `src/discovery-batch.ts`. Two-phase loop in the discovery worker tick, before the existing per-row drain:
+   - **Phase A — submit:** claim up to `GROVE_DISCOVERY_BATCH_MAX_ROWS` (default 100) `pending` rows with `trigger='commit'` whose `attempts = 0`, build `messages.create` payloads via the existing `buildPrompt` path (refactor to export `buildMessageRequest` from `discovery-extract.ts`), POST `/v1/messages/batches`, store `batch_id` on each row, flip status to `batched`. Insert row into `discovery_batches`.
+   - **Phase B — poll:** every `GROVE_DISCOVERY_BATCH_POLL_MS` (default 60_000), `GET /v1/messages/batches/<id>` for each open batch. On `processing_status='ended'`, stream `results_url`, decode each `custom_id` back to `discovery_queue.id`, parse `tool_use.input` via the same post-processing as `extractEntities`, then route through `wireLinks` and `markDiscoveryDone` (or `markDiscoveryError`). Finalize `discovery_batches` row.
+3. Real-time path keeps calling `messages.create` synchronously — no behavior change for `urgent` triggers.
+4. Backstop: if a `batched` row exceeds `GROVE_DISCOVERY_BATCH_MAX_AGE_HOURS` (default 26) without resolution, flip back to `pending` with `trigger='write'` so urgent path picks it up.
+
+**Schema migration:**
+- `ALTER TABLE discovery_queue ADD COLUMN batch_id TEXT`.
+- Rebuild `discovery_queue.status` CHECK to allow `'batched'` (in-place rebuild, same pattern as `migrateDiscoveryQueue`).
+- New `discovery_batches(id TEXT PRIMARY KEY, vault_id TEXT NOT NULL, submitted_at TEXT, completed_at TEXT, status TEXT CHECK(...), row_count INTEGER)` + index on `(status, submitted_at)`.
+
+**Files:** `src/discovery-batch.ts` (new), `src/discovery.ts` (interleave phases A/B), `src/discovery-extract.ts` (export `buildMessageRequest`), `src/db.ts` (migration + helpers: `claimBatchEligible`, `markRowsBatched`, `listOpenBatches`, `resolveBatchRow`, `recoverStaleBatched`), `src/migrations/YYYY-MM-DD-discovery-batch.up.sql`, `.down.sql`.
+**Tests:** `test/discovery-batch.test.ts` — trigger classification, phase-A submission marks rows `batched` + writes one `discovery_batches` row, phase-B polling resolves results, stale-batched recovery flips back to `pending`. `test/db-migration-discovery-batch.test.ts` — up/down idempotency, pre-populated rows survive, `status='batched'` accepted.
+**Acceptance:**
+- [ ] Cron-driven `commit` extractions reach Anthropic via `/v1/messages/batches` at 50% rate
+- [ ] `write`/`image_enrich`/`embed_retry`/`ingest` triggers continue real-time
+- [ ] `discovery_queue` rows transition `pending → batched → done` (or `error`) on batch path
+- [ ] Stale-batched rows older than max-age are reclaimed as urgent
+
+**Risks:** up to 24h SLA — wikilinks lag for cron-driven edits (mitigation: user edits stay on urgent path); polling cost (~14,400 GET/day at 60s cadence — admin requests, not model calls); `batch_id` 29-day expiry; cache breakpoints don't share across batched requests, so static-prefix cache savings degrade — net spend should still drop because batch discount > lost cache hits, but verify on a one-vault canary.
+
+#### P7-COST-6: Cascade depth cap (`src/db.ts`, `src/discovery-link.ts`, `src/discovery.ts`)
+
+Stop discovery from descending indefinitely into bot-spawned stubs. Track a per-row `cascade_depth` so a stub created by `discovery: create` knows it's depth 1, the stub *it* spawns is depth 2, etc., and the worker refuses to enqueue past `GROVE_DISCOVERY_CASCADE_MAX_DEPTH` (default 2).
+
+**Behavior:**
+1. New column `discovery_queue.cascade_depth INTEGER NOT NULL DEFAULT 0`. Existing rows backfill to 0.
+2. `enqueueDiscovery(path, trigger, vaultId, opts?)` gains optional `parentDepth?: number`. Inserted row's `cascade_depth = (parentDepth ?? -1) + 1`.
+3. `DiscoveryQueueEntry` exposes `cascade_depth`. Default processor passes `entry.cascade_depth` into `wireLinks` so freshly-created notes inherit parent depth.
+4. `discovery-link.ts:wireLinks` — after each `gitCommit(..., "discovery: create <path>")`, call `enqueueDiscovery(note.path, "commit", vaultId, { parentDepth: entry.cascade_depth })` so the stub's downstream processing is tracked. Makes parent→child link explicit so depth can travel (today the stub's discovery row is created indirectly by the next cron diff).
+5. If `parentDepth + 1 > GROVE_DISCOVERY_CASCADE_MAX_DEPTH` (default 2), `enqueueDiscovery` refuses, returns `false`, logs `[discovery] cascade cap reached at depth=N for <path>`. The stub note is still created on disk; only its automated re-extraction is suppressed. A user edit re-enters at depth 0 via `write` trigger.
+
+**Schema migration:** Add column with DEFAULT 0 — no row rewrite needed.
+**Files:** `src/db.ts` (migration, signature change on `enqueueDiscovery`, expose `cascade_depth` on entry), `src/discovery-link.ts` (explicit child enqueue with `parentDepth`), `src/discovery.ts` (thread `entry.cascade_depth` into `wireLinks`), `src/migrations/YYYY-MM-DD-discovery-cascade-depth.up.sql`, `.down.sql`.
+**Tests:** `test/discovery-cascade-depth.test.ts` — top-level depth 0; stub at depth 1; depth-2 row refuses to enqueue grandchild at depth 3; user `write` resets to depth 0; `GROVE_DISCOVERY_CASCADE_MAX_DEPTH=0` blocks all child enqueues. `test/db-migration-cascade-depth.test.ts` — up/down idempotency.
+**Acceptance:**
+- [ ] Bot-spawned stub enqueues at `parent.cascade_depth + 1`
+- [ ] At default cap, third-generation enqueue (depth 3) is refused and logged
+- [ ] User `write` always enters at depth 0
+- [ ] Existing rows post-migration report `cascade_depth = 0`
+
+**Risks:** explicit child enqueue from `wireLinks` changes who's responsible for stub re-extraction (mitigation: keep cron diff as backstop); depth doesn't detect cycles across siblings (acceptable for now); off-by-one risk on cap comparison (load-bearing test); misconfigured high cap silently disables (log effective cap at startup).
+
+#### P7-COST-7: Restore prompt caching for discovery extraction (`src/discovery-extract.ts`, `src/discovery.ts`)
+
+Admin-API usage report shows `cache_read_input_tokens=0` across all of May 2026 for `apikey_01SCuYJ6WvYEZAiairRSsX53`, despite PR #145 wiring `cache_control: {type: "ephemeral"}` onto the tool schema and the static prefix at `src/discovery-extract.ts:313`/`:319`. Local code shape is correct. Failure is not in *what we send* but in *whether what we send ever hits the same cache key twice*. Likely structural: `extractFromNote()` rebuilds vocab from disk on every call, and `wireLinks()` writes new concept notes between calls — so the cached static prefix's vocab summary differs by one entry on the next call, prefix-match fails, fresh cache write every time.
+
+**Diagnosed root cause (ranked hypotheses, instrument before patching):**
+
+- **H1 (most likely — structural cache invalidation):** vocab churn mid-drain busts the prefix cache. PR #145 anticipated this but underestimated frequency in steady-state drains.
+- **H2 (deployment skew):** PR #145 may not have actually deployed or workers weren't restarted. Falsifier: `cd /root/grove && git rev-list --count HEAD ^0484a77` and `pm2 describe grove-discovery-personal | grep uptime`.
+- **H3 (per-key telemetry vs reality):** admin-API report aggregates by `api_key_id`; if discovery uses a different key than reported, the 0 is a measurement artifact. Falsifier: `sqlite3 /root/.grove/grove.db "SELECT id, name FROM api_keys WHERE name LIKE '%discovery%'"`.
+- **H4 (under-threshold or beta header):** weakest hypothesis — SDK `0.92.0` is post-GA; vocab dump is ~50K+ tokens, well above the 1024 minimum.
+
+**Behavior (the fix):**
+
+1. **Instrument first.** In `extractEntities()`, log `response.usage.cache_creation_input_tokens` and `cache_read_input_tokens` per call. One structured line: `[discovery] cache usage: created=X read=Y input=Z note=<path>`. Three lines of code; closes the falsifier gap permanently.
+2. **Confirm H2 via SSH.** If deploy skew, redeploy + skip the structural fix.
+3. **Fix H1 — freeze vocab per drain:** lift `buildVocabulary()` out of `extractFromNote()` and into `defaultProcessor` (`src/discovery.ts`); pass the snapshot to `extractEntities`. Drain ticks reuse one snapshot. Cache breakpoint hits across the drain. Re-snapshot at the next poll wakeup.
+4. **Cache breakpoint placement (already correct, document the invariant):** keep `tools[0].cache_control` + first-content-block `cache_control`. Anything before the breakpoint in conversation order is cached; the trailing note-content block stays uncached.
+5. **No `anthropic-beta` header** — caching is GA on SDK ^0.92.0.
+
+**Files:** `src/discovery-extract.ts` (instrumentation + accept pre-built vocab), `src/discovery.ts` (build vocab once per drain batch), `test/discovery-extract.test.ts` (assert call shape + stable static prefix), `test/discovery.test.ts` (assert vocab built once per drain), `test/discovery-extract.smoke.test.ts` (new, gated on `ANTHROPIC_API_KEY` — assert `cache_read_input_tokens > 0` on second call).
+**Acceptance:**
+- [ ] Discovery worker logs `[discovery] cache usage:` lines on every extraction
+- [ ] First extraction after worker restart: `cache_creation_input_tokens > 1000`
+- [ ] Second+ extraction within the same drain tick: `cache_read_input_tokens > 0`
+- [ ] Within 7d of deploy: admin-API usage shows `cache_read_input_tokens >= 50%` of total input on this key
+- [ ] Estimated daily Haiku spend drops 60-80% on the cached portion
+
+**Risks:** drain >5min loses cache anyway (ephemeral TTL); consider `ttl: "1h"` (2× write cost, 12× longer life) after telemetry shows actual drain durations. Fresh-vault onboarding bursts have unavoidable cache churn (every extraction creates new notes). Retrieval-based vocab pruning is a follow-up.
+
+---
+
+
 ### Phase 8: Multi-Vault Onboarding
 
 **Goal:** Multi-vault support on a single Grove server (`api.grove.md`) so you can onboard other humans. Some users will have access to multiple vaults simultaneously (personal + team + consulting-client). Ship vehicle: one Grove deployment, many vaults — not federation across deployments.
