@@ -136,8 +136,57 @@ $BY_VAULT")
   fi
 fi
 
+# ---------- Signal 5: daily Anthropic cost alert ----------
+# Reads from discovery_cost_daily (populated by scripts/cost-ingest.sh
+# at 06:00 UTC). Quietly skips when yesterday's data isn't present yet
+# — this avoids false positives during the daily ingest warmup window.
+#
+# GROVE_COST_THRESHOLD_USD (default 20) — emit alert if yesterday > $X.
+# GROVE_COST_WATCH_KEY_ID (empty = sum across keys) — filter to one key.
+COST_THRESHOLD_USD="${GROVE_COST_THRESHOLD_USD:-20}"
+COST_KEY_FILTER="${GROVE_COST_WATCH_KEY_ID:-}"
+YESTERDAY=$(date -u -d 'yesterday' +%Y-%m-%d)
+DAY_BEFORE=$(date -u -d '2 days ago' +%Y-%m-%d)
+
+YESTERDAY_COST=$(sqlite3 "$DB" "
+  SELECT COALESCE(ROUND(SUM(estimated_cost_usd), 2), 0)
+    FROM discovery_cost_daily
+   WHERE day = '$YESTERDAY'
+     AND ('$COST_KEY_FILTER' = '' OR api_key_id = '$COST_KEY_FILTER')
+" 2>/dev/null || echo "0")
+YESTERDAY_ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM discovery_cost_daily WHERE day = '$YESTERDAY'" 2>/dev/null || echo "0")
+
+if [ "$YESTERDAY_ROWS" -gt 0 ]; then
+  DAY_BEFORE_COST=$(sqlite3 "$DB" "
+    SELECT COALESCE(ROUND(SUM(estimated_cost_usd), 2), 0)
+      FROM discovery_cost_daily
+     WHERE day = '$DAY_BEFORE'
+       AND ('$COST_KEY_FILTER' = '' OR api_key_id = '$COST_KEY_FILTER')
+  " 2>/dev/null || echo "0")
+  COST_DELTA=$(awk "BEGIN { printf \"%.2f\", $YESTERDAY_COST - $DAY_BEFORE_COST }")
+  TOP_KEY=$(sqlite3 -separator '|' "$DB" "
+    SELECT api_key_id, ROUND(SUM(estimated_cost_usd), 2)
+      FROM discovery_cost_daily
+     WHERE day = '$YESTERDAY' AND estimated_cost_usd IS NOT NULL
+     GROUP BY api_key_id
+     ORDER BY 2 DESC LIMIT 1
+  " 2>/dev/null || true)
+
+  # Threshold comparison via awk (bash arithmetic doesn't do floats)
+  OVER=$(awk "BEGIN { print ($YESTERDAY_COST > $COST_THRESHOLD_USD) }")
+  if [ "$OVER" = "1" ]; then
+    ALERTS+=("Signal 5: Anthropic cost for $YESTERDAY = \$$YESTERDAY_COST (threshold \$$COST_THRESHOLD_USD).
+Day-over-day: \$$DAY_BEFORE_COST -> \$$YESTERDAY_COST  (Δ \$$COST_DELTA).
+Top key: $TOP_KEY.
+Inspect: sqlite3 $DB \"SELECT model, ROUND(estimated_cost_usd,2) FROM discovery_cost_daily WHERE day='$YESTERDAY' ORDER BY 2 DESC\"")
+  fi
+else
+  log "Signal 5: no cost data for $YESTERDAY yet, skipping"
+  YESTERDAY_COST="-"
+fi
+
 # ---------- Send email if alerts (and not throttled) ----------
-SUMMARY="errors=$CURR_ERRORS (Δ$DELTA) pending=$PENDING stuck=$STUCK_COUNT dups=$([ -n "$DUPS" ] && echo Y || echo N)"
+SUMMARY="errors=$CURR_ERRORS (Δ$DELTA) pending=$PENDING stuck=$STUCK_COUNT dups=$([ -n "$DUPS" ] && echo Y || echo N) cost=\$$YESTERDAY_COST"
 
 if [ "${#ALERTS[@]}" -eq 0 ]; then
   log "$HOST: clean — $SUMMARY"

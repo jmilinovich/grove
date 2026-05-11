@@ -159,3 +159,106 @@ describe("shared_links migration (P19-1)", () => {
     expect(cols.find((c) => c.name === "max_views")!.notnull).toBe(0);
   });
 });
+
+/**
+ * P7-COST-4a — discovery_cost_daily table is created with the expected
+ * columns and indexes on fresh installs, and re-running createSchema()
+ * is a no-op.
+ */
+describe("discovery_cost_daily schema (P7-COST-4a)", () => {
+  let tempDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "grove-cost-schema-test-"));
+    dbPath = join(tempDir, "grove.db");
+    process.env.GROVE_DB_PATH = dbPath;
+    resetDb();
+  });
+
+  afterEach(() => {
+    resetDb();
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("creates the discovery_cost_daily table with the expected columns", () => {
+    createSchema();
+    const db = getDb();
+
+    const cols = db.prepare("PRAGMA table_info(discovery_cost_daily)").all() as {
+      name: string;
+      type: string;
+      notnull: number;
+      pk: number;
+    }[];
+    expect(cols.length).toBeGreaterThan(0);
+
+    const colsByName = new Map(cols.map((c) => [c.name, c]));
+    // PK columns
+    expect(colsByName.get("day")?.pk).toBeGreaterThan(0);
+    expect(colsByName.get("api_key_id")?.pk).toBeGreaterThan(0);
+    expect(colsByName.get("model")?.pk).toBeGreaterThan(0);
+    // Token columns
+    expect(colsByName.has("uncached_input_tokens")).toBe(true);
+    expect(colsByName.has("cache_read_tokens")).toBe(true);
+    expect(colsByName.has("cache_creation_5m_tokens")).toBe(true);
+    expect(colsByName.has("cache_creation_1h_tokens")).toBe(true);
+    expect(colsByName.has("output_tokens")).toBe(true);
+    // Cost is nullable (unknown-model rows can't be priced)
+    const cost = colsByName.get("estimated_cost_usd");
+    expect(cost).toBeDefined();
+    expect(cost!.notnull).toBe(0);
+    // Bookkeeping
+    expect(colsByName.has("ingested_at")).toBe(true);
+  });
+
+  it("creates the day and api_key/day indexes", () => {
+    createSchema();
+    const db = getDb();
+    const indexes = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='discovery_cost_daily'",
+      )
+      .all() as { name: string }[];
+    const names = new Set(indexes.map((i) => i.name));
+    expect(names.has("idx_cost_daily_day")).toBe(true);
+    expect(names.has("idx_cost_daily_key")).toBe(true);
+  });
+
+  it("running createSchema twice is a no-op", () => {
+    createSchema();
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO discovery_cost_daily (day, api_key_id, model, uncached_input_tokens, output_tokens, estimated_cost_usd) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("2026-05-07", "apikey_abc", "claude-haiku-4-5-20251001", 1000, 500, 0.0028);
+
+    // Second call must not throw and must not drop our row.
+    expect(() => createSchema()).not.toThrow();
+
+    const rows = db.prepare("SELECT * FROM discovery_cost_daily").all() as Array<{
+      day: string;
+      api_key_id: string;
+      model: string;
+      uncached_input_tokens: number;
+      output_tokens: number;
+      estimated_cost_usd: number | null;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].api_key_id).toBe("apikey_abc");
+    expect(rows[0].uncached_input_tokens).toBe(1000);
+    expect(rows[0].estimated_cost_usd).toBeCloseTo(0.0028);
+  });
+
+  it("permits null estimated_cost_usd (unknown-model rows)", () => {
+    createSchema();
+    const db = getDb();
+    db.prepare(
+      "INSERT INTO discovery_cost_daily (day, api_key_id, model, uncached_input_tokens, output_tokens, estimated_cost_usd) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("2026-05-07", "apikey_abc", "unknown", 100, 50, null);
+
+    const row = db
+      .prepare("SELECT estimated_cost_usd FROM discovery_cost_daily WHERE model = 'unknown'")
+      .get() as { estimated_cost_usd: number | null };
+    expect(row.estimated_cost_usd).toBeNull();
+  });
+});
