@@ -552,7 +552,7 @@ Stop discovery from descending indefinitely into bot-spawned stubs. Track a per-
 
 **Risks:** explicit child enqueue from `wireLinks` changes who's responsible for stub re-extraction (mitigation: keep cron diff as backstop); depth doesn't detect cycles across siblings (acceptable for now); off-by-one risk on cap comparison (load-bearing test); misconfigured high cap silently disables (log effective cap at startup).
 
-#### P7-COST-7: Restore prompt caching for discovery extraction (`src/discovery-extract.ts`, `src/discovery.ts`)
+#### P7-COST-7: Restore prompt caching for discovery extraction (`src/discovery-extract.ts`) ✅ COMPLETE 2026-05-11
 
 Admin-API usage report shows `cache_read_input_tokens=0` across all of May 2026 for `apikey_01SCuYJ6WvYEZAiairRSsX53`, despite PR #145 wiring `cache_control: {type: "ephemeral"}` onto the tool schema and the static prefix at `src/discovery-extract.ts:313`/`:319`. Local code shape is correct. Failure is not in *what we send* but in *whether what we send ever hits the same cache key twice*. Likely structural: `extractFromNote()` rebuilds vocab from disk on every call, and `wireLinks()` writes new concept notes between calls — so the cached static prefix's vocab summary differs by one entry on the next call, prefix-match fails, fresh cache write every time.
 
