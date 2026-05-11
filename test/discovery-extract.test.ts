@@ -551,11 +551,32 @@ describe("extractEntities cache_usage logging", () => {
 describe("vocab TTL cache (P7-COST-7)", () => {
   let vaultDir: string;
   let vaultB: string;
+  let tempDir: string;
+  const TEST_VAULT_ID = "vault_test_vocab";
 
-  beforeEach(() => {
+  beforeEach(async () => {
     _resetVocabCacheForTests();
     // Stable, larger-than-default TTL for the within-TTL cases.
     process.env.GROVE_DISCOVERY_VOCAB_TTL_MS = "60000";
+
+    // Fresh DB per test — extractFromNote now calls getCachedExtraction (P7-COST-3)
+    // which requires the discovery_cache table + a vault_id with a corresponding
+    // vaults row.
+    tempDir = mkdtempSync(join(tmpdir(), "grove-vocab-db-"));
+    process.env.GROVE_DB_PATH = join(tempDir, "grove.db");
+    const dbMod = await import("../src/db.js");
+    dbMod.resetDb();
+    dbMod.createSchema();
+    const db = dbMod.getDb();
+    db.prepare(
+      "INSERT INTO users (id, username, email, role) VALUES (?, ?, ?, ?)",
+    ).run("user_vocab_test", "test", "test@grove.local", "owner");
+    db.prepare(
+      "INSERT INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)",
+    ).run(TEST_VAULT_ID, "user_vocab_test", "vocab", "Vocab Vault", tempDir);
+    db.prepare(
+      "INSERT INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)",
+    ).run("vault_other", "user_vocab_test", "other", "Other Vault", tempDir);
 
     vaultDir = mkdtempSync(join(tmpdir(), "grove-vocab-cache-a-"));
     mkdirSync(join(vaultDir, "Resources", "Concepts"), { recursive: true });
@@ -572,9 +593,13 @@ describe("vocab TTL cache (P7-COST-7)", () => {
     );
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    const dbMod = await import("../src/db.js");
+    dbMod.resetDb();
+    rmSync(tempDir, { recursive: true, force: true });
     rmSync(vaultDir, { recursive: true, force: true });
     rmSync(vaultB, { recursive: true, force: true });
+    delete process.env.GROVE_DB_PATH;
     resetClient();
     vi.restoreAllMocks();
     delete process.env.GROVE_DISCOVERY_VOCAB_TTL_MS;
@@ -608,14 +633,20 @@ describe("vocab TTL cache (P7-COST-7)", () => {
     return rel;
   }
 
+  // Each test uses a fresh probe path per call so the P7-COST-3 content-hash
+  // cache doesn't short-circuit subsequent calls. We're isolating P7-COST-7
+  // vocab-cache behavior; different paths = different content-cache keys =
+  // we exercise the vocab cache on every call.
+
   it("vocab is built once across calls within TTL", async () => {
     mockEmpty();
-    const probe = writeProbeNote(vaultDir, "Probe One");
+    const probe1 = writeProbeNote(vaultDir, "Probe One A");
+    const probe2 = writeProbeNote(vaultDir, "Probe One B");
 
     const spy = vi.spyOn(discoveryExtract._vocabInternals, "buildVocabulary");
 
-    await extractFromNote(vaultDir, probe);
-    await extractFromNote(vaultDir, probe);
+    await extractFromNote(vaultDir, probe1, TEST_VAULT_ID);
+    await extractFromNote(vaultDir, probe2, TEST_VAULT_ID);
 
     expect(spy).toHaveBeenCalledTimes(1);
   });
@@ -625,13 +656,14 @@ describe("vocab TTL cache (P7-COST-7)", () => {
     _resetVocabCacheForTests();
 
     mockEmpty();
-    const probe = writeProbeNote(vaultDir, "Probe Two");
+    const probe1 = writeProbeNote(vaultDir, "Probe Two A");
+    const probe2 = writeProbeNote(vaultDir, "Probe Two B");
 
     const spy = vi.spyOn(discoveryExtract._vocabInternals, "buildVocabulary");
 
-    await extractFromNote(vaultDir, probe);
+    await extractFromNote(vaultDir, probe1, TEST_VAULT_ID);
     await new Promise((r) => setTimeout(r, 20));
-    await extractFromNote(vaultDir, probe);
+    await extractFromNote(vaultDir, probe2, TEST_VAULT_ID);
 
     expect(spy).toHaveBeenCalledTimes(2);
   });
@@ -643,21 +675,22 @@ describe("vocab TTL cache (P7-COST-7)", () => {
 
     const spy = vi.spyOn(discoveryExtract._vocabInternals, "buildVocabulary");
 
-    await extractFromNote(vaultDir, probeA);
-    await extractFromNote(vaultB, probeB);
+    await extractFromNote(vaultDir, probeA, TEST_VAULT_ID);
+    await extractFromNote(vaultB, probeB, "vault_other");
 
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
   it("_resetVocabCacheForTests empties the cache", async () => {
     mockEmpty();
-    const probe = writeProbeNote(vaultDir, "Probe Reset");
+    const probe1 = writeProbeNote(vaultDir, "Probe Reset A");
+    const probe2 = writeProbeNote(vaultDir, "Probe Reset B");
 
     const spy = vi.spyOn(discoveryExtract._vocabInternals, "buildVocabulary");
 
-    await extractFromNote(vaultDir, probe);
+    await extractFromNote(vaultDir, probe1, TEST_VAULT_ID);
     _resetVocabCacheForTests();
-    await extractFromNote(vaultDir, probe);
+    await extractFromNote(vaultDir, probe2, TEST_VAULT_ID);
 
     expect(spy).toHaveBeenCalledTimes(2);
   });
@@ -665,11 +698,12 @@ describe("vocab TTL cache (P7-COST-7)", () => {
   it("logs the effective TTL once on first call", async () => {
     _resetVocabCacheForTests();
     mockEmpty();
-    const probe = writeProbeNote(vaultDir, "Probe TTL Log");
+    const probe1 = writeProbeNote(vaultDir, "Probe TTL Log A");
+    const probe2 = writeProbeNote(vaultDir, "Probe TTL Log B");
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
-    await extractFromNote(vaultDir, probe);
-    await extractFromNote(vaultDir, probe);
+    await extractFromNote(vaultDir, probe1, TEST_VAULT_ID);
+    await extractFromNote(vaultDir, probe2, TEST_VAULT_ID);
 
     const ttlLogs = logSpy.mock.calls
       .map((c) => String(c[0]))

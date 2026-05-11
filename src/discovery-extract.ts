@@ -12,6 +12,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync } from "node:fs";
 import { join, basename } from "node:path";
+import { createHash } from "node:crypto";
+import { getCachedExtraction, putCachedExtraction } from "./db.js";
 import { listNotes } from "./vault-ops.js";
 import {
   entityFolders,
@@ -20,6 +22,24 @@ import {
   loadVaultConfig,
   type VaultConfig,
 } from "./vault-config.js";
+
+/**
+ * Cache-key version for the per-(vault, path, content) extraction cache.
+ *
+ * Bumped manually in any commit that changes the cache's behavioral
+ * surface — i.e. anything whose change would make a previously-cached
+ * `ExtractionResult` wrong for the same input bytes:
+ *   - `EXTRACTION_MODEL` (different model id)
+ *   - `EXTRACT_TOOL` (input/output schema)
+ *   - `buildPrompt` static prefix (instructions, entity folder hints)
+ *   - `ExtractionResult` shape
+ *
+ * Old rows persist in the table but stop matching, and the worker
+ * transparently treats them as misses on the next call. Periodic vacuum
+ * cleans them up. There's a TODO to wire a `scripts/check-cache-version.ts`
+ * lint into CI; for now the discipline is purely social.
+ */
+export const DISCOVERY_CACHE_VERSION = 1;
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -471,19 +491,60 @@ export async function extractEntities(
  * Reads the note from disk, builds vocabulary, calls Claude, and returns results.
  * Low-confidence entities (< 0.5) are logged but included in the result
  * for the caller to decide what to do with.
+ *
+ * **P7-COST-3 content-hash cache.** Before calling Anthropic we look up
+ * `discovery_cache` keyed on (vaultId, notePath, sha256(content),
+ * DISCOVERY_CACHE_VERSION). On hit, the previous extraction is returned
+ * verbatim and no LLM tokens are spent. On miss we extract, then INSERT OR
+ * REPLACE the row so the next identical-content call short-circuits.
+ * Failures throw before the put, so the cache never stores bad results.
+ *
+ * `vaultId` is required for cache scoping. Cross-vault entries with the
+ * same path + content cache independently — without this, a second vault
+ * could read a stale extraction made under a different vault's vocabulary.
  */
 export async function extractFromNote(
   vaultPath: string,
   notePath: string,
+  vaultId: string,
   config?: VaultConfig,
 ): Promise<ExtractionResult> {
   const cfg = config ?? loadVaultConfig(vaultPath);
   const fullPath = join(vaultPath, notePath);
   const content = readFileSync(fullPath, "utf-8");
-  // Cached for VOCAB_TTL_MS to keep the static prefix byte-identical
-  // across calls — see comments above `getVocab`.
+
+  const contentSha256 = createHash("sha256").update(content).digest("hex");
+  const cached = getCachedExtraction(
+    vaultId,
+    notePath,
+    contentSha256,
+    DISCOVERY_CACHE_VERSION,
+  );
+  if (cached) {
+    console.log(
+      `[discovery] cache hit ${contentSha256.slice(0, 12)} for ${notePath} ` +
+        `(cached_at=${cached.cached_at})`,
+    );
+    return JSON.parse(cached.result_json) as ExtractionResult;
+  }
+
+  // Vocab is cached for VOCAB_TTL_MS (P7-COST-7) so the static prefix sent
+  // to Anthropic stays byte-identical across calls and the cache_control
+  // breakpoint actually engages. Content-hash cache above (P7-COST-3) is
+  // the first short-circuit; this is the second.
   const vocab = getVocab(vaultPath, cfg);
   const result = await extractEntities(content, vocab, cfg, notePath);
+
+  // Only cache on success — failed extractions throw above this point,
+  // so a half-baked result never lands in the cache.
+  putCachedExtraction(
+    vaultId,
+    notePath,
+    contentSha256,
+    DISCOVERY_CACHE_VERSION,
+    EXTRACTION_MODEL,
+    JSON.stringify(result),
+  );
 
   // Log low-confidence entities
   for (const entity of result.entities) {

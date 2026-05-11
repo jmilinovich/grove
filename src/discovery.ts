@@ -98,8 +98,10 @@ const defaultProcessor: Processor = async (entry) => {
 
   console.log(`[discovery] processing ${entry.path}`);
 
-  // Extract entities via Claude API
-  const extraction = await extractFromNote(vaultPath, entry.path);
+  // Extract entities via Claude API. `ctx.vaultId` is required so the
+  // content-hash cache scopes per-vault (cross-vault leak otherwise — two
+  // vaults sharing a note path + bytes would read each other's results).
+  const extraction = await extractFromNote(vaultPath, entry.path, ctx.vaultId);
   console.log(
     `[discovery] extracted ${extraction.entities.length} entities, ` +
     `${extraction.suggested_links.length} links, ` +

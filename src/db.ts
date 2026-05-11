@@ -336,6 +336,25 @@ CREATE TABLE IF NOT EXISTS discovery_cost_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_cost_daily_day ON discovery_cost_daily(day);
 CREATE INDEX IF NOT EXISTS idx_cost_daily_key ON discovery_cost_daily(api_key_id, day);
+
+-- P7-COST-3: per-(vault, path, content_sha256, cache_version) cache of
+-- discovery-extract results. Lets identical-content re-saves (typo fixes,
+-- cron re-enqueues, idempotent writes) short-circuit the Anthropic call.
+-- Invalidated by bumping DISCOVERY_CACHE_VERSION in src/discovery-extract.ts
+-- (any change to model, tool schema, prompt prefix, or ExtractionResult shape
+-- requires a bump in the same commit). Manual flush via flushDiscoveryCache().
+CREATE TABLE IF NOT EXISTS discovery_cache (
+  vault_id TEXT NOT NULL REFERENCES vaults(id),
+  path TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  cache_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  cached_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (vault_id, path, content_sha256, cache_version)
+);
+CREATE INDEX IF NOT EXISTS idx_discovery_cache_cached_at ON discovery_cache(cached_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_cache_path ON discovery_cache(vault_id, path);
 `;
 
 export function createSchema(): void {
@@ -1208,6 +1227,89 @@ export function discoveryQueueDepth(vaultId: string = resolveVaultIdFromEnv()): 
     )
     .get(vaultId) as { count: number };
   return row.count;
+}
+
+// ── Discovery extraction cache (P7-COST-3) ─────────────────────────────
+
+/**
+ * Look up a cached discovery-extract result for an exact
+ * (vault_id, path, content_sha256, cache_version) tuple. A hit means the
+ * same vault, same path, same bytes, and the same prompt/model surface
+ * already produced a result — return it and skip the Anthropic call.
+ *
+ * Returns `null` when no row matches. The caller is responsible for
+ * `JSON.parse`ing `result_json` (we deliberately don't here so a corrupt
+ * row throws a clear error in the caller's `JSON.parse`, not deep inside
+ * the db helper).
+ */
+export function getCachedExtraction(
+  vaultId: string,
+  path: string,
+  contentSha256: string,
+  cacheVersion: number,
+): { result_json: string; model: string; cached_at: string } | null {
+  const database = getDb();
+  const row = database
+    .prepare(
+      `SELECT result_json, model, cached_at FROM discovery_cache
+        WHERE vault_id = ? AND path = ? AND content_sha256 = ? AND cache_version = ?`,
+    )
+    .get(vaultId, path, contentSha256, cacheVersion) as
+    | { result_json: string; model: string; cached_at: string }
+    | undefined;
+  return row ?? null;
+}
+
+/**
+ * Persist a discovery-extract result. INSERT OR REPLACE so a re-extraction
+ * for the same (vault_id, path, content_sha256, cache_version) tuple just
+ * refreshes `cached_at` and `result_json`. Only called from the cache-miss
+ * branch in `extractFromNote`, so it never overwrites a successful result
+ * with a failed one (failures throw before this is reached).
+ */
+export function putCachedExtraction(
+  vaultId: string,
+  path: string,
+  contentSha256: string,
+  cacheVersion: number,
+  model: string,
+  resultJson: string,
+): void {
+  const database = getDb();
+  database
+    .prepare(
+      `INSERT OR REPLACE INTO discovery_cache
+         (vault_id, path, content_sha256, cache_version, model, result_json, cached_at)
+       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+    )
+    .run(vaultId, path, contentSha256, cacheVersion, model, resultJson);
+}
+
+/**
+ * Flush rows from `discovery_cache`. Three call shapes:
+ *  - `flushDiscoveryCache()` — wipe the whole table (every vault, every path)
+ *  - `flushDiscoveryCache(vaultId)` — wipe one vault's rows
+ *  - `flushDiscoveryCache(vaultId, path)` — wipe one (vault, path) pair (all
+ *    `content_sha256` and `cache_version` rows for it)
+ *
+ * Returns the number of rows deleted. No-op (returns 0) on a freshly
+ * migrated table that hasn't been populated yet.
+ */
+export function flushDiscoveryCache(vaultId?: string, path?: string): number {
+  const database = getDb();
+  let result;
+  if (vaultId === undefined) {
+    result = database.prepare("DELETE FROM discovery_cache").run();
+  } else if (path === undefined) {
+    result = database
+      .prepare("DELETE FROM discovery_cache WHERE vault_id = ?")
+      .run(vaultId);
+  } else {
+    result = database
+      .prepare("DELETE FROM discovery_cache WHERE vault_id = ? AND path = ?")
+      .run(vaultId, path);
+  }
+  return result.changes;
 }
 
 // ── Discovery results helpers ────────────────────────────────────

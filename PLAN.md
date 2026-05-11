@@ -379,7 +379,7 @@ Collapse edit storms into a single extraction by refusing to enqueue the same `(
 
 **Risks:** if a user makes a real content change within the cooldown window, the new content won't be extracted until cooldown lapses. Mitigation: cooldown short by default (5 min); P7-COST-3 (content-hash dedup) layered on top makes this safe at 0 min because identical-content edits become no-ops.
 
-#### P7-COST-3: Content-hash dedup for discovery extraction (`src/discovery.ts`, `src/discovery-extract.ts`, `src/db.ts`)
+#### P7-COST-3: Content-hash dedup for discovery extraction (`src/discovery.ts`, `src/discovery-extract.ts`, `src/db.ts`) ✅ COMPLETE 2026-05-11
 
 PR #145 cached the static prefix within a worker drain. But every commit still pays the uncached note-content rate plus output tokens, even when the file's bytes haven't changed — a one-character typo, a cron re-enqueue, or a touch-without-edit all re-spend Haiku tokens on an extraction whose inputs and outputs are identical. Persist the extraction result keyed by content hash so identical inputs short-circuit before the Anthropic call. Mirror the `note_blame` pattern that already keys cache rows on `(path, source_hash)`.
 
