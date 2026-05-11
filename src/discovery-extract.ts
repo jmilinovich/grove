@@ -83,6 +83,71 @@ export function buildVocabulary(
     }));
 }
 
+// ── Vocab cache (P7-COST-7) ──────────────────────────────────────────
+//
+// Discovery extraction caches the static prefix (vocab dump + instructions)
+// via Anthropic's ephemeral `cache_control`. Prefix-byte-equality is the
+// cache key — and `wireLinks()` writes new concept notes to the vault
+// between calls, so rebuilding vocab from disk on every `extractFromNote`
+// invocation drifts the prefix by one entry per call and bypasses the
+// cache entirely (`cache_read_input_tokens=0` in admin telemetry across
+// all of May 2026). Freezing vocab for a short TTL stabilizes the prefix
+// across the drain window, restoring the ~10× cache-read cost ratio.
+
+function readVocabTtlMs(): number {
+  // Read each call so tests / runtime tuning can change the env var
+  // without restarting the worker. parseInt of an invalid string returns
+  // NaN; fall back to the default in that case so a typo doesn't disable
+  // caching entirely.
+  const raw = process.env.GROVE_DISCOVERY_VOCAB_TTL_MS;
+  if (!raw) return 60000;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 60000;
+}
+
+let cachedVocab: VocabEntry[] | null = null;
+let cachedVocabAt = 0;
+let cachedVocabPath = "";
+let vocabTtlLogged = false;
+
+// Indirection so tests can spy on the vocab build without colliding with
+// the public `buildVocabulary` export. ESM bindings prevent monkey-patching
+// the exported function from outside, so the cache must go through this
+// object instead of calling `buildVocabulary` directly.
+export const _vocabInternals = {
+  buildVocabulary,
+};
+
+function getVocab(vaultPath: string, config?: VaultConfig): VocabEntry[] {
+  const ttl = readVocabTtlMs();
+  if (!vocabTtlLogged) {
+    console.log(`[discovery] vocab cache TTL: ${ttl}ms`);
+    vocabTtlLogged = true;
+  }
+  const now = Date.now();
+  // Invalidate when vault path changes (test harness / multi-vault) or
+  // when the TTL window expires.
+  if (
+    cachedVocab &&
+    cachedVocabPath === vaultPath &&
+    now - cachedVocabAt < ttl
+  ) {
+    return cachedVocab;
+  }
+  cachedVocab = _vocabInternals.buildVocabulary(vaultPath, config);
+  cachedVocabAt = now;
+  cachedVocabPath = vaultPath;
+  return cachedVocab;
+}
+
+/** Test-only: clear the vocab cache between tests. */
+export function _resetVocabCacheForTests(): void {
+  cachedVocab = null;
+  cachedVocabAt = 0;
+  cachedVocabPath = "";
+  vocabTtlLogged = false;
+}
+
 // ── Entity matching ──────────────────────────────────────────────────
 
 /**
@@ -290,12 +355,14 @@ const EXTRACTION_MAX_TOKENS = 8192;
  * @param noteContent  Full text of the note (including frontmatter)
  * @param vocab        Existing vault entity vocabulary
  * @param config       Vault config (optional — defaults to PARA-style config)
+ * @param notePath     Optional vault-relative path for the cache_usage log line
  * @returns            Extraction result with entities, links, and new notes
  */
 export async function extractEntities(
   noteContent: string,
   vocab: VocabEntry[],
   config?: VaultConfig,
+  notePath?: string,
 ): Promise<ExtractionResult> {
   const cfg = config ?? getDefaultConfig();
   const { staticPrefix, noteBlock } = buildPrompt(noteContent, vocab, cfg);
@@ -322,6 +389,22 @@ export async function extractEntities(
       },
     ],
   });
+
+  // Falsifier for the prompt-caching pipeline. Admin-API usage telemetry
+  // aggregates by key/day, which masks per-call cache behavior; this
+  // line is the only place we can confirm cache_read_input_tokens > 0
+  // mid-drain without a backfill query.
+  const usage = (response.usage ?? {}) as {
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+    input_tokens?: number;
+  };
+  const created = usage.cache_creation_input_tokens ?? 0;
+  const read = usage.cache_read_input_tokens ?? 0;
+  const input = usage.input_tokens ?? 0;
+  console.log(
+    `[discovery] cache usage: created=${created} read=${read} input=${input} note=${notePath ?? ""}`,
+  );
 
   // The forced tool_choice guarantees a tool_use block in the response
   // (modulo refusal/overload, which throw earlier). Walk the content
@@ -397,8 +480,10 @@ export async function extractFromNote(
   const cfg = config ?? loadVaultConfig(vaultPath);
   const fullPath = join(vaultPath, notePath);
   const content = readFileSync(fullPath, "utf-8");
-  const vocab = buildVocabulary(vaultPath, cfg);
-  const result = await extractEntities(content, vocab, cfg);
+  // Cached for VOCAB_TTL_MS to keep the static prefix byte-identical
+  // across calls — see comments above `getVocab`.
+  const vocab = getVocab(vaultPath, cfg);
+  const result = await extractEntities(content, vocab, cfg, notePath);
 
   // Log low-confidence entities
   for (const entity of result.entities) {

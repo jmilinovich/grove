@@ -7,11 +7,14 @@ import {
   matchEntity,
   buildVocabulary,
   extractEntities,
+  extractFromNote,
   setClient,
   resetClient,
+  _resetVocabCacheForTests,
   type VocabEntry,
   type ExtractionResult,
 } from "../src/discovery-extract.js";
+import * as discoveryExtract from "../src/discovery-extract.js";
 
 // ── matchEntity ──────────────────────────────────────────────────────
 
@@ -444,5 +447,233 @@ describe("extractEntities", () => {
     expect(result.entities).toHaveLength(1);
     expect(result.suggested_links).toEqual([]);
     expect(result.new_notes).toEqual([]);
+  });
+});
+
+// ── P7-COST-7: cache_usage logging + vocab TTL cache ────────────────
+
+describe("extractEntities cache_usage logging", () => {
+  afterEach(() => {
+    resetClient();
+    vi.restoreAllMocks();
+  });
+
+  function mockClientWithUsage(
+    response: ExtractionResult,
+    usage: {
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+      input_tokens?: number;
+    },
+  ) {
+    const mock = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          stop_reason: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_usage_test",
+              name: "extract_entities",
+              input: response,
+            },
+          ],
+          usage,
+        }),
+      },
+    } as any;
+    setClient(mock);
+    return mock;
+  }
+
+  it("logs cache_usage line with created/read tokens", async () => {
+    const empty: ExtractionResult = { entities: [], suggested_links: [], new_notes: [] };
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    // First call — cache miss (created > 0, read = 0).
+    mockClientWithUsage(empty, {
+      cache_creation_input_tokens: 2048,
+      cache_read_input_tokens: 0,
+      input_tokens: 100,
+    });
+    await extractEntities("note A", [], undefined, "Resources/Concepts/A.md");
+
+    // Second call — cache hit (created = 0, read > 0).
+    mockClientWithUsage(empty, {
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 2048,
+      input_tokens: 100,
+    });
+    await extractEntities("note B", [], undefined, "Resources/Concepts/B.md");
+
+    const matches = logSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => /\[discovery\] cache usage: created=\d+ read=\d+ input=\d+ note=/.test(s));
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+    expect(matches[0]).toContain("created=2048");
+    expect(matches[0]).toContain("read=0");
+    expect(matches[0]).toContain("note=Resources/Concepts/A.md");
+    expect(matches[1]).toContain("created=0");
+    expect(matches[1]).toContain("read=2048");
+    expect(matches[1]).toContain("note=Resources/Concepts/B.md");
+  });
+
+  it("logs cache_usage with zero defaults when response.usage is missing", async () => {
+    const empty: ExtractionResult = { entities: [], suggested_links: [], new_notes: [] };
+    // Older SDK shapes / mocks may omit usage entirely; logger must not crash.
+    const mock = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          stop_reason: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_no_usage",
+              name: "extract_entities",
+              input: empty,
+            },
+          ],
+        }),
+      },
+    } as any;
+    setClient(mock);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await expect(extractEntities("note", [])).resolves.toBeDefined();
+
+    const matched = logSpy.mock.calls
+      .map((c) => String(c[0]))
+      .some((s) => s.includes("[discovery] cache usage: created=0 read=0 input=0 note="));
+    expect(matched).toBe(true);
+  });
+});
+
+describe("vocab TTL cache (P7-COST-7)", () => {
+  let vaultDir: string;
+  let vaultB: string;
+
+  beforeEach(() => {
+    _resetVocabCacheForTests();
+    // Stable, larger-than-default TTL for the within-TTL cases.
+    process.env.GROVE_DISCOVERY_VOCAB_TTL_MS = "60000";
+
+    vaultDir = mkdtempSync(join(tmpdir(), "grove-vocab-cache-a-"));
+    mkdirSync(join(vaultDir, "Resources", "Concepts"), { recursive: true });
+    writeFileSync(
+      join(vaultDir, "Resources", "Concepts", "Seed Concept.md"),
+      `---\ntype: concept\n---\nSeed.\n`,
+    );
+
+    vaultB = mkdtempSync(join(tmpdir(), "grove-vocab-cache-b-"));
+    mkdirSync(join(vaultB, "Resources", "Concepts"), { recursive: true });
+    writeFileSync(
+      join(vaultB, "Resources", "Concepts", "Other Concept.md"),
+      `---\ntype: concept\n---\nOther.\n`,
+    );
+  });
+
+  afterEach(() => {
+    rmSync(vaultDir, { recursive: true, force: true });
+    rmSync(vaultB, { recursive: true, force: true });
+    resetClient();
+    vi.restoreAllMocks();
+    delete process.env.GROVE_DISCOVERY_VOCAB_TTL_MS;
+    _resetVocabCacheForTests();
+  });
+
+  function mockEmpty() {
+    const mock = {
+      messages: {
+        create: vi.fn().mockResolvedValue({
+          stop_reason: "tool_use",
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_vocab",
+              name: "extract_entities",
+              input: { entities: [], suggested_links: [], new_notes: [] },
+            },
+          ],
+          usage: { cache_creation_input_tokens: 0, cache_read_input_tokens: 0, input_tokens: 0 },
+        }),
+      },
+    } as any;
+    setClient(mock);
+    return mock;
+  }
+
+  function writeProbeNote(root: string, name: string): string {
+    const rel = join("Resources", "Concepts", `${name}.md`);
+    writeFileSync(join(root, rel), `---\ntype: concept\n---\n${name}\n`);
+    return rel;
+  }
+
+  it("vocab is built once across calls within TTL", async () => {
+    mockEmpty();
+    const probe = writeProbeNote(vaultDir, "Probe One");
+
+    const spy = vi.spyOn(discoveryExtract._vocabInternals, "buildVocabulary");
+
+    await extractFromNote(vaultDir, probe);
+    await extractFromNote(vaultDir, probe);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("vocab is rebuilt after TTL expires", async () => {
+    process.env.GROVE_DISCOVERY_VOCAB_TTL_MS = "10";
+    _resetVocabCacheForTests();
+
+    mockEmpty();
+    const probe = writeProbeNote(vaultDir, "Probe Two");
+
+    const spy = vi.spyOn(discoveryExtract._vocabInternals, "buildVocabulary");
+
+    await extractFromNote(vaultDir, probe);
+    await new Promise((r) => setTimeout(r, 20));
+    await extractFromNote(vaultDir, probe);
+
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("vocab is rebuilt when vault path changes", async () => {
+    mockEmpty();
+    const probeA = writeProbeNote(vaultDir, "Probe A");
+    const probeB = writeProbeNote(vaultB, "Probe B");
+
+    const spy = vi.spyOn(discoveryExtract._vocabInternals, "buildVocabulary");
+
+    await extractFromNote(vaultDir, probeA);
+    await extractFromNote(vaultB, probeB);
+
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("_resetVocabCacheForTests empties the cache", async () => {
+    mockEmpty();
+    const probe = writeProbeNote(vaultDir, "Probe Reset");
+
+    const spy = vi.spyOn(discoveryExtract._vocabInternals, "buildVocabulary");
+
+    await extractFromNote(vaultDir, probe);
+    _resetVocabCacheForTests();
+    await extractFromNote(vaultDir, probe);
+
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("logs the effective TTL once on first call", async () => {
+    _resetVocabCacheForTests();
+    mockEmpty();
+    const probe = writeProbeNote(vaultDir, "Probe TTL Log");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await extractFromNote(vaultDir, probe);
+    await extractFromNote(vaultDir, probe);
+
+    const ttlLogs = logSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((s) => /^\[discovery\] vocab cache TTL: \d+ms$/.test(s));
+    expect(ttlLogs).toHaveLength(1);
   });
 });
