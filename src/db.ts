@@ -1016,6 +1016,30 @@ export function enqueueDiscovery(
   vaultId: string = resolveVaultIdFromEnv(),
 ): boolean {
   const database = getDb();
+
+  // P7-COST-2 cooldown: refuse to re-enqueue if same (vault_id, path) was
+  // successfully processed within the last N minutes. Collapses edit storms
+  // (typo-fix → save → typo-fix → save) into a single extraction. Errors
+  // are NOT cooled down so transient Anthropic 5xx doesn't lock a path out.
+  // Keyed on (vault_id, path) only so different triggers for the same path
+  // collapse together — cooldown is content-based, not trigger-based.
+  const cooldownRaw = process.env.GROVE_DISCOVERY_COOLDOWN_MIN;
+  const cooldownMin = cooldownRaw === undefined ? 5 : Number.parseInt(cooldownRaw, 10);
+  if (Number.isFinite(cooldownMin) && cooldownMin > 0) {
+    const recent = database
+      .prepare(
+        `SELECT id FROM discovery_queue
+          WHERE vault_id = ? AND path = ?
+            AND status = 'done'
+            AND processed_at > datetime('now', ?)
+          LIMIT 1`,
+      )
+      .get(vaultId, path, `-${cooldownMin} minutes`) as { id: number } | undefined;
+    if (recent) {
+      return false;
+    }
+  }
+
   const existing = database
     .prepare(
       `SELECT id FROM discovery_queue
@@ -1033,6 +1057,31 @@ export function enqueueDiscovery(
     )
     .run(path, trigger, vaultId);
   return true;
+}
+
+/**
+ * P7-COST-1: count rows for this vault that completed (`done` or `error`)
+ * today (UTC). Used by the discovery worker to enforce
+ * `GROVE_DISCOVERY_DAILY_CAP`.
+ *
+ * `date('now')` returns the current UTC date in SQLite. Counting `error`
+ * alongside `done` is intentional: a failed extraction still cost Anthropic
+ * tokens, so it counts against the budget. Otherwise a vault stuck in a
+ * retry loop could blow through the cap without it ever firing.
+ */
+export function countTodayProcessed(
+  vaultId: string = resolveVaultIdFromEnv(),
+): number {
+  const database = getDb();
+  const row = database
+    .prepare(
+      `SELECT COUNT(*) AS n FROM discovery_queue
+        WHERE vault_id = ?
+          AND processed_at >= date('now')
+          AND status IN ('done', 'error')`,
+    )
+    .get(vaultId) as { n: number };
+  return row.n;
 }
 
 /**

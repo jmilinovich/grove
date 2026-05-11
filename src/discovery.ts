@@ -13,6 +13,7 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import {
+  countTodayProcessed,
   dequeueDiscovery,
   markDiscoveryDone,
   markDiscoveryError,
@@ -148,11 +149,43 @@ export function stopDiscoveryLoop(): void {
   console.log("[discovery] loop stopped");
 }
 
+// P7-COST-1 daily-cap state: per-vault timestamp of the last "cap reached"
+// log so we don't spam logs every 2s once the cap is hit. Process-local;
+// resets on worker restart, which is fine — the cap itself is enforced by
+// counting `discovery_queue` rows, not by in-memory state.
+const lastCapLogAt = new Map<string, number>();
+
+/**
+ * Hard daily extraction cap per vault. Returns true when the cap has been
+ * reached and the caller should treat the tick as a no-op. Reads
+ * `GROVE_DISCOVERY_DAILY_CAP` on every call so live env changes take effect
+ * without a restart. Defaults to 100; set to 0 (or any non-positive number)
+ * to disable.
+ */
+function checkDailyCap(vaultId: string): boolean {
+  const raw = process.env.GROVE_DISCOVERY_DAILY_CAP;
+  const cap = raw === undefined ? 100 : Number.parseInt(raw, 10);
+  if (!Number.isFinite(cap) || cap <= 0) return false;
+  const today = countTodayProcessed(vaultId);
+  if (today < cap) return false;
+  const now = Date.now();
+  const lastLog = lastCapLogAt.get(vaultId) ?? 0;
+  if (now - lastLog > 60_000) {
+    console.warn(
+      `[discovery] daily cap of ${cap} reached for vault_id=${vaultId} ` +
+        `(today=${today}); deferring further extractions until UTC midnight`,
+    );
+    lastCapLogAt.set(vaultId, now);
+  }
+  return true;
+}
+
 /** Exposed for testing — process a single queue tick synchronously. */
 export async function tick(
   processor: Processor = defaultProcessor,
   vaultId: string = getVaultId(),
 ): Promise<boolean> {
+  if (checkDailyCap(vaultId)) return false;
   const entry = dequeueDiscovery(vaultId);
   if (!entry) return false;
 
