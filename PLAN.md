@@ -500,7 +500,7 @@ New signal block inserted after Signal 4. Reuses the existing `ALERTS=()` collec
 
 **Risks:** threshold ergonomics ($20 placeholder — recommend $40 on confirm); per-key vs aggregate (defaults to aggregate, narrowable via env var); alert latency is daily-bucketed (floor on freshness is whatever Anthropic exposes).
 
-#### P7-COST-5: Batch API for non-urgent extractions (`src/discovery.ts`, `src/discovery-batch.ts`, `src/discovery-extract.ts`, `src/db.ts`)
+#### P7-COST-5: Batch API for non-urgent extractions (`src/discovery.ts`, `src/discovery-batch.ts`, `src/discovery-extract.ts`, `src/db.ts`) ✅ COMPLETE 2026-05-11
 
 Route cron-driven (non-user-facing) extractions through Anthropic's Message Batches API at 50% off list. Real-time path stays as-is for user-driven writes; batch path runs on a slower poll cycle and resolves results back into the existing `wireLinks` flow.
 
