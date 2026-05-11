@@ -45,6 +45,20 @@ jobs:
       - run: npm ci
       - run: npm run check:plan
 
+  cache-version:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+      - run: npm ci
+      - run: npm run check:cache-version
+
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 5

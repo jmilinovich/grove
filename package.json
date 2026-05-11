@@ -37,6 +37,7 @@
     "check": "npm run typecheck && npm run check:invariants && npm test",
     "check:plan": "tsx scripts/check-plan-drift.ts",
     "check:invariants": "tsx scripts/check-invariants.ts",
+    "check:cache-version": "tsx scripts/check-cache-version.ts",
     "ship": "tsx scripts/ship.ts"
   },
   "devDependencies": {
