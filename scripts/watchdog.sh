@@ -82,15 +82,26 @@ $SAMPLE")
 fi
 
 # ---------- Signal 2: duplicate extractions ----------
+# Only meaningful when the worker is actively writing. The discovery queue
+# drains to zero between bursts; once idle, the same 200 lines sit in the
+# tail buffer indefinitely. A real episode that already self-resolved would
+# otherwise keep re-firing Signal 2 every 15 min for hours — observed in
+# the 2026-05-10 23:00 UTC incident, which triggered ~36h of alert emails
+# after the underlying loop terminated at ~04:15 UTC. mtime gate: if no
+# new bytes in 30 min, any duplicates in the tail are stale.
 DUPS=""
 if [ -f "$OUT_LOG" ]; then
-  DUPS=$(tail -200 "$OUT_LOG" 2>/dev/null \
-    | grep -oE "extracted [0-9]+ entities[^\"]+from \S+\.md" \
-    | awk '{print $NF}' \
-    | sort | uniq -c | awk '$1 > 3 {print}' || true)
-  if [ -n "$DUPS" ]; then
-    ALERTS+=("Signal 2: same paths extracted >3x in last 200 log lines (cron amplification regression?):
+  LOG_MTIME=$(stat -c "%Y" "$OUT_LOG" 2>/dev/null || echo 0)
+  LOG_AGE=$((NOW_EPOCH - LOG_MTIME))
+  if [ "$LOG_AGE" -lt 1800 ]; then
+    DUPS=$(tail -200 "$OUT_LOG" 2>/dev/null \
+      | grep -oE "extracted [0-9]+ entities[^\"]+from \S+\.md" \
+      | awk '{print $NF}' \
+      | sort | uniq -c | awk '$1 > 3 {print}' || true)
+    if [ -n "$DUPS" ]; then
+      ALERTS+=("Signal 2: same paths extracted >3x in last 200 log lines (cron amplification regression?):
 $DUPS")
+    fi
   fi
 fi
 
