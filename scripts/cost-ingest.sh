@@ -123,7 +123,11 @@ while :; do
     exit 4
   fi
 
-  URL="$API_BASE/v1/organizations/usage_report/messages?starting_at=${DAY}T00:00:00Z&ending_at=${END_DAY}T00:00:00Z&bucket_width=1d&group_by[]=api_key_id${PAGE_PARAM}"
+  # Group by BOTH api_key_id and model. Without group_by[]=model the API
+  # returns model=null in every result bucket (it aggregates across models
+  # silently), which makes estimated_cost_usd impossible to compute. Adding
+  # the second group_by splits rows per-model and populates the field.
+  URL="$API_BASE/v1/organizations/usage_report/messages?starting_at=${DAY}T00:00:00Z&ending_at=${END_DAY}T00:00:00Z&bucket_width=1d&group_by[]=api_key_id&group_by[]=model${PAGE_PARAM}"
 
   RESP_FILE=$(mktemp -t grove-cost-resp-XXXXXX.json)
   HTTP_CODE=$(curl -sS -o "$RESP_FILE" -w "%{http_code}" \
