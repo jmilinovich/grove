@@ -80,8 +80,32 @@ else
   since="$FALLBACK_SINCE"
 fi
 
-# Get changed .md files since last sync
-changed=$(git diff --name-only "$since" HEAD -- '*.md' 2>/dev/null || true)
+# Get changed .md files since last sync, excluding paths whose only
+# in-range modifications were the discovery worker's own bot commits.
+#
+# discovery-link.ts uses two commit-message prefixes:
+#   - `discovery: wire links in <path>` when it inserts wikilinks
+#     into a source note
+#   - `discovery: create <path>` when it materializes a red-linked stub
+#
+# Either commit advances HEAD, and the previous `git diff` form picked
+# them up on the next cron tick → re-enqueued the same path → re-extracted
+# → committed again. The state-file watermark (PR #140) collapsed
+# idle-tick amplification but didn't catch this self-reinforcing chain.
+# It burned ~$30/day of Haiku on personal vault through early May 2026;
+# one note (Airway constriction.md) accumulated 903 lifetime extractions
+# before the state-file fix capped it.
+#
+# Switch to `git log --name-only --invert-grep` so we list only paths
+# touched by at least one *non-discovery* commit in the range. User
+# edits (`grove (api): update X`, manual commits, `stamp-provenance:`,
+# etc.) still pass through unchanged.
+changed=$(git log --name-only --pretty=format: \
+  --invert-grep \
+  --grep='^discovery: wire links ' \
+  --grep='^discovery: create ' \
+  "$since..HEAD" -- '*.md' 2>/dev/null \
+  | sort -u | sed '/^$/d' || true)
 
 # V3 §C — post-sync warm-up. Fire-and-forget bearer-gated POST that
 # tells grove-server to pre-warm note_blame for the (file-changed ∪
