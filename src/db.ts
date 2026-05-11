@@ -313,6 +313,29 @@ CREATE TABLE IF NOT EXISTS waitlist (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_waitlist_created_at ON waitlist(created_at);
+
+-- P7-COST-4a — daily Anthropic admin API usage_report rollup.
+-- Populated by scripts/cost-ingest.sh (cron 06:00 UTC) and read by the
+-- watchdog Signal 5 to alert when yesterday spend crosses a threshold.
+-- estimated_cost_usd is NULL when the model is unknown to the pricing
+-- table (Anthropic currently returns null for model in many responses;
+-- we store the literal "unknown" so the row is still useful for token
+-- accounting even when we cannot price it).
+CREATE TABLE IF NOT EXISTS discovery_cost_daily (
+  day TEXT NOT NULL,
+  api_key_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_5m_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_1h_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  estimated_cost_usd REAL,
+  ingested_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (day, api_key_id, model)
+);
+CREATE INDEX IF NOT EXISTS idx_cost_daily_day ON discovery_cost_daily(day);
+CREATE INDEX IF NOT EXISTS idx_cost_daily_key ON discovery_cost_daily(api_key_id, day);
 `;
 
 export function createSchema(): void {
