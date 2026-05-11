@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import {
   countTodayProcessed,
   dequeueDiscovery,
+  dequeueDiscoveryUrgent,
   markDiscoveryDone,
   markDiscoveryError,
   recoverOrphanedDiscoveryProcessing,
@@ -24,6 +25,11 @@ import { extractFromNote } from "./discovery-extract.js";
 import { wireLinks } from "./discovery-link.js";
 import { embedFile } from "./embed-single.js";
 import { enrichImageNote } from "./image-enrich.js";
+import {
+  pollBatches,
+  recoverStaleBatched,
+  submitBatchTick,
+} from "./discovery-batch.js";
 
 const DEFAULT_POLL_MS = 2_000;
 /** Max attempts before an embed_retry entry is abandoned as errored. */
@@ -188,7 +194,12 @@ export async function tick(
   vaultId: string = getVaultId(),
 ): Promise<boolean> {
   if (checkDailyCap(vaultId)) return false;
-  const entry = dequeueDiscovery(vaultId);
+  // P7-COST-5: urgent drain skips `trigger='commit'` rows so they
+  // route through the batch path. Pre-existing callers that test
+  // generic queue draining still work because every other trigger
+  // (`write`, `image_enrich`, `embed_retry`, `ingest`) passes the
+  // urgent filter.
+  const entry = dequeueDiscoveryUrgent(vaultId);
   if (!entry) return false;
 
   try {
@@ -203,15 +214,64 @@ export async function tick(
   return true;
 }
 
+/**
+ * P7-COST-5: per-tick orchestration of the batch + urgent paths.
+ *
+ * Order is deliberate:
+ *   1. Phase B — resolve completed batches so their links land before
+ *      urgent work might shadow them.
+ *   2. Stale-batched recovery — flip any rows past the 24h SLA back to
+ *      `pending` with `trigger='write'`, so they're picked up by the
+ *      urgent drain in the same tick.
+ *   3. Urgent drain — process all `pending` non-`commit` rows. Same as
+ *      pre-P7-COST-5 except `commit` rows are deferred to Phase A.
+ *   4. Phase A — claim batch-eligible rows and POST them as one batch.
+ *
+ * Errors at any phase are caught and logged so a transient Anthropic
+ * 5xx (or a missing API key) doesn't take the worker down.
+ */
+export async function runDiscoveryCycle(
+  processor: Processor = defaultProcessor,
+  vaultId: string = getVaultId(),
+): Promise<void> {
+  const vaultPath = getVaultPath();
+
+  // Phase B — poll open batches; resolve any that have ended.
+  try {
+    await pollBatches(vaultPath, vaultId);
+  } catch (err) {
+    console.error("[discovery] phase B (poll) failed:", err);
+  }
+
+  // Backstop — reclaim rows stuck in 'batched' past the max age.
+  try {
+    recoverStaleBatched(vaultId);
+  } catch (err) {
+    console.error("[discovery] stale-batched recovery failed:", err);
+  }
+
+  // Urgent drain — only non-commit triggers reach this loop. We don't
+  // gate on `running` here so the test harness can call this directly
+  // (and so a stopDiscoveryLoop mid-cycle still finishes the row it's
+  // currently working on rather than orphaning it).
+  while (true) {
+    const processed = await tick(processor, vaultId);
+    if (!processed) break;
+  }
+
+  // Phase A — submit one batch of commit-eligible rows.
+  try {
+    await submitBatchTick(vaultPath, vaultId);
+  } catch (err) {
+    console.error("[discovery] phase A (submit) failed:", err);
+  }
+}
+
 function scheduleTick(processor: Processor, pollMs: number, vaultId: string): void {
   if (!running) return;
   timer = setTimeout(async () => {
     try {
-      // Drain all pending entries in this tick before sleeping
-      while (running) {
-        const processed = await tick(processor, vaultId);
-        if (!processed) break;
-      }
+      await runDiscoveryCycle(processor, vaultId);
     } catch (err) {
       console.error("[discovery] unexpected loop error:", err);
     }

@@ -217,12 +217,33 @@ CREATE TABLE IF NOT EXISTS discovery_queue (
   trigger TEXT NOT NULL,
   queued_at TEXT NOT NULL DEFAULT (datetime('now')),
   processed_at TEXT,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'done', 'error')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'batched', 'done', 'error')),
   attempts INTEGER NOT NULL DEFAULT 0,
-  error_message TEXT
+  error_message TEXT,
+  batch_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_discovery_queue_status ON discovery_queue(status, queued_at);
+-- idx_discovery_queue_batch_id is created in migrateDiscoveryQueueBatch so
+-- pre-P7-COST-5 databases (without the column yet) don't fail the initial
+-- schema exec.
+
+-- P7-COST-5: tracks Anthropic Message Batches submitted by the discovery
+-- worker. One row per batch - many discovery_queue rows can carry the
+-- same batch_id. status follows Anthropic processing_status plus
+-- terminal bookkeeping values (ended, expired, canceled, errored).
+-- Index supports the worker find-open-batches poll query.
+CREATE TABLE IF NOT EXISTS discovery_batches (
+  id TEXT PRIMARY KEY,
+  vault_id TEXT NOT NULL,
+  submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  status TEXT NOT NULL DEFAULT 'submitted' CHECK(status IN ('submitted','ended','expired','canceled','errored')),
+  row_count INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_batches_status ON discovery_batches(status, submitted_at);
+CREATE INDEX IF NOT EXISTS idx_discovery_batches_vault ON discovery_batches(vault_id, status);
 
 CREATE TABLE IF NOT EXISTS discovery_results (
   id TEXT PRIMARY KEY,
@@ -372,6 +393,7 @@ export function createSchema(): void {
   migrateVaultMembersBackfill(database);
   migrateApiKeyVaultId(database);
   migrateVaultProvenanceRequired(database);
+  migrateDiscoveryQueueBatch(database);
 }
 
 /**
@@ -709,6 +731,120 @@ function migrateApiKeySessionId(database: Database.Database): void {
 }
 
 /**
+ * P7-COST-5 — add `batch_id` column to discovery_queue and rebuild the
+ * status CHECK to allow `'batched'`. Also adds the `discovery_batches`
+ * tracking table on existing DBs (fresh installs get it via SCHEMA).
+ *
+ * Idempotent. SQLite can't add a value to an in-place CHECK, so we
+ * detect via SQL inspection of `sqlite_master` and rebuild only when
+ * needed. Adding the column is a plain ALTER (nullable, no default).
+ */
+function migrateDiscoveryQueueBatch(database: Database.Database): void {
+  const exists = database
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='discovery_queue'")
+    .get();
+  if (!exists) return;
+
+  const cols = database
+    .prepare("PRAGMA table_info(discovery_queue)")
+    .all() as { name: string }[];
+  const hasBatchId = cols.some((c) => c.name === "batch_id");
+
+  const tableSql = database
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='discovery_queue'")
+    .get() as { sql: string } | undefined;
+  // Detect whether the CHECK constraint already includes 'batched'. The
+  // CHECK is part of the CREATE TABLE SQL recorded in sqlite_master.
+  const checkAllowsBatched = tableSql?.sql.includes("'batched'") ?? false;
+
+  if (hasBatchId && checkAllowsBatched) {
+    // Still ensure the table + indexes exist on every call so an older
+    // deployment that ran the column-add path before this code shipped
+    // still gets the discovery_batches surface.
+    database.exec(
+      `CREATE INDEX IF NOT EXISTS idx_discovery_queue_batch_id ON discovery_queue(batch_id)`,
+    );
+    ensureDiscoveryBatchesTable(database);
+    return;
+  }
+
+  const tx = database.transaction(() => {
+    if (!checkAllowsBatched) {
+      // Rebuild discovery_queue with the wider CHECK and the batch_id
+      // column in one pass. Preserve every existing row including
+      // vault_id (added by migrateMultiVault) and any other columns we
+      // may have picked up over time.
+      const colNames = cols.map((c) => c.name);
+      const hasVaultId = colNames.includes("vault_id");
+
+      // Build the CREATE/INSERT SQL dynamically so this works whether or
+      // not vault_id is present on the source table — migrateMultiVault
+      // may or may not have run yet at this point.
+      const newTableCols = [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "path TEXT NOT NULL",
+        "trigger TEXT NOT NULL",
+        "queued_at TEXT NOT NULL DEFAULT (datetime('now'))",
+        "processed_at TEXT",
+        "status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'batched', 'done', 'error'))",
+        "attempts INTEGER NOT NULL DEFAULT 0",
+        "error_message TEXT",
+        "batch_id TEXT",
+      ];
+      if (hasVaultId) {
+        newTableCols.push("vault_id TEXT NOT NULL DEFAULT 'vault_00000000'");
+      }
+      database.exec(`
+        CREATE TABLE discovery_queue_new (
+          ${newTableCols.join(",\n          ")}
+        );
+      `);
+      const copyCols = ["id", "path", "trigger", "queued_at", "processed_at", "status", "attempts", "error_message"];
+      if (hasVaultId) copyCols.push("vault_id");
+      // batch_id is new — leave NULL on existing rows.
+      database.exec(`
+        INSERT INTO discovery_queue_new (${copyCols.join(", ")})
+          SELECT ${copyCols.join(", ")} FROM discovery_queue;
+        DROP TABLE discovery_queue;
+        ALTER TABLE discovery_queue_new RENAME TO discovery_queue;
+        CREATE INDEX IF NOT EXISTS idx_discovery_queue_status ON discovery_queue(status, queued_at);
+        CREATE INDEX IF NOT EXISTS idx_discovery_queue_batch_id ON discovery_queue(batch_id);
+      `);
+      if (hasVaultId) {
+        database.exec(
+          `CREATE INDEX IF NOT EXISTS idx_discovery_queue_vault ON discovery_queue(vault_id)`,
+        );
+      }
+    } else if (!hasBatchId) {
+      // CHECK already allows 'batched' (unlikely but possible if a
+      // sibling migration shipped first) — just add the column.
+      database.exec(`ALTER TABLE discovery_queue ADD COLUMN batch_id TEXT`);
+      database.exec(
+        `CREATE INDEX IF NOT EXISTS idx_discovery_queue_batch_id ON discovery_queue(batch_id)`,
+      );
+    }
+
+    ensureDiscoveryBatchesTable(database);
+  });
+  tx();
+}
+
+function ensureDiscoveryBatchesTable(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS discovery_batches (
+      id TEXT PRIMARY KEY,
+      vault_id TEXT NOT NULL,
+      submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      status TEXT NOT NULL DEFAULT 'submitted' CHECK(status IN ('submitted','ended','expired','canceled','errored')),
+      row_count INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_discovery_batches_status ON discovery_batches(status, submitted_at);
+    CREATE INDEX IF NOT EXISTS idx_discovery_batches_vault ON discovery_batches(vault_id, status);
+  `);
+}
+
+/**
  * Drop the trigger CHECK constraint and add an `attempts` column on the
  * discovery_queue. SQLite can't modify a CHECK constraint in place — we
  * detect either condition via PRAGMA + sql inspection and rebuild the
@@ -1020,9 +1156,10 @@ export interface DiscoveryQueueEntry {
   trigger: DiscoveryTrigger;
   queued_at: string;
   processed_at: string | null;
-  status: "pending" | "processing" | "done" | "error";
+  status: "pending" | "processing" | "batched" | "done" | "error";
   attempts: number;
   error_message: string | null;
+  batch_id: string | null;
 }
 
 /** Resolve the vault_id that discovery rows should be written under. */
@@ -1152,6 +1289,32 @@ export function dequeueDiscovery(vaultId: string = resolveVaultIdFromEnv()): Dis
   return row ?? null;
 }
 
+/**
+ * P7-COST-5 urgent-only dequeue. Skips `trigger='commit'` rows so that
+ * cron-driven extractions stay in the batch path. Used by the discovery
+ * worker's realtime drain; `dequeueDiscovery` (no filter) is kept for
+ * back-compat with code paths that don't differentiate.
+ */
+export function dequeueDiscoveryUrgent(
+  vaultId: string = resolveVaultIdFromEnv(),
+): DiscoveryQueueEntry | null {
+  const database = getDb();
+  const row = database
+    .prepare(
+      `UPDATE discovery_queue
+         SET status = 'processing', attempts = attempts + 1
+       WHERE id = (
+         SELECT id FROM discovery_queue
+         WHERE status = 'pending' AND vault_id = ? AND trigger != 'commit'
+         ORDER BY queued_at ASC
+         LIMIT 1
+       )
+       RETURNING *`,
+    )
+    .get(vaultId) as DiscoveryQueueEntry | undefined;
+  return row ?? null;
+}
+
 /** Mark an entry as done. */
 export function markDiscoveryDone(id: number): void {
   const database = getDb();
@@ -1227,6 +1390,163 @@ export function discoveryQueueDepth(vaultId: string = resolveVaultIdFromEnv()): 
     )
     .get(vaultId) as { count: number };
   return row.count;
+}
+
+// ── Discovery batch (P7-COST-5) ──────────────────────────────────────
+
+export interface DiscoveryBatchRow {
+  id: string;
+  vault_id: string;
+  submitted_at: string;
+  completed_at: string | null;
+  status: "submitted" | "ended" | "expired" | "canceled" | "errored";
+  row_count: number;
+}
+
+/**
+ * Claim up to `limit` batch-eligible rows: pending, trigger='commit',
+ * attempts=0, scoped to `vaultId`. Returns the rows in queue order
+ * (oldest first). Atomic via a single UPDATE … RETURNING so two
+ * concurrent claims can't grab the same row.
+ *
+ * The rows are NOT flipped to 'batched' yet — that happens in
+ * `markRowsBatched` once the Anthropic POST succeeds and we have a
+ * `batch_id` to record. Until then the rows stay 'pending' so that a
+ * failed submit doesn't strand them.
+ */
+export function claimBatchEligible(
+  vaultId: string = resolveVaultIdFromEnv(),
+  limit: number = 100,
+): DiscoveryQueueEntry[] {
+  const database = getDb();
+  // We don't atomically flip status here — the worker holds the rows
+  // by ID through the submit flow. SQLite is single-writer so a
+  // sibling claim would only happen across process boundaries, and
+  // each vault has exactly one discovery worker pinned via PM2.
+  const rows = database
+    .prepare(
+      `SELECT * FROM discovery_queue
+        WHERE status = 'pending'
+          AND trigger = 'commit'
+          AND attempts = 0
+          AND vault_id = ?
+        ORDER BY queued_at ASC
+        LIMIT ?`,
+    )
+    .all(vaultId, limit) as DiscoveryQueueEntry[];
+  return rows;
+}
+
+/**
+ * Flip a set of rows to status='batched' and record their `batch_id`.
+ * Called once the Anthropic `/v1/messages/batches` POST has returned
+ * a batch id. Wrapped in a transaction so partial state can't strand
+ * rows mid-flip.
+ */
+export function markRowsBatched(rowIds: number[], batchId: string): void {
+  if (rowIds.length === 0) return;
+  const database = getDb();
+  const stmt = database.prepare(
+    `UPDATE discovery_queue
+        SET status = 'batched', batch_id = ?
+      WHERE id = ?`,
+  );
+  const tx = database.transaction(() => {
+    for (const id of rowIds) stmt.run(batchId, id);
+  });
+  tx();
+}
+
+/**
+ * Insert a new row into `discovery_batches`. Called immediately after
+ * `markRowsBatched` so the worker can track open batches across
+ * restarts.
+ */
+export function insertDiscoveryBatch(
+  id: string,
+  vaultId: string,
+  rowCount: number,
+): void {
+  const database = getDb();
+  database
+    .prepare(
+      `INSERT INTO discovery_batches (id, vault_id, row_count)
+         VALUES (?, ?, ?)`,
+    )
+    .run(id, vaultId, rowCount);
+}
+
+/**
+ * Return all batches for `vaultId` whose `status='submitted'` — the
+ * worker polls these. Older terminal-status rows are kept for audit
+ * but excluded from the poll set.
+ */
+export function listOpenBatches(
+  vaultId: string = resolveVaultIdFromEnv(),
+): DiscoveryBatchRow[] {
+  const database = getDb();
+  return database
+    .prepare(
+      `SELECT * FROM discovery_batches
+        WHERE vault_id = ? AND status = 'submitted'
+        ORDER BY submitted_at ASC`,
+    )
+    .all(vaultId) as DiscoveryBatchRow[];
+}
+
+/** Return all rows currently associated with a given batch. */
+export function getBatchedRows(batchId: string): DiscoveryQueueEntry[] {
+  const database = getDb();
+  return database
+    .prepare(`SELECT * FROM discovery_queue WHERE batch_id = ?`)
+    .all(batchId) as DiscoveryQueueEntry[];
+}
+
+/**
+ * Finalize a `discovery_batches` row. `completed_at` is stamped to
+ * `datetime('now')` so audit queries can compute end-to-end latency.
+ */
+export function finalizeBatch(
+  batchId: string,
+  status: "ended" | "expired" | "canceled" | "errored",
+): void {
+  const database = getDb();
+  database
+    .prepare(
+      `UPDATE discovery_batches
+          SET status = ?, completed_at = datetime('now')
+        WHERE id = ?`,
+    )
+    .run(status, batchId);
+}
+
+/**
+ * Flip rows that have been `'batched'` for longer than `maxAgeHours`
+ * back to `'pending'` with `trigger='write'` so the urgent path
+ * reclaims them. Returns the number of rows recovered.
+ *
+ * Used by the worker tick as a backstop against Anthropic's 24h SLA
+ * being violated (or a `batch_id` getting lost mid-restart). We
+ * deliberately don't touch `batch_id` — if the batch later finalizes
+ * and the poller sees a duplicate result for an already-reclaimed
+ * row, the urgent path's `markDiscoveryDone` will have already moved
+ * it to `'done'` and the poller's update silently no-ops.
+ */
+export function recoverStaleBatched(
+  vaultId: string = resolveVaultIdFromEnv(),
+  maxAgeHours: number = 26,
+): number {
+  const database = getDb();
+  const result = database
+    .prepare(
+      `UPDATE discovery_queue
+          SET status = 'pending', trigger = 'write'
+        WHERE status = 'batched'
+          AND vault_id = ?
+          AND queued_at < datetime('now', ?)`,
+    )
+    .run(vaultId, `-${maxAgeHours} hours`);
+  return result.changes;
 }
 
 // ── Discovery extraction cache (P7-COST-3) ─────────────────────────────

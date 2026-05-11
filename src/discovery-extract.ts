@@ -364,6 +364,109 @@ const EXTRACTION_MODEL = "claude-haiku-4-5-20251001";
 const EXTRACTION_MAX_TOKENS = 8192;
 
 /**
+ * Re-export the extraction model id so callers (P7-COST-5 batch path)
+ * can build batch payloads without duplicating the constant. Kept as a
+ * named export rather than mutated state so the cache-version invariant
+ * (DISCOVERY_CACHE_VERSION) is preserved.
+ */
+export { EXTRACTION_MODEL };
+
+/**
+ * Build a `messages.create` request body for entity extraction without
+ * actually calling Anthropic. The realtime path (`extractEntities`)
+ * passes the result directly to `anthropic.messages.create`; the batch
+ * path (P7-COST-5) collects N of these into a single
+ * `/v1/messages/batches` POST.
+ *
+ * Crucially this preserves cache_control markers — even though the
+ * batch endpoint does not currently share cache breakpoints across
+ * batched requests, keeping them in the body means a future batch-cache
+ * feature lights up without a refactor, and the realtime path stays
+ * byte-for-byte identical to what it sent before this refactor.
+ */
+export function buildMessageRequest(
+  noteContent: string,
+  vocab: VocabEntry[],
+  config?: VaultConfig,
+): Anthropic.MessageCreateParamsNonStreaming {
+  const cfg = config ?? getDefaultConfig();
+  const { staticPrefix, noteBlock } = buildPrompt(noteContent, vocab, cfg);
+  return {
+    model: EXTRACTION_MODEL,
+    max_tokens: EXTRACTION_MAX_TOKENS,
+    tools: [{ ...EXTRACT_TOOL, cache_control: { type: "ephemeral" } }],
+    tool_choice: { type: "tool", name: EXTRACT_TOOL.name },
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: staticPrefix, cache_control: { type: "ephemeral" } },
+          { type: "text", text: noteBlock },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Parse + post-process a tool_use response into an ExtractionResult.
+ * Factored out of `extractEntities` so the batch poller (P7-COST-5)
+ * can reuse the exact same logic when it reads results from the
+ * batch's JSONL stream — different transport, identical normalization.
+ *
+ * Expects an Anthropic `messages.create` (or batch result) response
+ * shape: `{ content: [{type, ...}, ...], stop_reason }`.
+ */
+export function parseExtractionResponse(
+  response: Anthropic.Message,
+  vocab: VocabEntry[],
+  config?: VaultConfig,
+): ExtractionResult {
+  const cfg = config ?? getDefaultConfig();
+  const toolUse = response.content.find(
+    (block): block is Extract<typeof block, { type: "tool_use" }> =>
+      block.type === "tool_use" && block.name === EXTRACT_TOOL.name,
+  );
+  if (!toolUse) {
+    throw new Error(
+      `extraction failed: no ${EXTRACT_TOOL.name} tool_use block in response (stop_reason=${response.stop_reason})`,
+    );
+  }
+
+  const parsed = (toolUse.input ?? {}) as Partial<ExtractionResult>;
+  const entities = parsed.entities ?? [];
+  const suggestedLinks = parsed.suggested_links ?? [];
+  const newNotes = parsed.new_notes ?? [];
+
+  const result: ExtractionResult = {
+    entities: [],
+    suggested_links: [],
+    new_notes: [],
+  };
+
+  for (const entity of entities) {
+    const existingPath = entity.existing_path ?? matchEntity(entity.name, vocab);
+    result.entities.push({ ...entity, existing_path: existingPath });
+  }
+
+  for (const link of suggestedLinks) {
+    if (link.from_text && link.to_path) {
+      result.suggested_links.push(link);
+    }
+  }
+
+  for (const note of newNotes) {
+    const entityName = basename(note.path, ".md");
+    const alreadyExists = matchEntity(entityName, vocab);
+    if (!alreadyExists) {
+      result.new_notes.push(normalizeNewNotePath(note, cfg));
+    }
+  }
+
+  return result;
+}
+
+/**
  * Call Claude API to extract entities from note content.
  *
  * Uses the Anthropic tool-use API: the model is forced to emit a single
@@ -385,7 +488,7 @@ export async function extractEntities(
   notePath?: string,
 ): Promise<ExtractionResult> {
   const cfg = config ?? getDefaultConfig();
-  const { staticPrefix, noteBlock } = buildPrompt(noteContent, vocab, cfg);
+  const request = buildMessageRequest(noteContent, vocab, cfg);
   const anthropic = getClient();
 
   // Cache breakpoints on the tool schema and the static prefix (vocab +
@@ -394,21 +497,7 @@ export async function extractEntities(
   // Within a drain cycle, vocab is stable and successive calls hit
   // cache at 0.1× input cost. Cache busts on vocab change (new entity
   // notes created), which is intended — the next call reseeds.
-  const response = await anthropic.messages.create({
-    model: EXTRACTION_MODEL,
-    max_tokens: EXTRACTION_MAX_TOKENS,
-    tools: [{ ...EXTRACT_TOOL, cache_control: { type: "ephemeral" } }],
-    tool_choice: { type: "tool", name: EXTRACT_TOOL.name },
-    messages: [
-      {
-        role: "user",
-        content: [
-          { type: "text", text: staticPrefix, cache_control: { type: "ephemeral" } },
-          { type: "text", text: noteBlock },
-        ],
-      },
-    ],
-  });
+  const response = await anthropic.messages.create(request);
 
   // Falsifier for the prompt-caching pipeline. Admin-API usage telemetry
   // aggregates by key/day, which masks per-call cache behavior; this
@@ -426,61 +515,7 @@ export async function extractEntities(
     `[discovery] cache usage: created=${created} read=${read} input=${input} note=${notePath ?? ""}`,
   );
 
-  // The forced tool_choice guarantees a tool_use block in the response
-  // (modulo refusal/overload, which throw earlier). Walk the content
-  // blocks to find it — its index is not always 0 (the model may emit
-  // a leading text block).
-  const toolUse = response.content.find(
-    (block): block is Extract<typeof block, { type: "tool_use" }> =>
-      block.type === "tool_use" && block.name === EXTRACT_TOOL.name,
-  );
-  if (!toolUse) {
-    throw new Error(
-      `extraction failed: no ${EXTRACT_TOOL.name} tool_use block in response (stop_reason=${response.stop_reason})`,
-    );
-  }
-
-  const parsed = (toolUse.input ?? {}) as Partial<ExtractionResult>;
-  // Schema marks all three arrays required, but defensively normalize —
-  // a malformed tool call shouldn't crash the worker.
-  const entities = parsed.entities ?? [];
-  const suggestedLinks = parsed.suggested_links ?? [];
-  const newNotes = parsed.new_notes ?? [];
-
-  // Post-process: resolve entities against vocab and filter
-  const result: ExtractionResult = {
-    entities: [],
-    suggested_links: [],
-    new_notes: [],
-  };
-
-  for (const entity of entities) {
-    const existingPath = entity.existing_path ?? matchEntity(entity.name, vocab);
-    result.entities.push({
-      ...entity,
-      existing_path: existingPath,
-    });
-  }
-
-  // Only keep suggested links where we have a valid target
-  for (const link of suggestedLinks) {
-    if (link.from_text && link.to_path) {
-      result.suggested_links.push(link);
-    }
-  }
-
-  // Only create new notes for high-confidence entities that don't match
-  // existing notes. Rewrite paths to the configured folder for each type —
-  // Claude occasionally echoes stale defaults from its training data.
-  for (const note of newNotes) {
-    const entityName = basename(note.path, ".md");
-    const alreadyExists = matchEntity(entityName, vocab);
-    if (!alreadyExists) {
-      result.new_notes.push(normalizeNewNotePath(note, cfg));
-    }
-  }
-
-  return result;
+  return parseExtractionResponse(response, vocab, cfg);
 }
 
 // ── High-level processor ─────────────────────────────────────────────

@@ -355,14 +355,18 @@ describe("discovery loop (tick)", () => {
   });
 
   it("processes entries in FIFO order", async () => {
+    // P7-COST-5: `tick()` now drains only urgent triggers — `commit`
+    // rows are routed through the batch path and are claimed by Phase
+    // A, not by the per-row drain. Use three urgent triggers so the
+    // FIFO check stays meaningful for the realtime path.
     const order: string[] = [];
     const processor: Processor = async (entry) => {
       order.push(entry.path);
     };
 
     enqueueDiscovery("first.md", "write");
-    enqueueDiscovery("second.md", "commit");
-    enqueueDiscovery("third.md", "ingest");
+    enqueueDiscovery("second.md", "ingest");
+    enqueueDiscovery("third.md", "write");
 
     await tick(processor);
     await tick(processor);
