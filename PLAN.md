@@ -428,7 +428,7 @@ Down: `DROP TABLE IF EXISTS discovery_cache;`
 
 **Risks / open questions:** schema drift mid-cache-lifetime handled by version bump + lint; hash collisions negligible; vocab change isn't in cache key — `matchEntity` re-run on hit closes that staleness window; cache table growth is bounded (one row per `(vault_id, path, content_sha256)`).
 
-#### P7-COST-4a: Daily cost ingest job (`scripts/cost-ingest.sh`, `src/db.ts`)
+#### P7-COST-4a: Daily cost ingest job (`scripts/cost-ingest.sh`, `src/db.ts`) ✅ COMPLETE 2026-05-11
 
 Pull Anthropic admin-API usage for the previous full UTC day, compute local cost from token counts × per-model pricing, persist to a new `discovery_cost_daily` table. Idempotent, cron-driven, no app code path depends on it (watchdog reads the table directly).
 
@@ -478,7 +478,7 @@ Down: `DROP TABLE IF EXISTS discovery_cost_daily;`
 
 **Risks:** admin API rate limits (mitigate: 1s sleep between paginated calls); pagination edge cases; admin token revocation surfaces as 401 → exit non-zero; key-ID discrepancy with user (user named `apikey_014dvdW3aXSTDj3JqsFD12eG`; usage data shows `apikey_01SCuYJ6WvYEZAiairRSsX53` as the high-volume key — confirm before merging 4b).
 
-#### P7-COST-4b: Watchdog Signal 5 — daily Haiku cost alert (`scripts/watchdog.sh`)
+#### P7-COST-4b: Watchdog Signal 5 — daily Haiku cost alert (`scripts/watchdog.sh`) ✅ COMPLETE 2026-05-11
 
 New signal block inserted after Signal 4. Reuses the existing `ALERTS=()` collector, throttle, Resend POST, and summary log line.
 
