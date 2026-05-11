@@ -68,8 +68,15 @@ ALERTS=()
 CURR_ERRORS=0
 DELTA=0
 if [ -f "$ERR_LOG" ]; then
-  CURR_ERRORS=$(grep -cE "JSON|parse|Unterminated|Unexpected end" "$ERR_LOG" 2>/dev/null || echo 0)
-  PREV_ERRORS=$(cat "$LAST_ERR_COUNT_FILE" 2>/dev/null || echo 0)
+  # `grep -c` exits 1 with stdout "0" when no matches; combined with
+  # `|| echo 0` that produces the two-line string "0\n0", which then
+  # blows up `$(())` arithmetic. Run grep with `|| true` and default
+  # via parameter expansion instead. Exposed after a `pm2 flush`
+  # left the error log empty on 2026-05-11.
+  CURR_ERRORS=$(grep -cE "JSON|parse|Unterminated|Unexpected end" "$ERR_LOG" 2>/dev/null || true)
+  CURR_ERRORS=${CURR_ERRORS:-0}
+  PREV_ERRORS=$(cat "$LAST_ERR_COUNT_FILE" 2>/dev/null || true)
+  PREV_ERRORS=${PREV_ERRORS:-0}
   DELTA=$((CURR_ERRORS - PREV_ERRORS))
   # First run after a log rotation: CURR < PREV. Treat as re-baseline (no alert).
   if [ "$DELTA" -gt 5 ]; then
