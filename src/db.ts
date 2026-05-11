@@ -1082,6 +1082,32 @@ export function markDiscoveryError(id: number, message: string): void {
 }
 
 /**
+ * Reset rows stuck in 'processing' for `vaultId` back to 'pending'.
+ *
+ * A row enters 'processing' via `dequeueDiscovery` and exits via
+ * `markDiscoveryDone` / `markDiscoveryError`. When the worker dies
+ * mid-tick (SIGINT during a deploy, OOM, host reboot), the row stays
+ * 'processing' forever — the next worker only claims 'pending' rows,
+ * so the entry is silently abandoned.
+ *
+ * Called once on `startDiscoveryLoop` startup. Safe because each vault
+ * has exactly one discovery worker (pinned via PM2's per-vault
+ * `GROVE_VAULT_ID`), so at startup no sibling holds a 'processing' row
+ * for this vault. Returns the number of rows recovered.
+ */
+export function recoverOrphanedDiscoveryProcessing(
+  vaultId: string = resolveVaultIdFromEnv(),
+): number {
+  const database = getDb();
+  const result = database
+    .prepare(
+      "UPDATE discovery_queue SET status = 'pending' WHERE status = 'processing' AND vault_id = ?",
+    )
+    .run(vaultId);
+  return result.changes;
+}
+
+/**
  * Requeue an errored entry as pending again for a retry. Used by the
  * embed-retry path when a transient failure (network, Voyage API down)
  * merits another attempt. Returns true if the row was found.
@@ -1547,6 +1573,107 @@ export function setNoteBlame(path: string, sourceHash: string, blameJson: string
 export function deleteNoteBlame(path: string): void {
   const database = getDb();
   database.prepare("DELETE FROM note_blame WHERE path = ?").run(path);
+}
+
+/**
+ * V3 §B + §6 — batch read note-level (voice, written_at) for many paths
+ * in a single SQL invocation. Used by hybridSearch's reweight pass to
+ * avoid N round-trips when oversample = 50 results.
+ *
+ * For each path: parses cached blame_json, derives note-level voice
+ * (modal across segments) and written_at (max across segments). Paths
+ * not present in note_blame are absent from the returned Map; callers
+ * treat absence as "legacy-unknown without prior" and apply the §E
+ * priorVoice fallback.
+ *
+ * Note: today's cache key includes (path, source_hash) — multiple rows
+ * may exist per path for historical hashes. We pick the most-recently-
+ * computed row per path (computed_at DESC). This is a temporary stance
+ * until V3 §6 changes the cache key to source_hash-only and the row-per-
+ * path collapses naturally. After §6 lands, the ORDER BY becomes a no-op.
+ */
+export function getNoteVoicesAndAges(
+  paths: string[],
+): Map<string, { voice: "durable" | "perishable" | "legacy-unknown"; written_at: string }> {
+  const out = new Map<
+    string,
+    { voice: "durable" | "perishable" | "legacy-unknown"; written_at: string }
+  >();
+  if (paths.length === 0) return out;
+  const database = getDb();
+
+  // QMD vault_path is `resources/concepts/conviction-then-leave-pattern.md`
+  // (lowercase + hyphens for spaces). note_blame stores filesystem paths
+  // like `Resources/Concepts/Conviction-Then-Leave Pattern.md` (TitleCase
+  // + literal spaces). Match both forms by normalizing on read: lowercase
+  // the stored path and replace spaces with hyphens before comparing.
+  // This is the slugify-on-read shim until the QMD index path semantics
+  // converge with the filesystem (out of scope for V3).
+  const querySlugs = paths.map((p) => p.toLowerCase());
+  const placeholders = querySlugs.map(() => "?").join(",");
+
+  const rows = database
+    .prepare(
+      `SELECT b.path, b.blame_json
+       FROM note_blame b
+       INNER JOIN (
+         SELECT path, MAX(computed_at) AS max_at
+         FROM note_blame
+         WHERE LOWER(REPLACE(path, ' ', '-')) IN (${placeholders})
+         GROUP BY path
+       ) latest ON latest.path = b.path AND latest.max_at = b.computed_at`,
+    )
+    .all(...querySlugs) as { path: string; blame_json: string }[];
+
+  // Build the inverse map: slug → original-query-path so callers can
+  // index back by their input form rather than the filesystem casing.
+  const slugToInput = new Map<string, string>();
+  for (let i = 0; i < paths.length; i++) {
+    slugToInput.set(querySlugs[i], paths[i]);
+  }
+
+  for (const row of rows) {
+    let segments: Array<{ voice: string; written_at: string }>;
+    try {
+      segments = JSON.parse(row.blame_json) as Array<{ voice: string; written_at: string }>;
+    } catch {
+      continue; // corrupt cache row — skip; caller falls through to legacy-unknown
+    }
+    if (segments.length === 0) continue;
+
+    // Modal voice: count line-weighted shares per voice value, pick max.
+    // Lines are not on segments here — the BlameSegment shape has line_start/line_end
+    // but blame_json is stored as the segment array. Use unweighted modal for the
+    // batch-read fast path; the production envelope can do per-line weighting via
+    // the full computeProvenanceBlame call when needed.
+    const counts = new Map<string, number>();
+    let maxWrittenAt = "";
+    for (const seg of segments) {
+      counts.set(seg.voice, (counts.get(seg.voice) ?? 0) + 1);
+      if (seg.written_at > maxWrittenAt) maxWrittenAt = seg.written_at;
+    }
+    let modalVoice = "legacy-unknown";
+    let modalCount = -1;
+    for (const [v, c] of counts) {
+      if (c > modalCount) {
+        modalCount = c;
+        modalVoice = v;
+      }
+    }
+    if (modalVoice !== "durable" && modalVoice !== "perishable") {
+      modalVoice = "legacy-unknown";
+    }
+    // Index by the caller's input path (lowercase + hyphens), not the
+    // filesystem casing that note_blame stored. The slugToInput map
+    // tells us which input path slugified to row.path.
+    const rowSlug = row.path.toLowerCase().replace(/ /g, "-");
+    const inputKey = slugToInput.get(rowSlug) ?? row.path;
+    out.set(inputKey, {
+      voice: modalVoice as "durable" | "perishable" | "legacy-unknown",
+      written_at: maxWrittenAt,
+    });
+  }
+  return out;
 }
 
 /**

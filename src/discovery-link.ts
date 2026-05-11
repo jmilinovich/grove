@@ -15,6 +15,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { gitCommit, qmdReindex } from "./vault-ops.js";
+import { deleteNoteBlame } from "./db.js";
 import type { ExtractionResult, SuggestedLink, NewNote } from "./discovery-extract.js";
 
 // ── Frontmatter boundary detection ──────────────────────────────────
@@ -171,6 +172,8 @@ export async function wireLinks(
     const updated = insertWikilinks(original, extraction.suggested_links);
 
     if (updated !== original) {
+      // V3 §B3 — invalidate blame cache before mutation; HEAD-in-key was masking this previously
+      deleteNoteBlame(notePath);
       writeFileSync(absPath, updated, "utf-8");
       const sha = await gitCommit(vaultPath, notePath, `discovery: wire links in ${notePath}`);
       await qmdReindex(vaultPath);
@@ -196,6 +199,8 @@ export async function wireLinks(
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
     const content = buildNewNoteContent(note);
+    // V3 §B3 — invalidate blame cache before mutation; HEAD-in-key was masking this previously
+    deleteNoteBlame(note.path);
     writeFileSync(absPath, content, "utf-8");
     const sha = await gitCommit(vaultPath, note.path, `discovery: create ${note.path}`);
     await qmdReindex(vaultPath);

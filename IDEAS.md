@@ -22,6 +22,17 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 - **Staging environment** — stand up a non-prod Grove before other friends start using it, so deploys, schema changes, and risky features can be validated without touching the single shared prod box
 - **Maximize encryption coverage** — Phase 12 covers encryption at rest; go further. Audit every surface where vault content or metadata lives unencrypted — DB columns, search indexes, logs, backups, email digests, cron artifacts, agent prompt payloads. Pick the strongest defaults we can ship before multi-user (per-user keys? envelope encryption? client-side before upload?) while keeping search and MCP fast. Especially important before other residents land.
 - **Branding & marketing plan** — work through the branding and marketing plan captured in the Grove project note ([grove.md/@jm/Resources/Projects/Grove](https://grove.md/@jm/Resources/Projects/Grove)): pull it into the repo's orbit, decide what ships as landing-page copy, docs, positioning, and naming conventions, and sequence the work against the product roadmap
+- **Trust & security posture (honest claim ladder)** — stake out a defensible public claim about Grove's security and ladder up from there, instead of fuzzy "secure & encrypted" copy. Three things get conflated and need to stay distinct: (1) **encryption at rest + in transit** — table stakes, mostly true on AWS today; audit and document. (2) **Operator-can't-see-data** — E2EE breaks the AI features since the AI has to read the data; confidential computing via AWS Nitro Enclaves is the only real path and it's a heavy lift; defer until a use case justifies it. (3) **Compliance certs** — SOC 2 Type II via Vanta/Drata, 6–12 months; defer until a B2B customer demands it. Shippable v1: audit current encryption coverage, write a public Trust/Security page that makes only true claims, document strict per-tenant isolation, ship a credible self-hosted path as the escape hatch for zero-trust users. Non-finding: switching PaaS (Fly/Railway/Render/Vercel) does NOT solve the trust problem — it moves which company holds the keys, doesn't make them go away. Subsumes the existing **SOC2 baseline** and **Maximize encryption coverage** sparks — those become tactical work under this strategic frame.
+- **Vault lenses / plugins** — third-party (or first-party) prompts/skills that run over your vault and surface insights you wouldn't otherwise see. Example: the "therapist" lens jm + Sumon talked about — reads journal + people + concept notes and reflects back patterns, recurring tensions, things you keep circling. The plugin is the prompt + the data shape it expects + the surface it writes/replies to. Different lenses = different ways of seeing the same vault (therapist, coach, biographer, librarian, scout). Open question: where do lenses run (Grove cron? on-demand MCP call? client-side via Claude Code skill?), how do they declare what slice of vault they need (read-only Areas? specific types?), and is there a plugin registry or just `~/.grove/lenses/*.md`? Could be Grove's "App Store moment" — the platform layer where the vault stops being just storage and becomes a substrate other minds run on.
+
+### v3.1 search-quality cluster (deferred from V3 ranking implementation, 2026-05-09)
+
+These four sparks are the named follow-on work from V3_PLAN.md. V3 ranking shipped on `eval/search-quality-harness` branch but flag-defaults to off (dark-launch); these close the gaps that gate flag-flip and the v3.1 calibration items called out by round-3 panels. Each is implementable independently; sequencing recommendation in parens.
+
+- **Runtime-mutable per-collection ranking flag (V3 §7)** *(do first — gates safe rollout)* — Today `GROVE_PROV_RANKING_ENABLED` is an env var; flipping it requires a PM2 restart (5–15 min wall-clock revert). For the V3 A+ threshold #12 (rollback latency ≤60s) we need a SQLite-backed `runtime_config` table with: per-collection scoping (`prov_ranking_enabled.<collection>`), an admin POST endpoint, 5-second TTL in-process cache, read-after-write detection in `setFlag` (catches corrupt writes silently returning the old value). Plus `scripts/eval-search-quality/rollback-bench.ts` to measure the actual admin-POST → identity-ranking-restored wall-clock. Round-2 prod panel: "the most blast-radius decision in v3 is the auto-revert gate; ambiguity in its denominator is dangerous." This spark is the prerequisite for ever-flipping the flag in prod with an honest rollback story. Reference: V3_PLAN.md §7 + §O + threshold #12.
+- **7-day soak harness with reason-chip UI (V3 §J + §M)** *(do after #1 — needs the runtime flag to flip)* — V3 ranking would go live with offline eval but no production-judgment gate. Build: pre-flip query capture (top-50 from `searchMetrics` over last 30 days saved to `soak/baseline-YYYY-MM-DD.json`), daily replay post-flip, lightweight web UI for thumbs-up/down per query with 5 reason chips (`wrong-result | wrong-by-design | freshness-intent-misfire | expectation-only | other`). Auto-revert via the runtime flag (#1) when `(wrong-result + other) / total > 0.20` after the day-7 learning gate. The chip taxonomy is load-bearing: round-3 prod panel flagged that thumbs-down without a reason will self-revert on correct behavior (e.g. user expected perishable to surface but design correctly suppressed it). Closes A+ threshold #11. Reference: V3_PLAN.md §J + §M + threshold #11.
+- **Per-list voice factor inside `rrfFuse` (V3 §A v3.1 calibration)** *(do after observability triplet has 7 days of data)* — Current production reweight is post-fusion multiplicative (`final = rrf_score * voice_factor`). Round-3 IR explicitly accepted as v3 ship state but flagged that pushing voice INTO `rrfFuse` (modify line 459: `weight * voice_factor / (k + rank)`) preserves RRF's scale-invariance and lets BM25 vs vec carry asymmetric perishable bias (vec over-retrieves perishable; BM25 under-retrieves). The four asymmetric coefficients (`PROV_VOICE_FACTOR_BM25_PERISHABLE`, `_VEC_PERISHABLE`, etc., all symmetric at 0.85 today) become the tuning surface. Wait until `grove_search_voice_at_rank{list}` metric (already shipped in §L) has captured 7 days of production data showing whether the asymmetry is real before tuning. Then a sweep finds the right four-parameter point and the change ships. Reference: V3_PLAN.md §A "Per-list voice factor (§2 from V2)" non-goal note + round-3 IR §1.
+- **Multi-segment matched-span resolution (V3 §D2 v3.1)** *(can do anytime — independent)* — Production today derives note-level voice from `getNoteVoicesAndAges` (modal across segments) as the first cut. The full §D2 worst-case-voice rule (`perishable > legacy > durable` across all segments overlapping the matched span, with `min(written_at)` for perishable / `max` otherwise) needs `resolveMatchedSpan(blame, spanStart, spanEnd)` in `src/blame.ts` plus snippet-to-line offset reconstruction (BM25 FTS5 snippets aren't substrings — they include `…` ellipses + `<b>` markup; vector chunks don't align with blame segments). Without this the SVF threshold (≥0.95 segment voice fidelity) is structurally unmeasurable on real notes. New `VAULT_STRADDLE` test fixture + `MIXED_VOICE_VAULT_NOTES` already exist in `scripts/eval-search-quality/test-set.ts`. Reference: V3_PLAN.md §D2 + threshold #9.
 
 ---
 
@@ -202,6 +213,39 @@ Tell me an idea — a sentence, a half-thought, a "what if." I'll capture it as 
 - Migration safety: 1-week phase needs careful staging because moving `api_keys` could lock out active sessions if mistimed. Plan to ship under maintenance window or with a dual-read window.
 
 **Anchor:** CLAUDE.md "the vault is the source of truth" + "simple until it needs to be complex." Per-vault SQLite is the simplest shape that makes the entire bug class structurally impossible. Full architectural decision doc in `~/.claude/projects/-Users-jm-src-grove/memory/project_per_vault_sqlite_split.md`.
+
+---
+
+### Embedding-Driven Vocab Retrieval for Discovery
+
+**Problem:** Discovery's entity-extraction call ships the full vault vocabulary on every prompt. At today's vault size (~2,713 entity notes) that's ~68K input tokens per call. PR #145 wires `cache_control` so repeats within a drain hit cache cheap, but every cache miss still re-bills the full payload, and the vocab grows linearly: at 5K entities it's ~125K tokens; at 10K, ~250K. Caching softens the cost curve; it doesn't flatten it. The curve needs to be vault-size-independent.
+
+**Sketch:**
+- Every note already carries a Voyage embedding (1024-dim, written by `embed-single.ts`). Reuse it as the discovery query.
+- Pull top-k nearest vocab entries from the existing SQLite vector index by cosine; ship only those (start k=50, tune to k=100 if recall drops).
+- Append a small fixed-or-derived **bonus list** of the top-N most-linked vault entities (by inbound wikilink count) so the common misses — "Karpathy", "Anthropic", staple concepts — are always included regardless of cosine.
+- Net prompt: from ~68K → ~3–5K input tokens. Cost-per-note becomes O(1) in vault size; only the bonus list grows, and it grows on a schedule we control.
+- Keep the full-vocab path behind a `GROVE_DISCOVERY_FULL_VOCAB=1` flag for spot-checking and the offline eval baseline.
+
+**Trade-off:** False negatives — an entity mentioned in the note that isn't in the top-k *and* isn't on the bonus list won't get linked. Mitigated by (a) bonus list, (b) tuned k, (c) vault is forgiving (next note that mentions the entity at higher cosine will catch it). Periodic full-vocab sweep (e.g. weekly cron) backfills missed links.
+
+**Dependencies:**
+- Voyage embeddings on every note (exists — `embed-single.ts`)
+- SQLite vector index with cosine top-k (exists — used by hybrid-search)
+- `src/discovery-extract.ts` — the call site; pass note embedding through `extractFromNote` → `extractEntities`, replace `buildVocabulary`'s full-vocab return with a top-k fetch
+- New offline eval harness: a labeled set of 50–100 known-good extractions (entity recall vs. full-vocab baseline)
+- Bonus-list builder: `SELECT to_path, COUNT(*) FROM wikilinks GROUP BY to_path ORDER BY 2 DESC LIMIT 100` (or equivalent — graph-health may already compute this)
+
+**Success signal:** After ship, average input tokens per Discovery call drops from ~68K to <5K (measure via Anthropic API usage). Entity recall on the labeled eval is within 5% of the full-vocab baseline at k=50, within 2% at k=100. Cost per extracted note becomes constant as the vault grows past 5K, then 10K entities.
+
+**Open questions:**
+- Right `k`? Likely 50–100; needs the eval set to settle.
+- Bonus-list size and refresh cadence — daily? On vocab change?
+- Should we cache the top-k result by note-embedding-hash so repeated extractions on the same note (e.g. retry path) skip the vector lookup?
+- Per-type retrieval: pull top-k per entity type (people, concepts, projects, companies) instead of one global top-k, to avoid one type swamping the slate?
+- Ranking blend: cosine-only, or cosine + recency + inbound-link-count?
+
+**When to spec:** Worth `/mili:spec` once the cache PR (#145) ships and we have ~2 weeks of usage data showing how often the cache busts in practice. If cache hit rate is consistently >80% the urgency drops; if it's <50%, this is the next thing to ship.
 
 ---
 

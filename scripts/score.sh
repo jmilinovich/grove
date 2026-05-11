@@ -10,7 +10,9 @@ JSON_MODE=false
 # ── Scores ────────���──────────────────────────────────────────────────
 
 security=0; observability=0; portal=0; trails=0; foundation=0
+search_quality=0
 TOTAL=0
+SEARCH_QUALITY_MAX=30  # Separate sub-score; NOT rolled into TOTAL until GOAL.md is updated.
 REPORT=""
 
 score() {
@@ -373,6 +375,100 @@ else
   score foundation 0 5 "Docs need updating"
 fi
 
+# ── SEARCH QUALITY (30 pts, side-scored — NOT in TOTAL until GOAL.md ────
+# is updated; see scripts/eval-search-quality/V3_PLAN.md for the spec).
+# Operator's call when to fold these into the fitness function (Mode: Split).
+
+# Run the eval harness in --quick mode (synthetic ranking-unit layer only).
+# Falls back to "harness unavailable" if Node 22 binary is missing.
+NODE22="/opt/homebrew/Cellar/node@22/22.22.2_2/bin/node"
+[[ ! -x "$NODE22" ]] && NODE22="$(command -v node || true)"
+
+if [[ -f scripts/eval-search-quality/run.ts && -x "$NODE22" ]]; then
+  sq_json=$("$NODE22" --import tsx scripts/eval-search-quality/run.ts --quick --reweight=v3 --json 2>/dev/null || echo '{}')
+else
+  sq_json='{}'
+fi
+
+# Parse pass-flags from the JSON. Use node -e for portable JSON parse.
+sq_extract() {
+  local key="$1"
+  echo "$sq_json" | "$NODE22" -e "let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{try{const r=JSON.parse(d); console.log(${key});}catch(e){console.log('false');}});" 2>/dev/null || echo "false"
+}
+
+sq_c_ppr=$(sq_extract "r.ranking_unit?.canonical?.thresholds?.ppr?.pass ? 'true' : 'false'")
+sq_c_rpr=$(sq_extract "r.ranking_unit?.canonical?.thresholds?.rpr_perishable?.pass ? 'true' : 'false'")
+sq_c_rid=$(sq_extract "r.ranking_unit?.canonical?.thresholds?.ri_durable?.pass ? 'true' : 'false'")
+sq_a_ppr=$(sq_extract "r.ranking_unit?.adversarial?.thresholds?.ppr?.pass ? 'true' : 'false'")
+sq_fir=$(sq_extract  "r.ranking_unit?.freshness?.thresholds?.fir?.pass ? 'true' : 'false'")
+
+# PPR canonical (6 pts) — durable beats perishable on dual-match
+if [[ "$sq_c_ppr" == "true" ]]; then
+  score search_quality 6 6 "PPR canonical >= 0.85"
+else
+  score search_quality 0 6 "PPR canonical < 0.85"
+fi
+
+# RPR-perishable canonical (4 pts) — recent beats stale on perishable pairs
+if [[ "$sq_c_rpr" == "true" ]]; then
+  score search_quality 4 4 "RPR-perishable canonical >= 0.75"
+else
+  score search_quality 0 4 "RPR-perishable canonical < 0.75"
+fi
+
+# RI-durable canonical (4 pts) — relevance order on durable pairs survives age
+if [[ "$sq_c_rid" == "true" ]]; then
+  score search_quality 4 4 "RI-durable canonical >= 0.80"
+else
+  score search_quality 0 4 "RI-durable canonical < 0.80"
+fi
+
+# PPR adversarial (3 pts) — same-age and old-perishable/new-durable cross fixtures
+if [[ "$sq_a_ppr" == "true" ]]; then
+  score search_quality 3 3 "PPR adversarial >= 0.70"
+else
+  score search_quality 0 3 "PPR adversarial < 0.70"
+fi
+
+# FIR (3 pts) — freshness-intent queries surface recent perishable in top-3
+if [[ "$sq_fir" == "true" ]]; then
+  score search_quality 3 3 "FIR >= 0.80"
+else
+  score search_quality 0 3 "FIR < 0.80"
+fi
+
+# Tunability sweep (4 pts) — sweep.ts exists and runs without error
+if [[ -f scripts/eval-search-quality/sweep.ts ]] && \
+   "$NODE22" --import tsx scripts/eval-search-quality/sweep.ts --json >/dev/null 2>&1; then
+  score search_quality 4 4 "Tunability sweep runs (>=3 reweight configs)"
+else
+  score search_quality 0 4 "Tunability sweep missing or failing"
+fi
+
+# Envelope completeness static check (3 pts) — HybridResult has voice + written_at + usage_directive
+envelope_fields=0
+grep -q "voice?:" src/hybrid-search.ts && envelope_fields=$((envelope_fields + 1))
+grep -q "written_at?:" src/hybrid-search.ts && envelope_fields=$((envelope_fields + 1))
+grep -q "usage_directive?:" src/hybrid-search.ts && envelope_fields=$((envelope_fields + 1))
+if (( envelope_fields == 3 )); then
+  score search_quality 3 3 "HybridResult envelope: voice + written_at + usage_directive"
+else
+  score search_quality 0 3 "HybridResult envelope incomplete ($envelope_fields/3 fields)"
+fi
+
+# Reweight env-gated (3 pts) — GROVE_PROV_RANKING_ENABLED flag exists, default off
+if grep -q "GROVE_PROV_RANKING_ENABLED" src/hybrid-search.ts && \
+   grep -q "PROV_RANKING_ENABLED.*false" src/hybrid-search.ts; then
+  score search_quality 3 3 "Provenance reweight gated by env flag, default off (dark-launch)"
+else
+  score search_quality 0 3 "Reweight not env-gated or default-on"
+fi
+
+# IMPORTANT: subtract search_quality from TOTAL since the score() helper
+# adds it. Search Quality is side-scored (separate display), not part of
+# the 175-pt fitness function until GOAL.md is updated by the operator.
+TOTAL=$(( TOTAL - search_quality ))
+
 # ── Output ─────��─────────────────────────────────────────────────────
 
 if $JSON_MODE; then
@@ -384,7 +480,13 @@ if $JSON_MODE; then
   "observability": $observability,
   "portal": $portal,
   "trails": $trails,
-  "foundation": $foundation
+  "foundation": $foundation,
+  "search_quality": {
+    "score": $search_quality,
+    "max": $SEARCH_QUALITY_MAX,
+    "rolled_into_total": false,
+    "note": "Side-scored sub-component. Fold into TOTAL by updating GOAL.md (Mode: Split)."
+  }
 }
 ENDJSON
 else
@@ -406,4 +508,14 @@ else
     echo "$REPORT" | grep "^$component|" | sed "s/^$component|/  /"
     echo ""
   done
+
+  # Search Quality is a side-scored sub-component (not in the 175 total).
+  # Operator folds into GOAL.md when ready; until then it's a separate report.
+  echo "══════════════════════════════════════════"
+  echo "  SEARCH QUALITY (side-scored): $search_quality / $SEARCH_QUALITY_MAX"
+  echo "  Not in TOTAL until GOAL.md updated."
+  echo "══════════════════════════════════════════"
+  echo "── Search Quality: $search_quality/$SEARCH_QUALITY_MAX ──"
+  echo "$REPORT" | grep "^search_quality|" | sed "s/^search_quality|/  /"
+  echo ""
 fi

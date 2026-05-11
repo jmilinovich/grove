@@ -120,11 +120,18 @@ function entityFolderHint(config: VaultConfig): string {
   return lines.join("\n");
 }
 
+/**
+ * Build the prompt as two separate strings: a static prefix (vocab,
+ * entity folders, instructions — stable across calls within a drain)
+ * and the note content (changes every call). The caller wires a cache
+ * breakpoint between them so the prefix is read from cache on subsequent
+ * calls within the 5-min ephemeral TTL.
+ */
 function buildPrompt(
   noteContent: string,
   vocab: VocabEntry[],
   config: VaultConfig,
-): string {
+): { staticPrefix: string; noteBlock: string } {
   const vocabSummary = vocab
     .map((v) => {
       const aliases = v.aliases.length > 0 ? ` (aliases: ${v.aliases.join(", ")})` : "";
@@ -132,7 +139,7 @@ function buildPrompt(
     })
     .join("\n");
 
-  return `You are a knowledge graph extraction engine. Given a note from an Obsidian vault, extract entities and suggest wikilinks. Call the \`extract_entities\` tool exactly once with your structured result.
+  const staticPrefix = `You are a knowledge graph extraction engine. Given a note from an Obsidian vault, extract entities and suggest wikilinks. Call the \`extract_entities\` tool exactly once with your structured result.
 
 ## Existing vault entities
 ${vocabSummary || "(none)"}
@@ -146,10 +153,12 @@ ${entityFolderHint(config)}
 2. For each entity, assess confidence (0.0–1.0) that it's a meaningful, linkable entity (not just a passing mention).
 3. If an entity matches an existing vault note (by name or alias, case-insensitive), include the existing_path.
 4. For entities with confidence > 0.8 that do NOT match any existing note, suggest creating a new concept note at the configured folder for its type (see "Entity folders" above). New-note paths follow the pattern: \`${newNotePathExample(config)}\`.
-5. For each entity found in the text, suggest a wikilink: identify the exact text span (from_text) and the target path (to_path).
+5. For each entity found in the text, suggest a wikilink: identify the exact text span (from_text) and the target path (to_path).`;
 
-## Note content
+  const noteBlock = `## Note content
 ${noteContent}`;
+
+  return { staticPrefix, noteBlock };
 }
 
 /**
@@ -289,15 +298,29 @@ export async function extractEntities(
   config?: VaultConfig,
 ): Promise<ExtractionResult> {
   const cfg = config ?? getDefaultConfig();
-  const prompt = buildPrompt(noteContent, vocab, cfg);
+  const { staticPrefix, noteBlock } = buildPrompt(noteContent, vocab, cfg);
   const anthropic = getClient();
 
+  // Cache breakpoints on the tool schema and the static prefix (vocab +
+  // instructions). The static prefix is the bulk of input tokens — for
+  // a vault with thousands of entities it dominates the prompt by 10×+.
+  // Within a drain cycle, vocab is stable and successive calls hit
+  // cache at 0.1× input cost. Cache busts on vocab change (new entity
+  // notes created), which is intended — the next call reseeds.
   const response = await anthropic.messages.create({
     model: EXTRACTION_MODEL,
     max_tokens: EXTRACTION_MAX_TOKENS,
-    tools: [EXTRACT_TOOL],
+    tools: [{ ...EXTRACT_TOOL, cache_control: { type: "ephemeral" } }],
     tool_choice: { type: "tool", name: EXTRACT_TOOL.name },
-    messages: [{ role: "user", content: prompt }],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: staticPrefix, cache_control: { type: "ephemeral" } },
+          { type: "text", text: noteBlock },
+        ],
+      },
+    ],
   });
 
   // The forced tool_choice guarantees a tool_use block in the response

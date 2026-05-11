@@ -10,8 +10,14 @@
 import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
-import { searchMetrics } from "./metrics.js";
+import { searchMetrics, searchQualityMetrics } from "./metrics.js";
 import { assertUnlocked, indexWorkingPath } from "./index-crypto.js";
+import { getNoteVoicesAndAges } from "./db.js";
+import { priorVoice } from "./provenance-prior.js";
+import {
+  PERISHABLE_USAGE_DIRECTIVE,
+  PERISHABLE_USAGE_DIRECTIVE_SOFT,
+} from "./provenance.js";
 
 const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY ?? "";
 const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4-large";
@@ -26,13 +32,22 @@ interface SearchResult {
   docid?: string;
 }
 
-interface HybridResult {
+export interface HybridResult {
   title: string;      // note title, e.g. "Agent Runtime"
   vault_path: string; // lowercase vault-relative path from QMD index, e.g. "resources/concepts/agent-runtime.md"
   rrf_score: number;
   snippet: string;
   sources: string[];  // which backends contributed: ["bm25", "vector"]
   thumbnail_url?: string; // for image notes (populated post-search by enrichImageMetadata)
+  // V3 §D — voice + written_at + usage_directive surfaced when provenance
+  // ranking is enabled. `voice` reflects the matched-span voice (multi-segment
+  // straddle rule deferred to v3.1; v3 uses note-level modal voice from
+  // getNoteVoicesAndAges as the first cut). `usage_directive` is present iff
+  // matched voice is perishable (or legacy-unknown with high p_perishable
+  // prior — soft directive). Absent when GROVE_PROV_RANKING_ENABLED is off.
+  voice?: "durable" | "perishable" | "legacy-unknown";
+  written_at?: string;
+  usage_directive?: string;
 }
 
 /**
@@ -489,6 +504,214 @@ export function rrfFuse(
  */
 export type SearchMode = "lex" | "vec" | "hyde" | "hybrid";
 
+// ── V3 §G: voice_preference auto-detect ─────────────────────────────
+//
+// Same regex set as scripts/eval-search-quality/metrics.ts (the eval is the
+// source of truth — duplicating the constants here keeps src/ standalone).
+// If you change one, change the other.
+
+export type VoicePreference = "canonical" | "recent" | "mixed";
+
+const FRESHNESS_TERMS =
+  /\b(today|yesterday|right now|this (week|month|quarter)|latest|recent(ly)?|lately|\d{4}-\d{2}-\d{2}|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{4})\b/i;
+
+const DURABLE_INTENT_TERMS =
+  /\b(understanding|theory|definition|concept|history|origin|principles?|fundamentals?|thinking|approach|view|stance|framework|philosophy|paradigm|methodology|model of|take on)\b/i;
+
+export function detectVoicePreference(query: string): VoicePreference {
+  if (DURABLE_INTENT_TERMS.test(query)) return "mixed";
+  if (FRESHNESS_TERMS.test(query)) return "recent";
+  return "mixed";
+}
+
+// ── V3 §A: provenance-aware reweight ────────────────────────────────
+//
+// Production version of scripts/eval-search-quality/metrics.ts's
+// v3ProvenanceReweight. Same formula. Three reasons it lives here as a
+// near-duplicate rather than imported:
+//   1. The eval module imports from src/ ; src/ shouldn't import from eval/.
+//   2. Production reads (voice, written_at) from real note_blame via
+//      getNoteVoicesAndAges; the eval works on synthetic provenance maps.
+//   3. Production needs to surface usage_directive on the result envelope;
+//      the eval only cares about ordering for measurement.
+//
+// Math is identical. If you change one, change the other (see also
+// V3_PLAN.md §A for the canonical formula and the documented divergence
+// between harness post-fusion multiply and the v3.1 per-list-internal
+// approach).
+
+interface PiecewiseConfig {
+  freshDays: number;
+  decayEndDays: number;
+  freshFactor: number;
+  floor: number;
+}
+
+function piecewiseFactor(ageDays: number, cfg: PiecewiseConfig): number {
+  if (ageDays <= cfg.freshDays) return cfg.freshFactor;
+  if (ageDays >= cfg.decayEndDays) return cfg.floor;
+  const span = cfg.decayEndDays - cfg.freshDays;
+  const into = ageDays - cfg.freshDays;
+  return cfg.freshFactor - (cfg.freshFactor - cfg.floor) * (into / span);
+}
+
+const PROV_RANKING_ENABLED =
+  (process.env.GROVE_PROV_RANKING_ENABLED ?? "false").toLowerCase() === "true";
+const PROV_DURABLE_FACTOR = parseFloat(process.env.PROV_DURABLE_FACTOR ?? "1.0");
+const PROV_PIECEWISE_CFG: PiecewiseConfig = {
+  freshDays: parseFloat(process.env.PROV_AGE_FRESH_DAYS ?? "7"),
+  decayEndDays: parseFloat(process.env.PROV_AGE_DECAY_END_DAYS ?? "90"),
+  freshFactor: parseFloat(process.env.PROV_PERISHABLE_FRESH_FACTOR ?? "0.95"),
+  floor: parseFloat(process.env.PROV_PERISHABLE_FLOOR ?? "0.85"),
+};
+const SOFT_DIRECTIVE_THRESHOLD = parseFloat(
+  process.env.PROV_SOFT_DIRECTIVE_THRESHOLD ?? "0.6",
+);
+
+/**
+ * Apply V3 §A reweight to fused results, surfacing voice + written_at +
+ * usage_directive on each. Mutates the provided array in-place AND
+ * returns it (re-sorted by post-reweight score). Pulls per-path
+ * (voice, written_at) from note_blame via batch read; falls back to
+ * §E priorVoice() for paths the cache doesn't cover.
+ *
+ * No-op when GROVE_PROV_RANKING_ENABLED is off — leaves results
+ * untouched (no envelope changes). This is the dark-launch path: code
+ * lands disabled, flag flips on later via runtime_config (V3 §7).
+ */
+function applyProvenanceReweight(
+  fused: HybridResult[],
+  query: string,
+  referenceTime: Date = new Date(),
+  manualVoicePreference?: VoicePreference,
+): HybridResult[] {
+  if (!PROV_RANKING_ENABLED) return fused;
+  if (fused.length === 0) return fused;
+
+  const voicePreference = manualVoicePreference ?? detectVoicePreference(query);
+  // V3 §L observability — record the voice_preference mode this call landed in.
+  // Auto-detect only ever returns 'recent' or 'mixed'; an explicit caller can
+  // also pass 'canonical', but the metrics taxonomy is auto-detect-shaped, so
+  // any caller-supplied value collapses to 'manual'.
+  searchQualityMetrics.recordVoicePreference(
+    manualVoicePreference !== undefined
+      ? "manual"
+      : (voicePreference as "recent" | "mixed"),
+  );
+
+  const lookupStart = Date.now();
+  const provMap = getNoteVoicesAndAges(fused.map((r) => r.vault_path));
+  searchQualityMetrics.recordProvenanceLookupLatency(Date.now() - lookupStart);
+
+  const preTop5 = fused.slice(0, 5).map((r) => ({
+    vault_path: r.vault_path,
+    rrf_score: r.rrf_score,
+  }));
+
+  function perishableFactor(ageDays: number): number {
+    const base = piecewiseFactor(ageDays, PROV_PIECEWISE_CFG);
+    if (voicePreference === "recent") return base * 1.3;
+    if (voicePreference === "canonical") return base * 0.5;
+    return base;
+  }
+
+  const reweighted = fused.map((r) => {
+    const meta = provMap.get(r.vault_path);
+    const ageDays = meta
+      ? Math.max(
+          0,
+          (referenceTime.getTime() - new Date(meta.written_at).getTime()) /
+            86_400_000,
+        )
+      : 0;
+    let factor: number;
+    let voice: HybridResult["voice"];
+    let written_at: string | undefined;
+    let directive: string | undefined;
+
+    if (!meta) {
+      // Legacy-unknown without cached blame → §E covariate prior.
+      const prior = priorVoice({
+        path: r.vault_path,
+        ageDays: 0,
+        frontmatterTags: [],
+        bodyText: "",
+      });
+      factor =
+        prior.p_durable * PROV_DURABLE_FACTOR +
+        prior.p_perishable * perishableFactor(0);
+      voice = "legacy-unknown";
+      if (prior.p_perishable >= SOFT_DIRECTIVE_THRESHOLD) {
+        directive = PERISHABLE_USAGE_DIRECTIVE_SOFT;
+      }
+    } else if (meta.voice === "durable") {
+      factor = PROV_DURABLE_FACTOR;
+      voice = "durable";
+      written_at = meta.written_at;
+    } else if (meta.voice === "perishable") {
+      factor = perishableFactor(ageDays);
+      voice = "perishable";
+      written_at = meta.written_at;
+      directive = PERISHABLE_USAGE_DIRECTIVE;
+    } else {
+      // Stamped legacy-unknown (rare) — soft prior fallback as above.
+      const prior = priorVoice({
+        path: r.vault_path,
+        ageDays,
+        frontmatterTags: [],
+        bodyText: "",
+      });
+      factor =
+        prior.p_durable * PROV_DURABLE_FACTOR +
+        prior.p_perishable * perishableFactor(ageDays);
+      voice = "legacy-unknown";
+      written_at = meta.written_at;
+      if (prior.p_perishable >= SOFT_DIRECTIVE_THRESHOLD) {
+        directive = PERISHABLE_USAGE_DIRECTIVE_SOFT;
+      }
+    }
+
+    return {
+      ...r,
+      rrf_score: Math.round(r.rrf_score * factor * 10000) / 10000,
+      voice,
+      ...(written_at ? { written_at } : {}),
+      ...(directive ? { usage_directive: directive } : {}),
+    };
+  });
+
+  reweighted.sort((a, b) => b.rrf_score - a.rrf_score);
+
+  // V3 §L observability — voice-by-rank histogram + legacy-unknown share +
+  // 1% reweight-delta JSONL sample. Cheap; cost negligible vs rrfFuse cost.
+  searchQualityMetrics.recordVoiceAtRank(reweighted);
+  searchQualityMetrics.recordLegacyUnknownShare(reweighted);
+  if (searchQualityMetrics.shouldSampleReweightDelta()) {
+    searchQualityMetrics.writeReweightDeltaSample({
+      ts: new Date().toISOString(),
+      query,
+      voice_preference: (manualVoicePreference !== undefined
+        ? "manual"
+        : (voicePreference as "recent" | "mixed")),
+      pre_top5: preTop5,
+      post_top5: reweighted.slice(0, 5).map((r) => ({
+        vault_path: r.vault_path,
+        rrf_score: r.rrf_score,
+        voice: r.voice ?? "legacy-unknown",
+      })),
+    });
+  }
+
+  return reweighted;
+}
+
+/**
+ * Test-only export of the otherwise-internal reweight function. Used by
+ * test/metrics-search-quality.test.ts to verify metric wiring without
+ * spinning up the full hybridSearch pipeline.
+ */
+export const __applyProvenanceReweightForTest = applyProvenanceReweight;
+
 /**
  * Hybrid search: BM25 + vector with RRF fusion.
  * Runs both backends in parallel. Falls back to BM25-only if vector
@@ -534,13 +757,14 @@ export async function hybridSearch(
 
   if (wantVec && vec === null) {
     // Vector requested but failed — fall back to BM25 results (may be empty if lex not wanted)
-    const fallbackResults = bm25.slice(0, limit).map((r) => ({
+    const fallbackBase: HybridResult[] = bm25.slice(0, limit).map((r) => ({
       title: r.title,
       vault_path: r.vault_path,
       rrf_score: r.score,
       snippet: r.snippet,
       sources: ["bm25"],
     }));
+    const fallbackResults = applyProvenanceReweight(fallbackBase, query);
     searchMetrics.recordSearch(query, fallbackResults.length, Date.now() - searchStart);
     return fallbackResults;
   }
@@ -575,7 +799,8 @@ export async function hybridSearch(
   // spanning all vaults. Without this check, vault A's search can inject
   // vault B's alias-matched notes into the result set.
   if (!wantLex) {
-    const finalResults = fused.slice(0, limit);
+    const reweightedVecOnly = applyProvenanceReweight(fused, query);
+    const finalResults = reweightedVecOnly.slice(0, limit);
     searchMetrics.recordSearch(query, finalResults.length, Date.now() - searchStart);
     return finalResults;
   }
@@ -606,7 +831,14 @@ export async function hybridSearch(
     }
   }
 
-  const finalResults = fused.slice(0, limit);
+  // V3 §A — provenance & age-aware reweight. No-op when
+  // GROVE_PROV_RANKING_ENABLED is off (dark-launch default). When on,
+  // pulls (voice, written_at) from note_blame via batch read, applies
+  // piecewise age curve + voice factor + voice_preference modulation,
+  // re-sorts, and surfaces voice/written_at/usage_directive on the envelope.
+  const reweighted = applyProvenanceReweight(fused, query);
+
+  const finalResults = reweighted.slice(0, limit);
   searchMetrics.recordSearch(query, finalResults.length, Date.now() - searchStart);
   return finalResults;
 }
@@ -641,7 +873,11 @@ export function formatResults(
         const encodedPath = displayPath.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
         const url = `${base}${scope}/${encodedPath}`;
         const thumb = r.thumbnail_url ? `\n![thumbnail](${r.thumbnail_url})` : "";
-        return `**${r.title}** (${url})${thumb}\n${r.snippet ?? ""}`;
+        // V3 §D — surface voice + written_at + usage_directive when reweight emitted them.
+        // Absent on every result when GROVE_PROV_RANKING_ENABLED is off (dark-launch default).
+        const voiceTag = r.voice ? `\n_voice: ${r.voice}${r.written_at ? `, written ${r.written_at}` : ""}_` : "";
+        const directive = r.usage_directive ? `\n> ${r.usage_directive}` : "";
+        return `**${r.title}** (${url})${thumb}\n${r.snippet ?? ""}${voiceTag}${directive}`;
       }
     )
     .join("\n\n---\n\n");

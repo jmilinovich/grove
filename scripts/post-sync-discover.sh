@@ -80,12 +80,63 @@ else
   since="$FALLBACK_SINCE"
 fi
 
-# Get changed .md files since last sync
-changed=$(git diff --name-only "$since" HEAD -- '*.md' 2>/dev/null || true)
+# Get changed .md files since last sync, excluding paths whose only
+# in-range modifications were the discovery worker's own bot commits.
+#
+# discovery-link.ts uses two commit-message prefixes:
+#   - `discovery: wire links in <path>` when it inserts wikilinks
+#     into a source note
+#   - `discovery: create <path>` when it materializes a red-linked stub
+#
+# Either commit advances HEAD, and the previous `git diff` form picked
+# them up on the next cron tick → re-enqueued the same path → re-extracted
+# → committed again. The state-file watermark (PR #140) collapsed
+# idle-tick amplification but didn't catch this self-reinforcing chain.
+# It burned ~$30/day of Haiku on personal vault through early May 2026;
+# one note (Airway constriction.md) accumulated 903 lifetime extractions
+# before the state-file fix capped it.
+#
+# Switch to `git log --name-only --invert-grep` so we list only paths
+# touched by at least one *non-discovery* commit in the range. User
+# edits (`grove (api): update X`, manual commits, `stamp-provenance:`,
+# etc.) still pass through unchanged.
+changed=$(git log --name-only --pretty=format: \
+  --invert-grep \
+  --grep='^discovery: wire links ' \
+  --grep='^discovery: create ' \
+  "$since..HEAD" -- '*.md' 2>/dev/null \
+  | sort -u | sed '/^$/d' || true)
+
+# V3 §C — post-sync warm-up. Fire-and-forget bearer-gated POST that
+# tells grove-server to pre-warm note_blame for the (file-changed ∪
+# stamp-touched) paths in $since..HEAD. Non-fatal on any failure: the
+# next user query falls back to a cold blame, which is the status quo
+# without this hook. We always pass the same range we used for the
+# discovery loop above, so even when $changed is empty (file-diff is
+# 0) any stamp-only commits in the range still get warmed.
+warmup_range_from="$since"
+warmup_range_to="$current_head"
+
+run_warmup() {
+  if [[ -z "${GROVE_INTERNAL_TOKEN:-}" ]]; then
+    # Token not configured — skip silently. Log once so ops can spot
+    # mis-provisioned hosts, but don't fail the cron pipeline.
+    echo "[post-sync] warmup: GROVE_INTERNAL_TOKEN unset, skipping"
+    return 0
+  fi
+  curl -sf -X POST "${SERVER}/internal/post-sync-warmup" \
+    -H "Authorization: Bearer ${GROVE_INTERNAL_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"from_sha\":\"${warmup_range_from}\",\"to_sha\":\"${warmup_range_to}\"}" \
+    > /dev/null 2>&1 || echo "[post-sync] warmup: hook failed (non-fatal)"
+}
 
 if [[ -z "$changed" ]]; then
-  # No file-level change in scope, but still advance the state file so
-  # we don't keep rerunning this same diff next tick.
+  # No file-level change in scope. Still fire warmup so stamp-only
+  # commits (which have no file diff but mutate provenance for prior
+  # paths — V3 §B2) get pre-warmed. Then advance the state file so we
+  # don't keep rerunning this same diff next tick.
+  run_warmup
   printf '%s\n' "$current_head" > "$STATE_FILE"
   exit 0
 fi
@@ -96,6 +147,11 @@ while IFS= read -r path; do
   curl -sf "$SERVER/internal/discovery-trigger?path=$(printf '%s' "$path" | jq -sRr @uri)" > /dev/null 2>&1 || true
   count=$((count + 1))
 done <<< "$changed"
+
+# Warmup runs AFTER the discovery enqueue loop so the user-facing
+# discovery work (LLM extraction queue) is unblocked first; warmup is
+# a pure pre-compute and can wait the few ms for the loop to finish.
+run_warmup
 
 # Advance the watermark only after the loop completes — if curl partially
 # succeeded that's fine, the server-side queue dedup handles re-emits.

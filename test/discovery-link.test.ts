@@ -158,15 +158,27 @@ describe("insertWikilinks", () => {
 
 describe("wireLinks", () => {
   let vaultDir: string;
+  const originalDbPath = process.env.GROVE_DB_PATH;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vaultDir = mkdtempSync(join(tmpdir(), "grove-link-test-"));
     mkdirSync(join(vaultDir, "Journal", "2026"), { recursive: true });
     mkdirSync(join(vaultDir, "Resources", "Concepts"), { recursive: true });
+    // V3 §B3 — wireLinks now calls deleteNoteBlame before frontmatter
+    // mutations, which hits the note_blame table. Point GROVE_DB_PATH at
+    // a per-test file so we don't pollute ~/.grove/grove.db.
+    process.env.GROVE_DB_PATH = join(vaultDir, "test.db");
+    const db = await import("../src/db.js");
+    db.resetDb();
+    db.createSchema();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    const db = await import("../src/db.js");
+    db.resetDb();
     rmSync(vaultDir, { recursive: true, force: true });
+    if (originalDbPath === undefined) delete process.env.GROVE_DB_PATH;
+    else process.env.GROVE_DB_PATH = originalDbPath;
   });
 
   it("wires links into a source note on disk", async () => {
