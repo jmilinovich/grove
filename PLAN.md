@@ -1339,7 +1339,7 @@ Adds the infrastructure for tasks/task_results/skill_configs to live in `~/.grov
 - `backup-s3.sh` produces a tarball containing both `grove.db` and per-vault `state.db` files.
 - All existing tests still pass; no behavior change to consumers of `db.ts`.
 
-#### P21-2: Schema for `tasks` / `task_results` / `skill_configs` (`src/migrations/vault/002_v2_tasks.sql`)
+#### P21-2: Schema for `tasks` / `task_results` / `skill_configs` (`src/migrations/vault/002_v2_tasks.sql`) ✅ COMPLETE 2026-05-14 (88fbce6)
 
 Per-vault SQLite migration adding the three tables that back the v2 dashboard. Lands as `002_v2_tasks.sql` and runs via the migration runner from P21-1.
 
