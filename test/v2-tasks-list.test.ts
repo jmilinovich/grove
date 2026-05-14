@@ -68,10 +68,19 @@ function seedVault(id: string, slug: string, createdAt?: string): void {
     db.prepare(
       "INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     ).run(id, "user_v2", slug, slug, join(TEST_DIR, "repos", slug), createdAt);
+    // showCeiling reads from earliest vault_members.joined_at (Phase 21
+    // spec D-7). Mirror the createdAt onto the membership row so this
+    // helper sets up both halves in one call.
+    db.prepare(
+      "INSERT OR IGNORE INTO vault_members (user_id, vault_id, role, joined_at) VALUES (?, ?, ?, ?)",
+    ).run("user_v2", id, "owner", createdAt);
   } else {
     db.prepare(
       "INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)",
     ).run(id, "user_v2", slug, slug, join(TEST_DIR, "repos", slug));
+    db.prepare(
+      "INSERT OR IGNORE INTO vault_members (user_id, vault_id, role) VALUES (?, ?, ?)",
+    ).run("user_v2", id, "owner");
   }
 }
 

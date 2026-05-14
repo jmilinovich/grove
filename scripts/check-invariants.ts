@@ -40,7 +40,7 @@ const INVARIANTS: Invariant[] = [
       "URL silently routes to the wrong vault. Freeze the set.",
     pattern: '\\?\\? "(personal|life)"',
     allowlist: [
-      'src/proxy.ts:292:  return { kind: "ok", vaultId: membership?.vault_id ?? "life" };',
+      'src/proxy.ts:295:  return { kind: "ok", vaultId: membership?.vault_id ?? "life" };',
       'src/rest.ts:76:    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
       'src/rest.ts:1901:let vaultIdResolver: VaultIdResolver = () => process.env.GROVE_VAULT_ID ?? "life";',
       'src/discovery.ts:65:    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',

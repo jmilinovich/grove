@@ -52,6 +52,8 @@ export interface SkillMetadata {
   cadenceOptions: Cadence[];
   defaultCadence: Cadence | null;
   defaultArtifactType: TaskArtifactType;
+  /** Pre-populated by `bootstrapFirstRun` (P23-2) when the vault is provisioned. */
+  starterPendingTasks?: string[];
 }
 
 export const SKILL_REGISTRY: readonly SkillMetadata[] = [

@@ -238,16 +238,25 @@ export function computeThroughput(vaultId: string): ThroughputView {
   const rollingWeekVelocity = cleared28d > 0 ? cleared28d / 4 : null;
   const estimatedClearText = formatEstimatedClearText(pending, rollingWeekVelocity);
 
-  // Vault age — read from control db. A missing vaults row is fatal
-  // (the caller passed us a vault_id that doesn't exist), but the
-  // proxy's vaultV1Match gate already rejected unknown slugs upstream,
-  // so this is more of a belt-and-braces guard.
-  const vaultRow = getDb()
-    .prepare("SELECT created_at FROM vaults WHERE id = ?")
-    .get(vaultId) as { created_at: string } | undefined;
-  const vaultCreatedMs = vaultRow ? new Date(vaultRow.created_at).getTime() : Date.now();
-  const ageMs = Date.now() - vaultCreatedMs;
-  const showCeiling = ageMs > 14 * 24 * 60 * 60 * 1000;
+  // Vault age — drive `showCeiling` off the EARLIEST membership join
+  // for this vault (matches Phase 21 spec D-7 / SPEC §7: "capacity dial
+  // hidden during the first 14 days of usage"). A vault with no
+  // memberships yet (e.g., during initial provisioning) hides the
+  // ceiling — safer than anchoring on creation time which may run
+  // ahead of actual use.
+  const memberRow = getDb()
+    .prepare(
+      `SELECT MIN(joined_at) AS earliest
+         FROM vault_members
+        WHERE vault_id = ?`,
+    )
+    .get(vaultId) as { earliest: string | null } | undefined;
+  const earliestMs = memberRow?.earliest
+    ? new Date(memberRow.earliest).getTime()
+    : null;
+  const showCeiling =
+    earliestMs !== null &&
+    Date.now() - earliestMs > 14 * 24 * 60 * 60 * 1000;
 
   return {
     rollingWeekVelocity,
@@ -261,7 +270,7 @@ export function computeThroughput(vaultId: string): ThroughputView {
 
 function formatEstimatedClearText(pending: number, velocity: number | null): string {
   if (pending === 0) return "all clear";
-  if (velocity === null || velocity <= 0) return "not enough data yet";
+  if (velocity === null || velocity <= 0) return "warming up";
   const weeksToClear = pending / velocity;
   if (weeksToClear < 0.5) return "under a week at your pace";
   if (weeksToClear < 1.5) return "≈1 week at your pace";
