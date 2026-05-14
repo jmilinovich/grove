@@ -92,6 +92,7 @@ import {
   handleV2TaskRun,
   handleV2TaskDefer,
   handleV2TaskDismiss,
+  handleV2TaskReview,
 } from "./v2-tasks.js";
 import { handleV2TaskDetail } from "./v2-task-detail.js";
 import { startTaskWorker } from "./v2-task-run.js";
@@ -2584,6 +2585,26 @@ const server = createServer(async (req, res) => {
         : null;
     if (taskDismissMatch) {
       await handleV2TaskDismiss(req, res, restCtx, taskDismissMatch[1]!);
+      return;
+    }
+
+    // POST /v1/tasks/<id>/review — disposition a review-state task (P22-3).
+    // Body {action: 'confirm-durable'|'refine'|'dismiss'|'mark-stale',
+    // refinement?: string}. confirm-durable stamps the operator's user_id
+    // as Provenance-By; refine stamps 'human'. dismiss inherits the P22-2
+    // flag write-through. Vault-scoped only — vaultV1Match enforces auth/role.
+    const taskReviewMatch =
+      restIsVaultScoped && req.method === "POST"
+        ? /^\/v1\/tasks\/([^/?#]+)\/review$/.exec(restPath)
+        : null;
+    if (taskReviewMatch) {
+      await handleV2TaskReview(
+        req,
+        res,
+        restCtx,
+        taskReviewMatch[1]!,
+        restKey.user_id,
+      );
       return;
     }
 
