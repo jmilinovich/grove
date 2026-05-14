@@ -333,6 +333,148 @@ export const BATCHES: Batch[] = [
       },
     ],
   },
+
+  // ── Phase 21: v2 Server Surface — Reads ────────────────────────────
+  {
+    id: "p21-1",
+    title: "feat(P21-1): per-vault SQLite tooling",
+    entries: [
+      {
+        branch: "p21-per-vault-db",
+        prompt:
+          "Read PLAN.md task P21-1. Create src/db-per-vault.ts exporting getVaultDb(vaultId) → SQLite handle bound to ~/.grove/vaults/<slug>/state.db (connection pool keyed by vaultId; lazy-create directory + file if missing). Also export forEachVaultDb(fn) that iterates all vaults in the control db. Add src/migrations/vault/001_init_vault_state.sql creating only a _migration_state table. Add a per-vault migration runner that applies src/migrations/vault/*.sql files in lexical order, tracked in _migration_state. Extend scripts/backup-s3.sh to enumerate ~/.grove/vaults/*/state.db files into the backup tarball. Tests: test/db-per-vault.test.ts (pool reuse, missing-vault throws, runner idempotent). Run npm test. Commit as feat(P21-1).",
+      },
+    ],
+  },
+  {
+    id: "p21-2",
+    title: "feat(P21-2): v2 tasks schema",
+    requires: ["p21-1"],
+    // Schema change — AGENTS.md requires human review before merge.
+    noAutoMerge: true,
+    entries: [
+      {
+        branch: "p21-tasks-schema",
+        prompt:
+          "Read PLAN.md task P21-2. Add src/migrations/vault/002_v2_tasks.sql creating per-vault tables: tasks (id, skill_slug, state CHECK IN ('pending','running','review','done','dismissed','failed'), title, body, source_note_path, estimated_minutes, actual_minutes, scheduled_for, started_at, completed_at, source_flag_id, created_at, updated_at) with idx_tasks_state_scheduled + idx_tasks_skill_slug; task_results (task_id PK REFERENCES tasks(id) ON DELETE CASCADE, artifact_json, note_change_json, provenance_*, created_at); skill_configs (skill_slug PK, enabled, cadence CHECK IN ('daily','weekly','on-demand'), last_run_at, next_run_at, created_at, updated_at). Add src/db-types.ts with TS types Task, TaskResult, SkillConfig matching grove-www/src/lib/grove-api.v2.types.ts field names. Migration must be idempotent (CREATE TABLE IF NOT EXISTS) and transactional. Tests: test/db-migration-v2-tasks.test.ts. Run npm test. Commit as feat(P21-2).",
+      },
+    ],
+  },
+  {
+    id: "p21-3",
+    title: "feat(P21-3, P21-4, P21-5): v2 read endpoints",
+    requires: ["p21-2"],
+    entries: [
+      {
+        branch: "p21-tasks-list",
+        prompt:
+          "Read PLAN.md task P21-3 AND the Phase 21 revision-note block above the Goal. Create src/v2-tasks.ts (per existing share.ts/waitlist.ts convention — NOT a generic v2-routes.ts) exporting handleV2TasksList(req, res, vault). Wire dispatch INSIDE the existing vaultV1Match block at src/proxy.ts:1742+ — the path is GET /v/<slug>/v1/tasks (path-style, NOT query-string ?vault=). This inherits the existing auth/role/CORS block; do NOT bypass it. Query per-vault state.db: reviewTasks (state='review' DESC), pendingTasks (state IN ('pending','running') by scheduled_for ASC NULLS LAST, created_at DESC), clearedTasks (state='done' DESC LIMIT 20). Use SELECT column-aliases (skill_slug AS skillId, ...) so query results pass through as the typed shape; no separate mapper module. Build BacklogPayload matching grove-www/src/lib/grove-api.v2.types.ts EXACTLY (Task.description is the DB column 'body'; Task.skillId is DB 'skill_slug'). throughput call delegates to a shared computeThroughput(vault_id) helper. skills returns the registry-merged Skill[] (3 skills only, see P21-5). planTier='free' for v2. 403 on slug mismatch (proxy already handles this — your handler runs AFTER the auth gate). Test: test/v2-tasks-list.test.ts. Run npm test. Commit as feat(P21-3).",
+      },
+      {
+        branch: "p21-task-detail-throughput",
+        prompt:
+          "Read PLAN.md task P21-4 AND the Phase 21 revision-note block. In src/v2-tasks.ts add handleV2TaskDetail(req, res, vault, taskId). Also export computeThroughput(vault_id) helper for P21-3 reuse. Standalone /v1/throughput endpoint CUT (Scope Cop) — throughput lives inside BacklogPayload only. Wire dispatch INSIDE vaultV1Match block at src/proxy.ts:1742+ for GET /v/<slug>/v1/tasks/<id>. Detail: read tasks + task_results from per-vault state.db. task_results.provenance is a single JSON column (provenance_json TEXT) parsed back to GroveProvenance object; if artifact.type='note-change', join note_blame rows from control.db via ATTACH (BEGIN IMMEDIATE; ATTACH 'grove.db' AS control; ...). 404 on unknown task. computeThroughput(vault_id): rollingWeekVelocity = tasks_completed_last_28d / 4 (or null if 0 completed); cleared7d count; estimatedClearText = (velocity > 0) ? `≈${Math.ceil(pending/velocity)} weeks at your pace` : 'warming up'; showCeiling=false when earliest vault_members.created_at < 14d old. Tests: test/v2-task-detail.test.ts + test/v2-throughput.test.ts (helper-direct). Run npm test. Commit as feat(P21-4).",
+      },
+      {
+        branch: "p21-skills-list",
+        prompt:
+          "Read PLAN.md task P21-5 (heavily revised — match grove-www/src/lib/grove-api.v2.types.ts Skill interface EXACTLY). Create src/skills/registry.ts with hardcoded metadata for ONLY 3 skills (4 metadata-only entries CUT by Scope Cop): daily-vault-review, concept-graph-cleanup, dup-people-detection. Each registry entry matches the Skill interface: {id (uuid), slug, name, domain: enum 'knowledge'|'journal'|'relationships'|'health'|'finances'|'system', author: 'builtin', description, sampleTasks: string[] (camelCase!), cadenceOptions: Cadence[] where Cadence = 'daily'|'weekly'|'on-trigger'|'on-demand', defaultCadence: Cadence|null, defaultArtifactType: TaskArtifactType, starterPendingTasks?: string[]}. Create src/v2-skills.ts (separate from src/v2-tasks.ts) exporting handleV2SkillsList. Wire dispatch INSIDE vaultV1Match block at src/proxy.ts:1742+ for GET /v/<slug>/v1/skills. installState derivation: skill_configs row missing or enabled=0 → 'available'; enabled=1 → 'installed'. Default values when no skill_configs row: defaultCadence from registry + installState='available'. Test: test/v2-skills-list.test.ts — assert each result satisfies Skill via TS type satisfies. Run npm test. Commit as feat(P21-5).",
+      },
+    ],
+  },
+
+  // ── Phase 22: v2 Server Surface — Writes ───────────────────────────
+  {
+    id: "p22-1",
+    title: "feat(P22-1, P22-2): task run + defer/dismiss",
+    requires: ["p21-3"],
+    entries: [
+      {
+        branch: "p22-task-run",
+        prompt:
+          "READ PLAN.md Phase 22 REVISION NOTES FIRST — they override inline details below. Task P22-1. Create src/v2-task-run.ts with the execution dispatcher. In src/v2-tasks.ts (NOT v2-routes.ts) add handleV2TaskRun(req, res, vault, taskId). Wire POST /v/<slug>/v1/tasks/<id>/run dispatch INSIDE the vaultV1Match block at src/proxy.ts:1742+. Async pattern (per revision notes): handler reads task, validates state, transitions pending→running, RETURNS 202 IMMEDIATELY with current state. Actual execution happens in the task-worker loop (setInterval(1000) polling tasks WHERE state='running' AND started_at < 1s ago LIMIT 1) which lives in src/scheduler.ts (Phase 23) OR a minimal in-process version landed here. NO 25s in-line timeout. State transitions in HTTP handler only: pending → running (returns 202); review (returns 200 with current task — idempotent); terminal (done/dismissed/failed) → 409; already-running → 409. Skill executor invoked via dynamic import from src/skills/<slug>.ts inside the worker loop; for P22-1 a stub executor is acceptable (P22-5 lands the real daily-vault-review). On executor error: state='failed', task_results.artifact contains the error. Test: test/v2-task-run.test.ts. Run npm test. Commit as feat(P22-1).",
+      },
+      {
+        branch: "p22-task-defer-dismiss",
+        prompt:
+          "READ PLAN.md Phase 22 REVISION NOTES FIRST — they override inline details. Task P22-2. In src/v2-tasks.ts (NOT v2-routes.ts) add handleV2TaskDefer and handleV2TaskDismiss. Wire POST /v/<slug>/v1/tasks/<id>/defer and POST /v/<slug>/v1/tasks/<id>/dismiss dispatch INSIDE the vaultV1Match block at src/proxy.ts:1742+. Defer: body {until: ISO}, sets scheduled_for, only valid for pending|review (others 409), bad ISO → 400. Dismiss: state=dismissed, idempotent. Write-through: if source_flag_id non-null on dismiss, UPDATE graph_health_flags SET resolved_at=datetime('now') in control.db via ATTACH (BEGIN IMMEDIATE; ATTACH '<grove.db path>' AS control; UPDATE control.graph_health_flags SET resolved_at=datetime('now') WHERE id = ?; COMMIT) in same transaction. Tests: test/v2-task-defer.test.ts + test/v2-task-dismiss.test.ts (including the ATTACH path). Run npm test. Commit as feat(P22-2).",
+      },
+    ],
+  },
+  {
+    id: "p22-2",
+    title: "feat(P22-3, P22-4): task review + skill config",
+    requires: ["p22-1"],
+    entries: [
+      {
+        branch: "p22-task-review",
+        prompt:
+          "READ PLAN.md Phase 22 REVISION NOTES FIRST. Task P22-3. Create src/v2-task-review.ts with action dispatch. In src/v2-tasks.ts (NOT v2-routes.ts) add handleV2TaskReview. Wire POST /v/<slug>/v1/tasks/<id>/review dispatch INSIDE the vaultV1Match block at src/proxy.ts:1742+. Body {action: 'confirm-durable'|'refine'|'dismiss'|'mark-stale', refinement?: string}. Validate task in state='review' (else 409). confirm-durable: if artifact.type='note-change', apply via existing write queue (src/vault-ops.ts) with provenance {voice:'durable', by: <api_key.user_id from auth resolution>}; state→done. refine: require refinement field; apply user-authored edit via write queue with provenance {voice:'durable', by:'human'}; state→done. dismiss: state→dismissed + graph_health_flags write-through (use the same ATTACH pattern as P22-2). mark-stale: state→dismissed, append stale marker to body (NOT the description column — body is the DB column). Test: test/v2-task-review.test.ts — verify each action produces correct commit trailers (Provenance-Voice + Provenance-By). Run npm test. Commit as feat(P22-3).",
+      },
+      {
+        branch: "p22-skill-config",
+        prompt:
+          "READ PLAN.md Phase 22 REVISION NOTES FIRST. Task P22-4. In src/v2-skills.ts (NOT v2-routes.ts) add handleV2SkillConfigure, handleV2SkillEnable, handleV2SkillDisable. Wire POST /v/<vault-slug>/v1/skills/<skill-slug>/configure, /enable, /disable dispatch INSIDE the vaultV1Match block at src/proxy.ts:1742+. configure: body {cadence: 'daily'|'weekly'|'on-trigger'|'on-demand'} — note: cadence enum includes 'on-trigger' per grove-www/src/lib/grove-api.v2.types.ts; UPSERT skill_configs. enable: UPSERT enabled=1, set next_run_at by cadence (1d/7d/NULL for on-demand and on-trigger). disable: UPSERT enabled=0, next_run_at=NULL. All three return the post-update Skill shape matching the Skill interface (with installState='installed' when enabled=1). Unknown skill slug → 404. Invalid cadence → 400. Tests: test/v2-skill-configure.test.ts + test/v2-skill-enable-disable.test.ts. Run npm test. Commit as feat(P22-4).",
+      },
+    ],
+  },
+  {
+    id: "p22-3",
+    title: "feat(P22-5): daily-vault-review executor",
+    requires: ["p22-2"],
+    entries: [
+      {
+        branch: "p22-daily-vault-review",
+        prompt:
+          "READ PLAN.md Phase 22 REVISION NOTES FIRST — sampling/partial CUT per Scope Cop. Task P22-5. Create src/skills/cost-ceiling.ts (shared helper) with estimateRunCost(vault_size) → number + recordRunCost(skill_slug, tokens) + exceededCeiling(estimate, ceiling) → boolean. NO shouldSample function — hard-fail on ceiling exceeded. Create src/skills/daily-vault-review.ts exporting runDailyVaultReview(vault, {mode, tokenCeiling}) → Promise<TaskResult>. Read up to 5 unresolved graph_health_flags rows (where resolved_at IS NULL) + up to 5 high-confidence discovery_results (cosine ≥ 0.9). Construct 3-5 review tasks per run. LLM call via Anthropic SDK using claude-haiku-4-5 with cache_control on the prompt (mirror P7-COST-7 pattern). For each task generated: skill_slug='daily-vault-review', source_flag_id set when derived from a flag, body contains LLM-synthesized framing. Cost ceiling: pre-call estimate; if exceeded, return TaskResult with artifact.type='surface' and a surfaceText explaining the vault is too large for this run + no LLM call made. mode='surface-only' never produces note-change artifacts; mode='writes-allowed' can. Update src/skills/registry.ts to wire executor reference. Real executor replaces the P22-1 stub. Test: test/skills-daily-vault-review.test.ts with seeded fixture vault — assert ceiling-exceeded path produces surface artifact, not partial. Run npm test. Commit as feat(P22-5).",
+      },
+    ],
+  },
+
+  // ── Phase 23: v2 Server Surface — Autonomy ─────────────────────────
+  {
+    id: "p23-1",
+    title: "feat(P23-1): grove-scheduler PM2 process",
+    requires: ["p22-3"],
+    entries: [
+      {
+        branch: "p23-scheduler",
+        prompt:
+          "READ PLAN.md Phase 23 REVISION NOTES FIRST — they significantly revise architecture. Task P23-1. Create src/scheduler.ts with TWO loops in one process: (1) cron tick loop (1-min setInterval) reads skill_configs WHERE enabled=1 AND next_run_at <= datetime('now') AND ENQUEUES tasks (INSERT pending row + UPDATE next_run_at by cadence). on-demand and on-trigger never auto-enqueue. (2) worker drain loop (1s setInterval) selects tasks WHERE state='pending' AND scheduled_for <= datetime('now') ORDER BY scheduled_for ASC LIMIT 1, claims it (UPDATE state='running'), invokes the executor via dynamic import from src/skills/<slug>.ts, writes task_results + transitions state to review/done/failed on completion. Process is PER-VAULT — pinned via GROVE_VAULT_ID env var, mirrors src/discovery-worker.ts:30 pattern. Create src/scheduler-bin.ts as PM2 entry that reads GROVE_VAULT_ID, opens getVaultDb(vault_id), starts both loops. Extend src/ecosystem-gen.ts to emit grove-scheduler-<slug> entries (one per vault, mirroring the existing grove-discovery-<slug> pattern at ecosystem-gen.ts:152) with GROVE_VAULT_ID pinned. Orphan recovery on boot: UPDATE tasks SET state='pending' WHERE state='running' AND started_at < datetime('now', '-5 minutes') (mirrors discovery's recoverOrphanedDiscoveryProcessing fix #151). Also: check vaults.bootstrap_pending=1 on boot and on each tick — if set, call bootstrapFirstRun(vault) (P23-2) and reset the flag. Add idx_tasks_state_started_at to P21-2 schema. Test: test/scheduler-tick.test.ts + test/scheduler-worker.test.ts + test/scheduler-orphan-recovery.test.ts. Update CLAUDE.md Architecture section adding grove-scheduler-<slug> to per-vault process list. Run npm test. Commit as feat(P23-1).",
+      },
+    ],
+  },
+  {
+    id: "p23-2",
+    title: "feat(P23-2): first-run choreography",
+    requires: ["p23-1"],
+    entries: [
+      {
+        branch: "p23-first-run",
+        prompt:
+          "READ PLAN.md Phase 23 REVISION NOTES FIRST — bootstrap pattern significantly revised. Task P23-2. Add a new column `bootstrap_pending INTEGER NOT NULL DEFAULT 0` to the existing vaults table in grove.db (migration step). Extend src/vault-provision.ts: after vault provisioned, simply UPDATE vaults SET bootstrap_pending=1 WHERE id=? — do NOT invoke any LLM call or skill executor synchronously in provision. The scheduler picks this up. Create src/skills/first-run.ts exporting bootstrapFirstRun(vault) — idempotent. bootstrapFirstRun: INSERT skill_configs for daily-vault-review (enabled=1, cadence='daily', next_run_at = next 6am America/Los_Angeles converted to UTC). INSERT 3-5 starter tasks (state='pending') from each enabled skill's starterPendingTasks registry field (note: starterPendingTasks, not sample_tasks — match Skill type). INSERT one immediate daily-vault-review task (state='pending', scheduled_for=datetime('now')). The scheduler's worker loop (P23-1) will drain this immediate task and run it surface-only. Reset vaults.bootstrap_pending=0 at the end. Idempotency: function is no-op if skill_configs already has daily-vault-review row. Tokens cap for first run: 50_000 input tokens (mirror P7 cost pattern). Slow-vault UX: if the worker hasn't finished within 25s, the task stays in state='running' and the dashboard renders 'still working — refresh in a minute' by detecting started_at > 25s ago. NO inline timeout in bootstrapFirstRun. Test: test/skills-first-run.test.ts — bootstrap flips flag + creates rows; idempotent; scheduler tick picks up flagged vault. Run npm test. Commit as feat(P23-2).",
+      },
+    ],
+  },
+  {
+    id: "p23-3",
+    title: "feat(P23-3, P23-4): concept-graph + dup-people executors",
+    requires: ["p23-2"],
+    entries: [
+      {
+        branch: "p23-concept-graph-cleanup",
+        prompt:
+          "Read PLAN.md task P23-3. Create src/skills/concept-graph-cleanup.ts exporting runConceptGraphCleanup(vault, options) → Promise<TaskResult>. Read graph_health metrics + vault note list. Identify candidates: thin concepts (<100 words + no outbound links), orphans, near-duplicate concept titles (Levenshtein ≤ 3 on slugified titles). Cap candidates at ~3 per run. For each: LLM-synthesize a proposed edit via claude-haiku-4-5 (use prompt caching). Produce note_change_json artifacts; state='review'. Token ceiling via src/skills/cost-ceiling.ts. Update src/skills/registry.ts executor reference. Test: test/skills-concept-graph-cleanup.test.ts with seeded fixture. Run npm test. Commit as feat(P23-3).",
+      },
+      {
+        branch: "p23-dup-people-detection",
+        prompt:
+          "Read PLAN.md task P23-4. Create src/skills/dup-people-detection.ts exporting runDupPeopleDetection(vault, options) → Promise<TaskResult>. Iterate Resources/People/*.md paths. For each pair: combine cosine similarity (≥0.85 on Voyage embeddings) with Levenshtein name distance (≤4). Top ~3 candidates per run. LLM-synthesize merge proposals via claude-haiku-4-5 (with prompt caching). Artifact is note_change_json proposing merge (target note + redirect from duplicate). state='review'. Cost ceiling via shared helper. Update src/skills/registry.ts. Test: test/skills-dup-people-detection.test.ts. Run npm test. Commit as feat(P23-4).",
+      },
+    ],
+  },
+  // P23-5 (watchdog) CUT from Phase 23 per Scope Cop — runbook hardening,
+  // not part of the v2 ship. File as a separate IDEAS spark post-Phase-23.
 ];
 
 export function findBatch(id: string): Batch | undefined {
