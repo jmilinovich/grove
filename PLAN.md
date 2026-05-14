@@ -1281,6 +1281,571 @@ Revisit after Phase A feedback. Rewriting Overview without validated pain is a p
 
 ---
 
+### Phase 21: v2 Server Surface — Reads
+
+> **Spec revised 2026-05-13 after 3-panel review (Implementer / Architect / Scope Cop).** Routing moved from `?vault=<slug>` query-string to `/v/<slug>/v1/*` path style (inherits existing auth/role/CORS at proxy.ts:1691). Per-vault SQLite tooling scoped down to just `getVaultDb()` (deferred: iterator, runner, backup-tar). Registry shrunk to 3 skills with executors (deferred: 4 metadata-only entries). Standalone `/v1/throughput` cut (throughput lives inside `BacklogPayload` only). Module organization changed to `src/v2-tasks.ts` + `src/v2-skills.ts` per existing share.ts / waitlist.ts convention. Field names + types now match `grove-www/src/lib/grove-api.v2.types.ts` exactly.
+
+**Goal:** Stand up the read side of the v2 dashboard contract. After Phase 21 merges + deploys, grove-www's `GROVE_API_MODE=live` can render the backlog homepage, throughput strip, skills index, and task detail pages against real api.grove.md data. The prod guard in grove-www stops 404-ing once `GROVE_API_MODE=live` is flipped in Vercel.
+
+**Prerequisites:** grove-www PR #62 merged ([`df6075a`](https://github.com/jmilinovich/grove-www/pull/62), 2026-05-13). The client contract is fixed by `~/src/grove-www/src/lib/grove-api.v2.ts` — the 11 function signatures + types in `grove-api.v2.types.ts` are authoritative.
+
+**Status:** Graduated from IDEAS.md 2026-05-13. All 5 open questions in the shaping entry resolved. Anchor: `~/src/grove-www/SPEC.md` (the v2 dashboard contract from `/mili:spec`, 2026-05-13). Sequenced sequentially with Phase 22 (writes) and Phase 23 (autonomy).
+
+**Scope boundary:**
+- IN: per-vault SQLite tooling (`forEachVaultDb`, per-vault migration runner, backup enumeration); 3 new tables (`tasks`, `task_results`, `skill_configs`) landed as per-vault state.db residents from day one; 4 READ endpoints (`/v1/tasks` list, `/v1/tasks/<id>` detail, `/v1/throughput`, `/v1/skills`); skill metadata module (`src/skills/registry.ts`) with hardcoded 5–7 skill specs per SPEC §14.8; probe-script verification (≥80% VERIFIED against staging).
+- OUT (deferred to Phase 22): all write endpoints (`run`, `defer`, `dismiss`, `review`, `configure`, `enable`, `disable`); skill executors; cost ceiling logic; graph_health_flags write-through; refine-action attribution.
+- OUT (deferred to Phase 23): grove-scheduler PM2 process; cadence cron; first-run choreography; slow-vault timeout fallback; concept-graph-cleanup + dup-people-detection executors.
+- OUT entirely: skills marketplace; `/v1/tasks/<id>/run` mode parameter (Phase 22 ships a single canonical run path); third-party skill authoring.
+
+#### Locked design decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | **`tasks` lands per-vault from day one** (not retrofitted) | Pairs with the per-vault SQLite split IDEAS spark. Forces the per-vault tooling to exist before tasks ships; "forgot `WHERE vault_id = ?`" becomes structurally impossible. Accepted cost: Phase 21 carries the migration runner + backup tooling. |
+| 2 | **Skills are hardcoded in `src/skills/registry.ts`** | SPEC §9: marketplace = v3. A registry TABLE without third-party authors is premature abstraction. `skill_configs` table holds per-vault user state only (enabled/cadence/last_run_at/next_run_at). |
+| 3 | **All v2 endpoints use the `/v/<slug>/v1/*` path-style** (NOT `?vault=<slug>` query string) | Inherits the existing `vaultV1Match` block at `src/proxy.ts:1691` which already handles vault auth, directly-bound vs member-authorized keys, mutation-role checks, and CORS. The query-string form would bypass all of that. Agents implementing P21-3/P21-4/P21-5 must register handlers on `restPath = vaultV1Match[2]` (the path-after-slug), NOT on `/v1/*` directly. |
+| 4 | **`fetchBacklog` returns single shaped payload** (not 3 separate calls) | Per grove-www SPEC §14.1 BacklogPayload type: `{reviewTasks, pendingTasks, clearedTasks, throughput, skills, planTier}` — one network round-trip. Avoids waterfall on the homepage RSC render. |
+| 5 | **Provenance read joins for note-change artifacts** | `tasks.<id>` detail joins `task_results.note_change_json` + `note_blame` rows so the v2 ProvenanceStrip can render per-segment badges without a second call. |
+| 6 | **No `/v1/tasks/run` (without ID)** for backlog-wide bulk action | SPEC scope: every action is per-task. Bulk "run all" is v3. |
+
+#### P21-1: Per-vault SQLite tooling (`src/db.ts`, `src/db-per-vault.ts`)
+
+Adds the infrastructure for tasks/task_results/skill_configs to live in `~/.grove/vaults/<slug>/state.db` instead of the shared `~/.grove/grove.db`. The new per-vault DB pattern is reusable for future per-vault tables (eventually: api_keys, shared_links, discovery_queue, discovery_results, graph_health, graph_health_flags, vault_usage_daily — but those migrations are out of scope for Phase 21).
+
+**Behavior:**
+1. New module `src/db-per-vault.ts` exports `getVaultDb(vaultId)` returning a SQLite handle bound to `~/.grove/vaults/<slug>/state.db`. Connection pool keyed by vaultId.
+2. `forEachVaultDb(fn)` iterates over all known vaults, opens each, calls `fn(db, vault)`. Used by schema migrations + backup.
+3. Per-vault schema migration runner: applies a sequence of migrations in `src/migrations/vault/*.sql` to every vault DB, tracked in a per-vault `_migration_state` table.
+4. Backup tooling: `scripts/backup-s3.sh` extended to enumerate `~/.grove/vaults/*/state.db` and include each in the tarball.
+5. Initial migration `001_init_vault_state.sql` creates an empty `state.db` schema (no tables yet — those land in P21-2). Validates the per-vault path exists before opening.
+6. `db.ts` unchanged except for an export documenting the split: `control.db` = shared (users, vaults, vault_members, api_keys, sessions, magic_links, oauth*, auth_codes, handle_history, write_provenance, note_blame, waitlist); `<vault>/state.db` = per-tenant.
+
+**Files:**
+- `src/db-per-vault.ts` (new, ~150 LOC)
+- `src/migrations/vault/001_init_vault_state.sql` (new, empty schema scaffold + `_migration_state` table)
+- `scripts/backup-s3.sh` (extended to tar per-vault DBs)
+- `src/db.ts` (export documentation of split; no schema changes)
+
+**Tests:**
+- `test/db-per-vault.test.ts` — `getVaultDb()` creates state.db at expected path; pool reuse; cleanup on close; missing-vault-id throws; migration runner applies in order and is idempotent.
+- `test/backup-s3-per-vault.test.ts` — backup script enumerates per-vault DBs and includes them in tarball manifest.
+
+**Docs:** Update `CLAUDE.md` Architecture section: add per-vault DB pattern alongside existing rules. Update `PLAN.md` Current State (after this lands).
+
+**Acceptance criteria:**
+- `getVaultDb('personal')` returns a connection bound to `~/.grove/vaults/personal/state.db` (created on first call if missing).
+- `forEachVaultDb()` iterates exactly the vaults in the `vaults` control table.
+- Migration runner applies `001_init_vault_state.sql` to a fresh vault and creates the `_migration_state` row.
+- `backup-s3.sh` produces a tarball containing both `grove.db` and per-vault `state.db` files.
+- All existing tests still pass; no behavior change to consumers of `db.ts`.
+
+#### P21-2: Schema for `tasks` / `task_results` / `skill_configs` (`src/migrations/vault/002_v2_tasks.sql`)
+
+Per-vault SQLite migration adding the three tables that back the v2 dashboard. Lands as `002_v2_tasks.sql` and runs via the migration runner from P21-1.
+
+**Schema:**
+```sql
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY,
+  skill_slug TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending','running','review','done','dismissed','failed')),
+  title TEXT NOT NULL,
+  body TEXT,
+  source_note_path TEXT,
+  estimated_minutes INTEGER,
+  actual_minutes INTEGER,
+  scheduled_for TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  source_flag_id TEXT,  -- nullable FK to graph_health_flags.id (cross-DB; not enforced)
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_tasks_state_scheduled ON tasks(state, scheduled_for);
+CREATE INDEX idx_tasks_skill_slug ON tasks(skill_slug);
+
+CREATE TABLE task_results (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  artifact_json TEXT NOT NULL,
+  note_change_json TEXT,
+  provenance_voice TEXT,
+  provenance_by TEXT,
+  provenance_written_at TEXT,
+  provenance_basis_json TEXT,
+  provenance_reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE skill_configs (
+  skill_slug TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  cadence TEXT NOT NULL CHECK (cadence IN ('daily','weekly','on-demand')),
+  last_run_at TEXT,
+  next_run_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+**Behavior:** Migration is idempotent (`IF NOT EXISTS`) and transactional. Empty tables on apply. Per-vault means each vault gets its own copy.
+
+**Files:**
+- `src/migrations/vault/002_v2_tasks.sql` (new)
+- `src/db-types.ts` (new or extended): TS type definitions matching the schema — `Task`, `TaskResult`, `SkillConfig`. Mirrors grove-www's `grove-api.v2.types.ts` field names (camelCase in TS, snake_case in DB; ORM-like mapper or hand-converted at query sites).
+
+**Tests:**
+- `test/db-migration-v2-tasks.test.ts` — migration applies idempotently to a fresh per-vault DB; schema matches expected DDL; CHECK constraints enforced (state and cadence enum values).
+
+**Acceptance criteria:**
+- Migration applies to a fresh vault DB and creates 3 empty tables.
+- Re-running the migration is a no-op (idempotent).
+- Insert with invalid `state` enum value raises a SQLite constraint error.
+- `task_results` rows cascade-delete when their `tasks` row is deleted.
+
+#### P21-3: `GET /v/<slug>/v1/tasks` (`src/proxy.ts`, `src/v2-tasks.ts`)
+
+The list endpoint. Returns the `BacklogPayload` shape grove-www's `fetchBacklog` consumes. Single round-trip; no waterfall.
+
+**Behavior:**
+1. New module `src/v2-routes.ts` exports a `handleV2TasksList(req, res, vault)` function. Called from `src/proxy.ts` when `restPath === "/v1/tasks"` and method is GET.
+2. Resolves the calling api key → vault_id; opens `getVaultDb(vault_id)`.
+3. Queries: `reviewTasks` = `SELECT * FROM tasks WHERE state='review' ORDER BY created_at DESC`; `pendingTasks` = `state IN ('pending','running') ORDER BY scheduled_for ASC NULLS LAST, created_at DESC`; `clearedTasks` = `state='done' ORDER BY completed_at DESC LIMIT 20`.
+4. `throughput` computed from `tasks` table (see P21-4 — shared compute helper).
+5. `skills` returned from `src/skills/registry.ts` joined with `skill_configs` rows (default enabled=false, cadence='on-demand' if no row exists).
+6. `planTier` returned as `"free"` for v2 (Pro tier ships later; SPEC §8 hides capacity dial first 14 days).
+7. Vault slug mismatch → 403 (don't leak which vault slugs exist, per Phase 8 invariant).
+
+**Files:**
+- `src/v2-routes.ts` (new)
+- `src/proxy.ts` (route dispatch for `/v1/tasks*` paths)
+- `src/skills/registry.ts` (new — hardcoded skill metadata per SPEC §14.8: name, description, sample_tasks, default_cadence)
+
+**Tests:**
+- `test/v2-tasks-list.test.ts` — fixture-driven: 3 review + 7 pending + 5 done in a test vault, assert payload shape matches `BacklogPayload`; empty vault returns empty arrays; 403 on slug mismatch; 401 on missing/bad key.
+
+**Acceptance criteria:**
+- `curl https://api.grove.md/v/personal/v1/tasks` with a valid key returns 200 + JSON matching `BacklogPayload`.
+- Field names in JSON match grove-www's `grove-api.v2.types.ts` BacklogPayload (camelCase).
+- Missing/bad key returns 401; slug-mismatch returns 403; unknown vault returns 403.
+
+#### P21-4: `GET /v/<slug>/v1/tasks/<id>` (task detail)
+
+The task-detail endpoint joins `tasks` + `task_results` + provenance blame. The throughput endpoint exposes the same throughput compute used by P21-3 for grove-www's standalone polling path (15s on-focus polling per SPEC §11).
+
+**Task detail behavior:**
+1. `handleV2TaskDetail(req, res, vault, taskId)` in `src/v2-routes.ts`.
+2. Reads `tasks WHERE id = ?` from per-vault state.db; returns 404 if not found.
+3. Reads `task_results WHERE task_id = ?`; if present and `note_change_json` is non-null, joins with `note_blame` rows (cross-DB query — `note_blame` lives in control.db) keyed by the affected note path.
+4. Returns the `Task` shape grove-www expects, with optional `provenance_blame` field per SPEC §14.1.
+
+**Throughput behavior:**
+1. `handleV2Throughput(req, res, vault)` returns the same `ThroughputView` shape grove-www's `fetchThroughput` consumes.
+2. Compute: rolling 4-week velocity (tasks completed per week, averaged over 4 weeks); `cleared7d` count; estimated time-to-clear text (SPEC §4: "≈2 weeks at your pace").
+3. Hidden during first 14 days of vault usage (SPEC §7): `showCeiling: false` until `vault_members.created_at` is >14d old.
+4. Shared compute helper `computeThroughput(vault_id)` exported from `src/v2-routes.ts` for reuse by P21-3.
+
+**Files:**
+- `src/v2-routes.ts` (extended)
+- `src/proxy.ts` (route dispatch for `/v1/tasks/<id>` and `/v1/throughput`)
+
+**Tests:**
+- `test/v2-task-detail.test.ts` — task with note-change result returns provenance_blame join; task without result returns artifact-less shape; 404 on unknown task; 403 on cross-vault access.
+- `test/v2-throughput.test.ts` — 4-week velocity math correct on seeded data; `showCeiling: false` for new vaults; `estimatedClearText` matches SPEC formula.
+
+**Acceptance criteria:**
+- `curl https://api.grove.md/v1/tasks/<id>` returns 200 + JSON matching the `Task` type with `result.provenance_blame` when applicable.
+- `computeThroughput(vault_id)` helper used by P21-3's BacklogPayload returns a `ThroughputView`-shaped object (standalone `/v1/throughput` endpoint CUT — Scope Cop finding; only computed inside BacklogPayload now).
+- Both endpoints return 401/403 on auth failures matching P21-3's contract.
+
+#### P21-5: `GET /v/<slug>/v1/skills` + `src/skills/registry.ts`
+
+Standalone skills endpoint (grove-www's `fetchSkills` consumer — already included in P21-3's BacklogPayload, but the dedicated endpoint is needed for the `/skills` page + skill-detail page).
+
+**Behavior:**
+1. `handleV2SkillsList(req, res, vault)` exported from `src/v2-skills.ts` (per existing share.ts / waitlist.ts convention; NOT a generic `v2-routes.ts`).
+2. Joins `src/skills/registry.ts` hardcoded metadata with per-vault `skill_configs` rows.
+3. Returns `Skill[]` matching `grove-www/src/lib/grove-api.v2.types.ts` EXACTLY:
+   ```ts
+   interface Skill {
+     id: string;                                    // uuid for the registry entry
+     slug: string;                                  // human slug, e.g. 'daily-vault-review'
+     name: string;
+     domain: "knowledge"|"journal"|"relationships"|"health"|"finances"|"system";
+     author: "builtin";
+     description: string;
+     sampleTasks: string[];                         // camelCase, NOT sample_tasks
+     cadenceOptions: Cadence[];                     // Cadence: "daily"|"weekly"|"on-trigger"|"on-demand"
+     defaultCadence: Cadence | null;
+     defaultArtifactType: TaskArtifactType;         // "surface"|"note-change"|"note-create"|"note-link"|"concept-merge"
+     installState: "installed"|"available"|"disabled";
+     starterPendingTasks?: string[];
+   }
+   ```
+4. `installState` derivation from per-vault `skill_configs`: row missing or `enabled=0` → `"available"`; row `enabled=1` → `"installed"`; explicit user-disable (future Pro feature) → `"disabled"`.
+5. Default config when no `skill_configs` row exists: `defaultCadence` from registry + `installState: "available"`.
+
+**Skill registry contents — 3 skills only** (Scope Cop cut: drop the 4 metadata-only entries that would render as v3-deferred no-op tabs):
+1. `daily-vault-review` (auto-installed on first run; executor in P22-5)
+2. `concept-graph-cleanup` (executor in P23-3)
+3. `dup-people-detection` (executor in P23-4)
+
+Metadata-only entries (`relationship-surface`, `dormant-thread-surface`, `weekly-journal-patterns`, `perishable-audit`) land in v3 alongside their executors. SPEC §9's anti-pattern argument ("browse tab full of 'coming soon' is worse than no tab") applies to the registry too.
+
+**SELECT field aliasing** (avoid hand-converted mapper): `SELECT skill_slug AS slug, enabled, cadence AS defaultCadence, ...` so query results pass through as the typed shape directly. No `db-types.ts` mapper needed (Architecture Smell #3).
+
+**Files:**
+- `src/skills/registry.ts` (new — ~150 LOC, 3 skills' metadata)
+- `src/v2-skills.ts` (new — exports `handleV2SkillsList`)
+- `src/proxy.ts` (route dispatch within the `vaultV1Match` block at line 1742+ for `restPath === "/v1/skills"`)
+
+**Tests:**
+- `test/v2-skills-list.test.ts` — returns 3 registry skills; merges per-vault config; field shape matches the TS `Skill` interface verbatim (typecheck via `as Skill` assertion in test).
+
+**Acceptance criteria:**
+- `curl https://api.grove.md/v/personal/v1/skills` with a valid key returns 3 entries.
+- Each entry's field shape passes `JSON.stringify(skill) === JSON.stringify(skill satisfies Skill)`.
+- `installState` is `"installed"` for skills with `enabled=1`, `"available"` otherwise.
+
+#### P21-6: Probe verification
+
+After P21-1 through P21-5 ship to prod, run `npm run probe:api` in grove-www against `https://api.grove.md`. Expected: 4/5 VERIFIED (writes still GAP; that's Phase 22). Phase 21 closes when the 4 reads pass. Not a code PR — a verification step.
+
+**Acceptance criteria:**
+- `cd ~/src/grove-www && npm run probe:api -- --vault=personal` reports 4 VERIFIED on the read endpoints.
+- `POST /v1/tasks/<id>/run` still shows GAP — expected; Phase 22 unblocks.
+
+#### Phase 21 success criteria
+
+- All P21-1 through P21-5 PRs merged + deployed.
+- `npm run probe:api` reports 4/5 VERIFIED in grove-www (writes blocked on Phase 22).
+- A handcrafted task in the personal vault DB renders on `/{handle}/personal` in a Vercel preview deploy (with `GROVE_API_MODE=live`).
+- The 4 read endpoints handle auth failures (401), cross-vault (403), and missing resources (404) per existing proxy conventions.
+
+---
+
+### Phase 22: v2 Server Surface — Writes
+
+> **Spec revised 2026-05-13 after 3-panel review.** Required fixes for implementing agents:
+> 1. **Routing:** all endpoints use `/v/<slug>/v1/*` path-style; register handlers via `vaultV1Match` block at `src/proxy.ts:1691`. NEVER `?vault=<slug>` (bypasses auth).
+> 2. **Module split:** `src/v2-tasks.ts` (run/defer/dismiss/review) and `src/v2-skills.ts` (configure/enable/disable). NOT a generic `v2-routes.ts` — matches existing share.ts / waitlist.ts convention.
+> 3. **P22-1 run endpoint is async (NOT synchronous with 25s timeout).** Architect smell #1: scheduler/worker drains pending tasks out-of-band. Run endpoint just transitions `state=pending` (or sets a `forced=1` flag for queue-jump), returns 202 with current state. Dashboard polls. The task worker loop lives in `src/scheduler.ts` (Phase 23) but P22-1 must work end-to-end before P23 lands — so P22-1 ALSO ships a minimal in-process worker (setInterval polling `tasks WHERE state='pending' LIMIT 1`) that P23-1 then formalizes.
+> 4. **`task_results` provenance as single `provenance_json TEXT` column**, not 5 columns. Matches `GroveProvenance` in `grove-www/src/lib/grove-api.v2.types.ts`. Update P21-2 schema accordingly during implementation.
+> 5. **P22-5 hard-fails on cost ceiling exceeded** — no `partial: true` sampling. Scope Cop SHRINK #1.
+> 6. **Refine action user-id mapping:** `confirm-durable` uses `by: <api_key.user_id>` from auth resolution; `refine` uses `by: "human"` (per Phase 22 design decision #2, verified at `src/cli.ts:954`).
+> 7. **Cross-DB ATTACH pattern** (for flag write-through in P22-2/P22-3): document the pattern in `CLAUDE.md` Architecture rules as a new precedent (no current `ATTACH` usage in `src/*.ts`). Use `BEGIN IMMEDIATE; ATTACH 'grove.db' AS control; UPDATE control.graph_health_flags SET resolved_at = datetime('now') WHERE id = ?; COMMIT;`.
+> 8. **Rate limit `/run`:** route triggers an LLM call. Inherit existing `rateLimiter` pattern at `proxy.ts:161`; per-key cap 20/min already applies to mutations.
+> 9. **Metrics:** emit `grove_tasks_run_total{state="done|review|failed"}` counter; existing metrics.ts pattern.
+
+**Goal:** Stand up the 6 mutation endpoints + the first skill executor (`daily-vault-review`). After Phase 22 ships, users can disposition review items (c/r/x/s), defer/dismiss pending tasks, configure/enable/disable skills, and the daily-vault-review skill produces real review items from the existing graph_health_flags and discovery_results pipelines.
+
+**Prerequisites:** Phase 21 complete (P21-1 through P21-5 merged + deployed).
+
+**Status:** Graduated 2026-05-13.
+
+**Scope boundary:**
+- IN: 6 mutation endpoints; `daily-vault-review` executor; cost ceiling logic per executor (mirror P7-COST-* watchdog patterns); `graph_health_flags.resolved_at` write-through on task disposition derived from a flag; refine-action provenance attribution via existing `write_provenance` `{voice: "durable", by: "human"}`.
+- OUT (Phase 23): grove-scheduler PM2 process; cadenced cron; first-run choreography; concept-graph-cleanup + dup-people-detection executors.
+- OUT entirely: skill marketplace; per-skill custom prompts via UI; per-user cost ceiling (v2 ships single tier per SPEC §8).
+
+#### Locked design decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | **Write-through to `graph_health_flags.resolved_at`** when a task derived from a flag is dispositioned | Prevents the same flag re-appearing as a task on the next cron tick. Tighter coupling accepted; falls out cleanly during subsume Step 2 when the flag table eventually goes away. Column is `resolved_at` (not `dismissed_at`) per existing schema at `src/db.ts:256-264`. |
+| 2 | **Refine action attributes via `by: "human"`** in the existing per-commit-trailer system | Verified at `src/cli.ts:954` + `src/server.ts:116` — the validator accepts any string for `by`; only `voice` is enum-constrained. No new attribution code needed. |
+| 3 | **`daily-vault-review` reads from existing `graph_health_flags` + `discovery_results`** | Subsume Step 1 of the IDEAS shaping's two-step plan — `tasks` is a new surface; existing producers continue writing to their own tables. Step 2 (retire the old tables) is a separate IDEAS entry, post-v2-stabilization. |
+| 4 | **Per-run token ceiling enforced inside the executor**, not at the route | Different skills have wildly different vocabulary sizes; the ceiling is skill-specific. Mirror the P7-COST-* watchdog pattern (per-day cap + per-note cooldown). |
+| 5 | **`POST /v1/tasks/<id>/run` is synchronous** for v2 (no separate `/poll` endpoint) | Vercel function timeouts make long-running run-then-poll a v3 problem (matches grove-www SPEC §11). v2 executors hard-cap at ~25s; longer-running runs return a `state='running'` response and continue in the background. |
+| 6 | **Mutations bypass the write queue** (don't serialize with note writes) | `tasks` updates touch per-vault state.db only, not the vault repo. The existing write queue is for vault repo serialization; tasks have no such constraint. |
+
+#### P22-1: `POST /v1/tasks/<id>/run` (`src/v2-routes.ts`, `src/v2-task-run.ts`)
+
+Triggers a task. For `pending` tasks, transitions to `running`, fires the skill executor, updates state on completion. For `review` tasks, idempotent — returns the existing review state without re-running (the user uses `/review` to disposition).
+
+**Behavior:**
+1. Read `tasks WHERE id = ?` → 404 if not found, 403 if cross-vault.
+2. If `state IN ('done', 'dismissed', 'failed')` → 409 with current state body.
+3. If `state = 'review'` → 200 returning current task without re-run.
+4. If `state = 'running'` → 409 "task already running".
+5. Otherwise (`pending`): set `state='running', started_at=now()`; spawn executor via `src/skills/<slug>.ts`; on completion update state to `review` (if artifact requires confirmation) or `done` (if surface-only and auto-confirmed); write `task_results`.
+6. Hard timeout at 25s (Vercel function ceiling); on timeout, leave `state='running'` and return 202 with `{state: 'running', message: 'still working — refresh in a minute'}`.
+7. On executor error: `state='failed'`, response 200 with error in artifact.
+
+**Files:**
+- `src/v2-routes.ts` (route handler)
+- `src/v2-task-run.ts` (new — execution dispatcher)
+- `src/proxy.ts` (dispatch `/v1/tasks/<id>/run` POST)
+
+**Tests:**
+- `test/v2-task-run.test.ts` — happy path (pending → done with stub executor); idempotency on review state; 409 on terminal states; timeout returns 202 with running state; failed executor writes failed state + artifact.
+
+**Acceptance criteria:**
+- `curl -X POST /v1/tasks/<id>/run` transitions a pending task through running → review/done.
+- `state IN (done, dismissed, failed)` returns 409.
+- `state = running` returns 409.
+- Timeout returns 202 with `running` state; user refreshes to see the result.
+
+#### P22-2: `POST /v1/tasks/<id>/defer` + `POST /v1/tasks/<id>/dismiss` (`src/v2-routes.ts`)
+
+Simple state transitions. No executor involvement.
+
+**Behavior:**
+1. `/defer` accepts `{until: ISO_8601}` in body. Sets `scheduled_for = until`. Only valid for `state IN ('pending', 'review')` — others return 409.
+2. `/dismiss` sets `state = 'dismissed', updated_at = now()`. Idempotent.
+3. If the task carries `source_flag_id` (i.e., derived from a `graph_health_flags` row): on `/dismiss`, ALSO update the flag's `resolved_at` in control.db (cross-DB write — both happen in a single transaction via attached DB).
+
+**Files:**
+- `src/v2-routes.ts` (extended)
+- `src/proxy.ts` (dispatch)
+
+**Tests:**
+- `test/v2-task-defer.test.ts` — defer on pending updates `scheduled_for`; defer on done returns 409.
+- `test/v2-task-dismiss.test.ts` — dismiss is idempotent; write-through to `graph_health_flags` when source_flag_id present; no write-through when source_flag_id null.
+
+**Acceptance criteria:**
+- `/defer` with valid ISO sets `scheduled_for` field.
+- `/defer` with bad date format returns 400.
+- `/dismiss` is idempotent.
+- A task with `source_flag_id` dispositioned via `/dismiss` updates `graph_health_flags.resolved_at` in the same write.
+
+#### P22-3: `POST /v1/tasks/<id>/review` (`src/v2-routes.ts`, `src/v2-task-review.ts`)
+
+The disposition endpoint for review-state tasks. Accepts `{action: "confirm-durable" | "refine" | "dismiss" | "mark-stale", refinement?: string}`. Routes per action.
+
+**Behavior:**
+1. Validate task in `state = 'review'` — 409 otherwise.
+2. **`confirm-durable`**: if artifact is a note-change, apply the change to the vault repo via the write queue (existing `vault-ops.ts` write path) with provenance `{voice: "durable", by: "<user-id>"}`. Update `tasks.state = 'done'`. If artifact is surface-only, just update state.
+3. **`refine`**: requires `refinement` body field. Apply a user-authored edit to the underlying note (path from artifact) via write queue with provenance `{voice: "durable", by: "human"}`. Update `tasks.state = 'done'`. (Verified: per-commit-trailer system supports `by: "human"` — see Phase 22 design decision #2.)
+4. **`dismiss`**: same path as `/dismiss` (state → dismissed + flag write-through if applicable).
+5. **`mark-stale`**: artifact stays untouched; `tasks.state = 'dismissed', tasks.body` gets a stale marker appended.
+
+**Files:**
+- `src/v2-routes.ts` (route handler)
+- `src/v2-task-review.ts` (new — action dispatch + write queue integration)
+- `src/proxy.ts` (dispatch)
+
+**Tests:**
+- `test/v2-task-review.test.ts` — each of the 4 actions; confirm-durable on note-change goes through write queue with correct provenance; refine produces a `by: "human"` commit; non-review state returns 409.
+
+**Acceptance criteria:**
+- All 4 action kinds disposition correctly.
+- `confirm-durable` on a note-change artifact produces a vault commit with `Provenance-Voice: durable, Provenance-By: <user-or-human>`.
+- `refine` produces a vault commit with `Provenance-Voice: durable, Provenance-By: human`.
+- Non-review state returns 409 with body `{state: <current>}`.
+
+#### P22-4: `POST /v1/skills/<slug>/{configure,enable,disable}` (`src/v2-routes.ts`)
+
+Skill config writes. Updates `skill_configs` per-vault state.db rows.
+
+**Behavior:**
+1. `/configure` accepts `{cadence: "daily" | "weekly" | "on-demand"}`. UPSERT into `skill_configs`.
+2. `/enable` UPSERT with `enabled = 1`. Sets `next_run_at` based on cadence (1 day from now for daily, 1 week for weekly, NULL for on-demand).
+3. `/disable` UPSERT with `enabled = 0, next_run_at = NULL`.
+4. All three return the post-update `Skill` shape per grove-www's type.
+5. Skill slug must exist in `src/skills/registry.ts` — 404 otherwise.
+
+**Files:**
+- `src/v2-routes.ts` (extended)
+- `src/proxy.ts` (dispatch)
+
+**Tests:**
+- `test/v2-skill-configure.test.ts` — configure → cadence updated, next_run_at recomputed.
+- `test/v2-skill-enable-disable.test.ts` — enable/disable round-trip; next_run_at NULL on disable + on-demand cadence.
+
+**Acceptance criteria:**
+- `/configure` with valid cadence updates the row; invalid cadence returns 400.
+- `/enable` sets `next_run_at` to the cadence's next tick.
+- `/disable` clears `next_run_at`.
+- Unknown skill slug returns 404.
+
+#### P22-5: `daily-vault-review` executor (`src/skills/daily-vault-review.ts`)
+
+The first real executor. Reads existing `graph_health_flags` + recent `discovery_results` to construct surface-only review tasks. Subsume Step 1 — old producers untouched; this skill READS them.
+
+**Behavior:**
+1. Module exports `runDailyVaultReview(vault, options): Promise<TaskResult>`.
+2. `options.mode`: `"surface-only" | "writes-allowed"` (first-run forces surface-only; cadenced runs default to writes-allowed for note-change artifacts).
+3. `options.tokenCeiling`: per-run token cap; if exceeded, executor calls `shouldSample()` and processes a representative slice; surfaces `partial: true` in artifact + a "this run processed X% of your vault" note.
+4. Reads up to 5 unresolved `graph_health_flags` rows + up to 5 high-confidence `discovery_results` (e.g., entity merges with cosine ≥ 0.9). Constructs 3–5 review tasks per run (configurable cap).
+5. Each task: `skill_slug = 'daily-vault-review'`, `source_flag_id` set when derived from a flag, body contains the LLM-generated framing.
+6. LLM call via Anthropic SDK (claude-haiku-4-5 for cost — mirror P7-COST-* pattern). Prompt cached.
+7. Cost ceiling enforcement: pre-call estimate; abort with `partial: true` artifact if would exceed.
+
+**Files:**
+- `src/skills/daily-vault-review.ts` (new — ~300 LOC)
+- `src/skills/cost-ceiling.ts` (new helper — ~50 LOC, shared with future executors)
+- `src/skills/registry.ts` (extended with executor reference)
+
+**Tests:**
+- `test/skills-daily-vault-review.test.ts` — fixture vault with seeded graph_health_flags + discovery_results produces expected task count; surface-only mode never calls write queue; writes-allowed mode produces note-change artifacts; token ceiling forces partial mode.
+
+**Acceptance criteria:**
+- Running the executor on a seeded test vault produces 3–5 tasks.
+- `mode: "surface-only"` produces no vault repo writes regardless of artifact type.
+- `mode: "writes-allowed"` can produce note-change artifacts that survive the disposition path.
+- Token ceiling exceeded → `artifact.partial: true` + percentage in artifact.message.
+
+#### Phase 22 success criteria
+
+- All P22-1 through P22-5 PRs merged + deployed.
+- `npm run probe:api` reports 5/5 VERIFIED.
+- A user clicking `c` on a review item in the v2 dashboard (Vercel preview deploy with `GROVE_API_MODE=live`) successfully transitions it to `done` and the next render shows it under "cleared this week."
+- A task derived from a `graph_health_flags` row, dispositioned via `/dismiss`, also resolves the flag (verified via SQL spot-check).
+- The `daily-vault-review` executor, invoked via `/v1/tasks/<id>/run` against a manually-enqueued task, produces a real artifact.
+
+---
+
+### Phase 23: v2 Server Surface — Autonomy
+
+> **Spec revised 2026-05-13 after 3-panel review.** Required fixes for implementing agents:
+> 1. **Scheduler is one PM2 process PER VAULT** (`grove-scheduler-<slug>`), pinned via `GROVE_VAULT_ID` env var — mirrors `src/discovery-worker.ts:30` + `ecosystem-gen.ts:152`. NOT a single global iterator over `forEachVaultDb`. The 1-min cron tick + task worker loop both live in the same process (matches discovery-worker pattern that runs `startDiscoveryLoop` AND `startHealthCronLoop` together).
+> 2. **First-run choreography does NOT spawn an LLM call inside `vault-provision.ts`** (Architecture Smell #5). Instead: `vault-provision.ts` after provisioning flips a new `vaults.bootstrap_pending = 1` flag (P8 schema addition). `bootstrapFirstRun()` lives in `src/skills/first-run.ts`; the scheduler's boot pass + each tick checks `vaults.bootstrap_pending` and runs bootstrap on match (resetting the flag). User sees `state='running'` on the first review item within ~60s of vault-create instead of inline-blocking provision.
+> 3. **Orphan recovery on scheduler boot**: mirror `discovery.ts:recoverOrphanedDiscoveryProcessing` (fix #151) — `UPDATE tasks SET state='pending' WHERE state='running' AND started_at < datetime('now', '-5 minutes')`. Add `idx_tasks_state_started_at` to P21-2 schema.
+> 4. **P23-5 watchdog → CUT from Phase 23.** Scope Cop CUT #3 — runbook hardening, not part of v2 ship. File as separate IDEAS spark post-Phase-23.
+> 5. **Slow-vault timeout UX**: the first-run task lingering in `state='running'` is the contract; grove-www renders the "still working — refresh in a minute" state by detecting `state='running' AND started_at > 25s ago`. No special HTTP response needed.
+> 6. **Decision lock (was waffling in original P23-1):** scheduler tick = ENQUEUE only (INSERT pending task + UPDATE next_run_at). Task worker loop (also in `src/scheduler.ts`) = DRAIN pending tasks one-at-a-time via the same code path P22-1 uses. Two distinct setInterval loops in one process.
+
+**Goal:** The cadenced layer. New `grove-scheduler` PM2 process evaluates `skill_configs` on a 1-minute tick and enqueues tasks. `vault-provision.ts` first-run hook auto-installs `daily-vault-review` and produces a real review item within 25 seconds of vault creation. Two more skill executors (`concept-graph-cleanup`, `dup-people-detection`) round out the v2 starter slate.
+
+**Prerequisites:** Phases 21 + 22 complete.
+
+**Status:** Graduated 2026-05-13.
+
+**Scope boundary:**
+- IN: new `grove-scheduler` PM2 process; 1-minute cron tick over `skill_configs`; first-run choreography hook in `vault-provision.ts`; hard 25s server-side timeout + partial-state response; `concept-graph-cleanup` executor; `dup-people-detection` executor; watchdog (5xx rate on `/v1/tasks*` exceeding 1% in 5min) tied to the existing alert path.
+- OUT (v3): streaming/SSE; the remaining 4 skills (relationship-surface, dormant-thread-surface, weekly-journal-patterns, perishable-audit); per-user cost ceiling tiers; subsume Step 2 (retire discovery_queue + graph_health_flags as standalone tables — separate IDEAS entry).
+
+#### Locked design decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | **New `grove-scheduler` PM2 process** (not extension of `grove-discovery-worker`) | Decouples failure modes. Scheduler crashing doesn't take down discovery. Matches existing one-process-per-concern pattern. |
+| 2 | **1-minute cron tick** | Cheap to evaluate `skill_configs WHERE next_run_at <= now()`. Avoids the polling-too-often vs polling-too-rarely trap. |
+| 3 | **First-run produces a real review item within 25s** | The trust contract from SPEC §3, §12. User signs up, opens dashboard, sees something concrete. Hard 25s timeout protects this. |
+| 4 | **Slow-vault fallback: "still working — refresh in a minute" state** | No sampling on first run (undermines trust); no SSE (v3-deferred per SPEC §11). Honest about reality is the v2 ship. |
+| 5 | **First-run starter pending tasks pre-populated** | 3–5 tasks per skill registry's `sample_tasks` field, inserted as `state='pending'` so the user has obvious "things to run" on day one. |
+
+#### P23-1: `grove-scheduler` PM2 process (`src/scheduler.ts`, `src/ecosystem-gen.ts`)
+
+New PM2 process. 1-minute cron tick evaluates `skill_configs` across all vaults; enqueues tasks where `next_run_at <= now() AND enabled=1`.
+
+**Behavior:**
+1. New module `src/scheduler.ts` exports `startScheduler()`. Called from a thin `bin/scheduler.ts` entry point that PM2 launches.
+2. Tick: for each vault (via `forEachVaultDb`), select `skill_configs WHERE enabled=1 AND next_run_at <= now()`. For each: INSERT a task row with `state='pending', skill_slug=<slug>, scheduled_for=now()`; UPDATE `skill_configs SET last_run_at=now(), next_run_at=<next per cadence>`.
+3. The scheduler enqueues but does NOT execute — execution is via `POST /v1/tasks/<id>/run` (P22-1) called by a separate worker (re-use existing discovery-worker pattern: `src/discovery-worker.ts` polls `discovery_queue`; here, a similar polling loop on `tasks WHERE state='pending'`). Actually — simpler design: the scheduler ITSELF also runs the executor synchronously. Worker concern collapses into scheduler.
+4. PM2 ecosystem entry generated by `src/ecosystem-gen.ts`: `{name: 'grove-scheduler', script: 'dist/scheduler.js', autorestart: true, max_memory_restart: '512M'}`.
+
+**Files:**
+- `src/scheduler.ts` (new — ~150 LOC)
+- `src/scheduler-bin.ts` (new — thin entry point)
+- `src/ecosystem-gen.ts` (extended)
+- `package.json` (build script wires scheduler into dist output)
+
+**Tests:**
+- `test/scheduler-tick.test.ts` — tick on seeded `skill_configs` enqueues correct task; recomputes next_run_at per cadence; idempotent if run twice within a tick window.
+
+**Docs:** Update `CLAUDE.md` Architecture section adding scheduler to process list. Update `PLAN.md` Current State.
+
+**Acceptance criteria:**
+- A skill_configs row with `next_run_at` in the past enqueues exactly one task per tick.
+- After enqueue, `next_run_at` advances by the cadence (1d / 7d / NULL).
+- `on-demand` cadence never auto-enqueues (only via P22-1 manual run).
+- Scheduler crash doesn't affect grove-server or grove-proxy.
+
+#### P23-2: First-run choreography (`src/vault-provision.ts`, `src/skills/first-run.ts`)
+
+Hook into existing `vault-provision.ts`. After a vault is created, auto-install `daily-vault-review`, enqueue an immediate `surface-only` run, and pre-populate 3–5 starter pending tasks. The user sees something concrete within 25s of signup.
+
+**Behavior:**
+1. Extend `vault-provision.ts`: after vault is provisioned, call `bootstrapFirstRun(vault)` from `src/skills/first-run.ts`.
+2. `bootstrapFirstRun()`:
+   a. INSERT `skill_configs` row for `daily-vault-review` with `enabled=1, cadence='daily', next_run_at=<tomorrow 6am PT>`.
+   b. INSERT 3–5 `tasks` rows with `state='pending'`, populated from each enabled skill's `sample_tasks` registry field.
+   c. INSERT one immediate `tasks` row for `daily-vault-review` with `state='pending', scheduled_for=now()`.
+   d. Synchronously invoke `runDailyVaultReview(vault, {mode: 'surface-only', tokenCeiling: <first-run-cap>})` — bound by hard 25s timeout.
+   e. On timeout: leave the task in `state='running'`; the dashboard renders the "still working — refresh in a minute" state.
+   f. On success: task transitions to `state='review'` with a real artifact; first review item is live.
+3. Idempotency: `bootstrapFirstRun()` no-ops if `skill_configs` already has a row for `daily-vault-review` in this vault.
+
+**Files:**
+- `src/skills/first-run.ts` (new — ~100 LOC)
+- `src/vault-provision.ts` (extended)
+
+**Tests:**
+- `test/skills-first-run.test.ts` — bootstrap on a fresh vault creates 1 skill_configs + 4–6 tasks + 1 immediate-review task; idempotent on re-run; timeout case leaves running state.
+
+**Acceptance criteria:**
+- Provisioning a new vault triggers first-run bootstrap.
+- Within 25s, the vault has at least 3 pending tasks + 1 task in either `review` or `running` state.
+- Re-calling `bootstrapFirstRun` is a no-op.
+- Slow-vault timeout produces a `running` task that the dashboard renders as the "still working" state.
+
+#### P23-3: `concept-graph-cleanup` executor (`src/skills/concept-graph-cleanup.ts`)
+
+Second skill executor. Finds thin concepts (<100 words, no outbound links), orphans, suggests merges. Produces `note-change` artifacts requiring confirm-durable.
+
+**Behavior:**
+1. Reads `graph_health` metrics + vault note list. Identifies candidates: thin concepts, orphans, near-duplicate concept titles.
+2. For each candidate (capped at ~3 per run): generates an LLM-synthesized proposed edit (claude-haiku-4-5).
+3. Produces `note_change_json` artifact with the proposed diff; `state='review'` so user must disposition before applying.
+4. Cost ceiling via shared `cost-ceiling.ts` helper.
+
+**Files:**
+- `src/skills/concept-graph-cleanup.ts` (new — ~250 LOC)
+- `src/skills/registry.ts` (executor reference added)
+
+**Tests:**
+- `test/skills-concept-graph-cleanup.test.ts` — seeded fixture vault with thin concepts produces expected task count + artifact shape.
+
+**Acceptance criteria:**
+- Run on seeded fixture produces 1–3 review tasks with `note_change_json` artifacts.
+- Tasks land in `state='review'` (not `done`) — user must explicitly confirm.
+- Token ceiling enforced.
+
+#### P23-4: `dup-people-detection` executor (`src/skills/dup-people-detection.ts`)
+
+Third skill executor. Finds People notes with semantically-close names. Produces merge proposals as `note-change` artifacts.
+
+**Behavior:**
+1. Iterates `Resources/People/*.md` paths from the vault.
+2. For each pair: combine cosine similarity (≥0.85 on Voyage embeddings) with Levenshtein name distance.
+3. Top candidates (capped ~3 per run) get LLM-synthesized merge proposals (claude-haiku-4-5).
+4. Artifact is `note_change_json` proposing the merge (target note + redirect from the duplicate).
+5. Cost ceiling enforced.
+
+**Files:**
+- `src/skills/dup-people-detection.ts` (new — ~250 LOC)
+- `src/skills/registry.ts` (executor reference added)
+
+**Tests:**
+- `test/skills-dup-people-detection.test.ts` — seeded fixture with two near-duplicate People notes produces a merge proposal task.
+
+**Acceptance criteria:**
+- Two semantically-close People notes in the test vault produce exactly one merge proposal.
+- Artifact contains both source paths + proposed unified content.
+- Task lands in `state='review'`.
+
+#### P23-5: Watchdog + auto-revert path
+
+Tie `/v1/tasks*` 5xx into the existing watchdog. If error rate >1% over 5 min, page + suggest reverting `GROVE_API_MODE=live` to `mock` in Vercel prod (re-engaging the prod guard).
+
+**Files:**
+- `src/watchdog.ts` (extend existing — new metric source for `/v1/tasks*`)
+- `scripts/watchdog.sh` (alert wiring if applicable)
+
+**Acceptance criteria:**
+- Synthetic 5xx burst on `/v1/tasks*` in test fires the alert path.
+- Alert message includes the revert instruction (flip Vercel env var).
+
+#### Phase 23 success criteria
+
+- All P23-1 through P23-5 PRs merged + deployed.
+- A fresh signup → vault creation → first-run completes → user sees a review item + 3–5 pending tasks within 30s.
+- The `grove-scheduler` process runs the daily-vault-review cron at 6am PT and the user sees a new review item the next morning.
+- 5xx rate watchdog on `/v1/tasks*` is wired into the existing alert path.
+
+---
+
 ## Design Decisions Log
 
 Decisions made during planning. Reference these when implementing — don't re-litigate settled questions.
@@ -1519,6 +2084,29 @@ Decisions made during planning. Reference these when implementing — don't re-l
 - Phase 20A (Access consolidation, 1 batch, cross-repo):
   - p20a-1: 2 parallel entries — `p20a-grove-www` (access route + drawer + redirects + nav + avatar menu + delete graph/lifecycle/d3) ‖ `p20a-grove` (remove `handleStatusGraph`)
 - Phase 20B (Home rebuild): **stub only** — do not expand until Phase A feedback exists
+
+**Phase 21 — v2 Server Surface — Reads** ⏳ (graduated from IDEAS.md 2026-05-13, panel-reviewed 2026-05-13):
+- Unblocks grove-www's `GROVE_API_MODE=live` once 4/5 endpoints VERIFIED via `npm run probe:api`
+- p21-1: per-vault SQLite tooling (`getVaultDb`) — solo
+- p21-2: tasks/task_results/skill_configs schema (per-vault migration 002) — solo, `noAutoMerge`
+- p21-3: 3 parallel entries — `p21-tasks-list` ‖ `p21-task-detail-throughput` ‖ `p21-skills-list`
+
+**Phase 22 — v2 Server Surface — Writes** ⏳ (graduated from IDEAS.md 2026-05-13, panel-reviewed):
+- Brings probe to 5/5 VERIFIED; review actions (c/r/x/s) work end-to-end
+- p22-1: 2 parallel — `p22-task-run` (async, worker drains) ‖ `p22-task-defer-dismiss`
+- p22-2: 2 parallel — `p22-task-review` (write queue + provenance trailers) ‖ `p22-skill-config`
+- p22-3: solo — `p22-daily-vault-review` executor + cost ceiling
+
+**Phase 23 — v2 Server Surface — Autonomy** ⏳ (graduated from IDEAS.md 2026-05-13, panel-reviewed):
+- First-run → review item within 25s; cadenced cron runs daily; 2 more skill executors
+- p23-1: solo — per-vault `grove-scheduler-<slug>` PM2 process (cron tick + worker drain)
+- p23-2: solo — first-run choreography via `vaults.bootstrap_pending` flag
+- p23-3: 2 parallel — `p23-concept-graph-cleanup` ‖ `p23-dup-people-detection`
+- P23-5 watchdog CUT (separate IDEAS spark post-Phase-23)
+
+**Then (~1 PR each):**
+- grove-www: implement `src/lib/grove-api.v2.live.ts` (replace 11 throws); set `GROVE_API_MODE=live` in Vercel prod env
+- grove-www: cherry-pick swap commit `9fc91db` from `backup/v2-unpushed-2026-05-13` (flips signed-in default landing to v2)
 
 **Phase 10** ✅ — Vault-agnostic structure: config, auto-detect, notes-validate, stats, CLI (2026-04-20) + discovery/server/rest/cli decoupling (2026-04-21)
 **Phase 11** ✅ — Note lifecycle: DELETE (soft+hard), PATCH move with wikilink update, MCP write_note actions, CLI (2026-04-20)
