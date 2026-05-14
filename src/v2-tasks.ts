@@ -28,6 +28,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "./db.js";
 import { getVaultDb } from "./db-per-vault.js";
 import { SKILL_REGISTRY, type SkillMetadata } from "./skills/registry.js";
+import { dispatchTaskRun } from "./v2-task-run.js";
 import type { VaultContext } from "./vault-router.js";
 import type { Cadence, TaskState } from "./db-types.js";
 
@@ -388,4 +389,26 @@ export function handleV2TasksList(
     "Access-Control-Allow-Origin": corsOrigin(),
   });
   res.end(JSON.stringify(payload));
+}
+
+/**
+ * Handle `POST /v/<slug>/v1/tasks/<id>/run` (P22-1).
+ *
+ * Thin HTTP wrapper over `dispatchTaskRun`. The state machine lives in
+ * `src/v2-task-run.ts` so unit tests can drive transitions without
+ * standing up a server. Auth and rate-limiting happen upstream in the
+ * proxy's `vaultV1Match` + `/v1/*` blocks.
+ */
+export function handleV2TaskRun(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  vault: VaultContext,
+  taskId: string,
+): void {
+  const { status, body } = dispatchTaskRun(vault, taskId);
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": corsOrigin(),
+  });
+  res.end(JSON.stringify(body));
 }

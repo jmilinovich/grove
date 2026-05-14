@@ -87,8 +87,9 @@ import {
   deriveShareStatus,
   type SharedLink,
 } from "./share.js";
-import { handleV2TasksList } from "./v2-tasks.js";
+import { handleV2TasksList, handleV2TaskRun } from "./v2-tasks.js";
 import { handleV2TaskDetail } from "./v2-task-detail.js";
+import { startTaskWorker } from "./v2-task-run.js";
 import { handleV2SkillsList } from "./v2-skills.js";
 import {
   encryptVault,
@@ -2546,6 +2547,20 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // POST /v1/tasks/<id>/run — v2 task execution dispatch (P22-1).
+    // Async: flips pending→running and returns 202 immediately; the
+    // in-process task worker (started below at boot) drains running
+    // tasks out-of-band. Path-style only — `vaultV1Match` enforces auth
+    // and role; the /v1/* block above applied rate limit (write bucket).
+    const taskRunMatch =
+      restIsVaultScoped && req.method === "POST"
+        ? /^\/v1\/tasks\/([^/?#]+)\/run$/.exec(restPath)
+        : null;
+    if (taskRunMatch) {
+      handleV2TaskRun(req, res, restCtx, taskRunMatch[1]!);
+      return;
+    }
+
     // GET /v1/skills — v2 skills index (P21-5). Path-scoped only.
     if (restIsVaultScoped && restPath === "/v1/skills" && req.method === "GET") {
       handleV2SkillsList(res, restCtx, REST_CORS_ORIGIN);
@@ -3880,6 +3895,16 @@ import("./vault-usage.js")
     console.log(`[grove] vault-usage flush timer started (60s interval)`);
   })
   .catch((err) => console.error(`[grove] vault-usage start failed: ${(err as Error).message}`));
+
+// P22-1: start the in-process task worker (drains state='running' rows
+// across vaults). Phase 23 supersedes this with a per-vault PM2 process,
+// but until then proxy.ts owns the loop so /v1/tasks/<id>/run completes
+// end-to-end. Disable with GROVE_DISABLE_TASK_WORKER=1 (tests, scheduler
+// rollouts).
+if (!process.env.GROVE_DISABLE_TASK_WORKER) {
+  startTaskWorker();
+  console.log(`[grove] task worker started (1s interval)`);
+}
 
 process.on("SIGHUP", () => {
   try {
