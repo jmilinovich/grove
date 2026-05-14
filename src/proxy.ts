@@ -87,7 +87,12 @@ import {
   deriveShareStatus,
   type SharedLink,
 } from "./share.js";
-import { handleV2TasksList, handleV2TaskRun } from "./v2-tasks.js";
+import {
+  handleV2TasksList,
+  handleV2TaskRun,
+  handleV2TaskDefer,
+  handleV2TaskDismiss,
+} from "./v2-tasks.js";
 import { handleV2TaskDetail } from "./v2-task-detail.js";
 import { startTaskWorker } from "./v2-task-run.js";
 import { handleV2SkillsList } from "./v2-skills.js";
@@ -2558,6 +2563,27 @@ const server = createServer(async (req, res) => {
         : null;
     if (taskRunMatch) {
       handleV2TaskRun(req, res, restCtx, taskRunMatch[1]!);
+      return;
+    }
+
+    // POST /v1/tasks/<id>/defer — schedule a pending/review task (P22-2).
+    // POST /v1/tasks/<id>/dismiss — terminate a task; cross-DB ATTACH
+    // write-through resolves the originating `graph_health_flags` row
+    // when one is present (Phase 22 locked design decision #1).
+    const taskDeferMatch =
+      restIsVaultScoped && req.method === "POST"
+        ? /^\/v1\/tasks\/([^/?#]+)\/defer$/.exec(restPath)
+        : null;
+    if (taskDeferMatch) {
+      await handleV2TaskDefer(req, res, restCtx, taskDeferMatch[1]!);
+      return;
+    }
+    const taskDismissMatch =
+      restIsVaultScoped && req.method === "POST"
+        ? /^\/v1\/tasks\/([^/?#]+)\/dismiss$/.exec(restPath)
+        : null;
+    if (taskDismissMatch) {
+      await handleV2TaskDismiss(req, res, restCtx, taskDismissMatch[1]!);
       return;
     }
 

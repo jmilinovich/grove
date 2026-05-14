@@ -141,7 +141,7 @@ interface BlameSegmentRow {
  * property so tests that swap `GROVE_DB_PATH` via env vars pick up the
  * test-scoped path automatically.
  */
-function ensureControlAttached(vaultDb: Database.Database): void {
+export function ensureControlAttached(vaultDb: Database.Database): void {
   const attached = vaultDb.pragma("database_list") as Array<{ name: string }>;
   if (attached.some((row) => row.name === "control")) return;
   const controlPath = getDb().name;
