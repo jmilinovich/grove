@@ -114,3 +114,27 @@ export const SKILL_REGISTRY: readonly SkillMetadata[] = [
 export function getSkillBySlug(slug: string): SkillMetadata | undefined {
   return SKILL_REGISTRY.find((s) => s.slug === slug);
 }
+
+/**
+ * Dynamically load the executor module for a skill slug. Centralizes
+ * the slug → module wiring in the registry so the worker (v2-task-run)
+ * doesn't bake any one skill's path into its dispatch logic.
+ *
+ * Returns the imported module namespace (callers introspect for a `run`
+ * export) or null when the slug has no executor wired yet — e.g., the
+ * `concept-graph-cleanup` and `dup-people-detection` entries are still
+ * waiting on P23-3/P23-4 for their executors.
+ *
+ * Lazy `await import` avoids loading the Anthropic SDK and per-skill
+ * dependencies at module-eval time (the registry is hot — it's read on
+ * every backlog request).
+ */
+export async function loadSkillModule(slug: string): Promise<unknown | null> {
+  switch (slug) {
+    case "daily-vault-review":
+      return await import("./daily-vault-review.js");
+    // P23 wires concept-graph-cleanup + dup-people-detection.
+    default:
+      return null;
+  }
+}
