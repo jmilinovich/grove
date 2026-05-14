@@ -1402,7 +1402,7 @@ CREATE TABLE skill_configs (
 - Insert with invalid `state` enum value raises a SQLite constraint error.
 - `task_results` rows cascade-delete when their `tasks` row is deleted.
 
-#### P21-3: `GET /v/<slug>/v1/tasks` (`src/proxy.ts`, `src/v2-tasks.ts`)
+#### P21-3: `GET /v/<slug>/v1/tasks` (`src/proxy.ts`, `src/v2-tasks.ts`) ✅ COMPLETE 2026-05-14 (cf1b932)
 
 The list endpoint. Returns the `BacklogPayload` shape grove-www's `fetchBacklog` consumes. Single round-trip; no waterfall.
 
@@ -1428,7 +1428,7 @@ The list endpoint. Returns the `BacklogPayload` shape grove-www's `fetchBacklog`
 - Field names in JSON match grove-www's `grove-api.v2.types.ts` BacklogPayload (camelCase).
 - Missing/bad key returns 401; slug-mismatch returns 403; unknown vault returns 403.
 
-#### P21-4: `GET /v/<slug>/v1/tasks/<id>` (task detail)
+#### P21-4: `GET /v/<slug>/v1/tasks/<id>` (task detail) ✅ COMPLETE 2026-05-14 (cf1b932)
 
 The task-detail endpoint joins `tasks` + `task_results` + provenance blame. The throughput endpoint exposes the same throughput compute used by P21-3 for grove-www's standalone polling path (15s on-focus polling per SPEC §11).
 
@@ -1457,7 +1457,7 @@ The task-detail endpoint joins `tasks` + `task_results` + provenance blame. The 
 - `computeThroughput(vault_id)` helper used by P21-3's BacklogPayload returns a `ThroughputView`-shaped object (standalone `/v1/throughput` endpoint CUT — Scope Cop finding; only computed inside BacklogPayload now).
 - Both endpoints return 401/403 on auth failures matching P21-3's contract.
 
-#### P21-5: `GET /v/<slug>/v1/skills` + `src/skills/registry.ts`
+#### P21-5: `GET /v/<slug>/v1/skills` + `src/skills/registry.ts` ✅ COMPLETE 2026-05-14 (cf1b932)
 
 Standalone skills endpoint (grove-www's `fetchSkills` consumer — already included in P21-3's BacklogPayload, but the dedicated endpoint is needed for the `/skills` page + skill-detail page).
 
