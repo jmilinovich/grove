@@ -29,6 +29,11 @@ import { getDb } from "./db.js";
 import { getVaultDb } from "./db-per-vault.js";
 import { SKILL_REGISTRY, type SkillMetadata } from "./skills/registry.js";
 import { dispatchTaskRun } from "./v2-task-run.js";
+import {
+  dispatchTaskReview,
+  isReviewAction,
+  type ReviewAction,
+} from "./v2-task-review.js";
 import { ensureControlAttached } from "./v2-task-detail.js";
 import type { VaultContext } from "./vault-router.js";
 import type { Cadence, TaskState } from "./db-types.js";
@@ -530,6 +535,77 @@ export async function handleV2TaskDefer(
 
   const updated = fetchTaskById(vault.vaultId, taskId);
   sendJson(res, 200, updated);
+}
+
+// ─── P22-3: review disposition ───────────────────────────────────────────
+
+interface ReviewBody {
+  action: ReviewAction;
+  refinement?: string;
+}
+
+function parseReviewBody(raw: string): ReviewBody | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: "invalid_json" };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { error: "invalid_body" };
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (!isReviewAction(obj.action)) {
+    return { error: "invalid_action" };
+  }
+  const result: ReviewBody = { action: obj.action };
+  if (obj.refinement !== undefined) {
+    if (typeof obj.refinement !== "string") {
+      return { error: "invalid_refinement" };
+    }
+    result.refinement = obj.refinement;
+  }
+  return result;
+}
+
+/**
+ * `POST /v/<slug>/v1/tasks/<id>/review` — disposition a review-state task.
+ *
+ * Body shape: `{action, refinement?}` where action is one of
+ * `confirm-durable | refine | dismiss | mark-stale`. See
+ * `v2-task-review.ts` for per-action semantics.
+ *
+ * `userId` comes from the proxy's auth resolution — the API key's
+ * `user_id` is stamped as `Provenance-By` on confirm-durable commits.
+ */
+export async function handleV2TaskReview(
+  req: IncomingMessage,
+  res: ServerResponse,
+  vault: VaultContext,
+  taskId: string,
+  userId: string,
+): Promise<void> {
+  let raw: string;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: "read_error" });
+    return;
+  }
+  const parsed = parseReviewBody(raw);
+  if ("error" in parsed) {
+    sendJson(res, 400, parsed);
+    return;
+  }
+
+  const { status, body } = await dispatchTaskReview({
+    vault,
+    taskId,
+    userId,
+    action: parsed.action,
+    refinement: parsed.refinement,
+  });
+  sendJson(res, status, body);
 }
 
 /**

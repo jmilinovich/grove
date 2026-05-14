@@ -1608,7 +1608,7 @@ Simple state transitions. No executor involvement.
 - `/dismiss` is idempotent.
 - A task with `source_flag_id` dispositioned via `/dismiss` updates `graph_health_flags.resolved_at` in the same write.
 
-#### P22-3: `POST /v1/tasks/<id>/review` (`src/v2-routes.ts`, `src/v2-task-review.ts`)
+#### P22-3: `POST /v1/tasks/<id>/review` (`src/v2-routes.ts`, `src/v2-task-review.ts`) ✅ COMPLETE 2026-05-14 (774a6de)
 
 The disposition endpoint for review-state tasks. Accepts `{action: "confirm-durable" | "refine" | "dismiss" | "mark-stale", refinement?: string}`. Routes per action.
 
@@ -1633,7 +1633,7 @@ The disposition endpoint for review-state tasks. Accepts `{action: "confirm-dura
 - `refine` produces a vault commit with `Provenance-Voice: durable, Provenance-By: human`.
 - Non-review state returns 409 with body `{state: <current>}`.
 
-#### P22-4: `POST /v1/skills/<slug>/{configure,enable,disable}` (`src/v2-routes.ts`)
+#### P22-4: `POST /v1/skills/<slug>/{configure,enable,disable}` (`src/v2-routes.ts`) ✅ COMPLETE 2026-05-14 (917d6c3)
 
 Skill config writes. Updates `skill_configs` per-vault state.db rows.
 

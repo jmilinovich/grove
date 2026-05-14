@@ -92,10 +92,16 @@ import {
   handleV2TaskRun,
   handleV2TaskDefer,
   handleV2TaskDismiss,
+  handleV2TaskReview,
 } from "./v2-tasks.js";
 import { handleV2TaskDetail } from "./v2-task-detail.js";
 import { startTaskWorker } from "./v2-task-run.js";
-import { handleV2SkillsList } from "./v2-skills.js";
+import {
+  handleV2SkillsList,
+  handleV2SkillConfigure,
+  handleV2SkillEnable,
+  handleV2SkillDisable,
+} from "./v2-skills.js";
 import {
   encryptVault,
   unlockVault,
@@ -2587,9 +2593,51 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // POST /v1/tasks/<id>/review — disposition a review-state task (P22-3).
+    // Body {action: 'confirm-durable'|'refine'|'dismiss'|'mark-stale',
+    // refinement?: string}. confirm-durable stamps the operator's user_id
+    // as Provenance-By; refine stamps 'human'. dismiss inherits the P22-2
+    // flag write-through. Vault-scoped only — vaultV1Match enforces auth/role.
+    const taskReviewMatch =
+      restIsVaultScoped && req.method === "POST"
+        ? /^\/v1\/tasks\/([^/?#]+)\/review$/.exec(restPath)
+        : null;
+    if (taskReviewMatch) {
+      await handleV2TaskReview(
+        req,
+        res,
+        restCtx,
+        taskReviewMatch[1]!,
+        restKey.user_id,
+      );
+      return;
+    }
+
     // GET /v1/skills — v2 skills index (P21-5). Path-scoped only.
     if (restIsVaultScoped && restPath === "/v1/skills" && req.method === "GET") {
       handleV2SkillsList(res, restCtx, REST_CORS_ORIGIN);
+      return;
+    }
+
+    // POST /v1/skills/<slug>/{configure,enable,disable} — v2 skill config
+    // writes (P22-4). Path-scoped only — the `vaultV1Match` block above
+    // enforces auth + mutation role and the /v1/* block applied rate
+    // limiting (write bucket). Unknown verbs fall through to the legacy
+    // routes below.
+    const skillConfigMatch =
+      restIsVaultScoped && req.method === "POST"
+        ? /^\/v1\/skills\/([^/?#]+)\/(configure|enable|disable)$/.exec(restPath)
+        : null;
+    if (skillConfigMatch) {
+      const skillSlug = skillConfigMatch[1]!;
+      const verb = skillConfigMatch[2]!;
+      if (verb === "configure") {
+        await handleV2SkillConfigure(req, res, restCtx, skillSlug);
+      } else if (verb === "enable") {
+        await handleV2SkillEnable(req, res, restCtx, skillSlug);
+      } else {
+        await handleV2SkillDisable(req, res, restCtx, skillSlug);
+      }
       return;
     }
 
