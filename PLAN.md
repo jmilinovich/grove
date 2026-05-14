@@ -1308,7 +1308,7 @@ Revisit after Phase A feedback. Rewriting Overview without validated pain is a p
 | 5 | **Provenance read joins for note-change artifacts** | `tasks.<id>` detail joins `task_results.note_change_json` + `note_blame` rows so the v2 ProvenanceStrip can render per-segment badges without a second call. |
 | 6 | **No `/v1/tasks/run` (without ID)** for backlog-wide bulk action | SPEC scope: every action is per-task. Bulk "run all" is v3. |
 
-#### P21-1: Per-vault SQLite tooling (`src/db.ts`, `src/db-per-vault.ts`)
+#### P21-1: Per-vault SQLite tooling (`src/db.ts`, `src/db-per-vault.ts`) ✅ COMPLETE 2026-05-14 (9b0c1b9)
 
 Adds the infrastructure for tasks/task_results/skill_configs to live in `~/.grove/vaults/<slug>/state.db` instead of the shared `~/.grove/grove.db`. The new per-vault DB pattern is reusable for future per-vault tables (eventually: api_keys, shared_links, discovery_queue, discovery_results, graph_health, graph_health_flags, vault_usage_daily — but those migrations are out of scope for Phase 21).
 
