@@ -216,6 +216,150 @@ These four sparks are the named follow-on work from V3_PLAN.md. V3 ranking shipp
 
 ---
 
+### v2 Dashboard Server Surface
+
+**Problem:** `grove-www`'s v2 dashboard is built, tested (449 passing), and 8 commits sitting on `feat/v2-dashboard` (PR #62) behind a prod guard that 404s the v2 surface in production until `GROVE_API_MODE=live` works. The guard exists because `api.grove.md` doesn't yet serve the v2 contract — `W0-PROBE-1` reports zero of five critical endpoints VERIFIED. Eleven functions in `grove-api.v2.live.ts` (`fetchBacklog`, `fetchTask`, `runTask`, `deferTask`, `dismissTask`, `reviewTask`, `fetchSkills`, `fetchThroughput`, `configureSkill`, `enableSkill`, `disableSkill`) all throw "not yet implemented". Until this lands, the v2 review-tasks experience cannot ship to real users — only to Vercel previews.
+
+The product framing is in `grove-www/SPEC.md`: *"Grove is the first knowledge tool where the AI's backlog is the homepage, not a sidebar."* The server has to make that real.
+
+**Sketch:**
+
+**Schema** (per-vault tables — pair with the Per-Vault SQLite Split spark above; this is the first surface that should land as per-vault from day one rather than retrofitted later):
+
+```sql
+-- per-vault DB (~/.grove/vaults/<slug>/state.db when split lands; for
+-- now: shared grove.db with vault_id column + invariant check)
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY,                -- uuid
+  vault_id TEXT NOT NULL,
+  skill_slug TEXT NOT NULL,
+  state TEXT NOT NULL,                -- pending|running|review|done|dismissed|failed
+  title TEXT NOT NULL,
+  body TEXT,                          -- markdown framing of what the AI will do
+  source_note_path TEXT,              -- the note this task is "from" (nullable for cron-born tasks)
+  estimated_minutes INTEGER,
+  actual_minutes INTEGER,
+  scheduled_for TEXT,                 -- ISO; for cadenced tasks
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE task_results (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+  artifact_json TEXT NOT NULL,        -- {type: surface|note-change|...}
+  note_change_json TEXT,              -- diff payload when artifact is a write
+  provenance_voice TEXT,              -- perishable|durable|legacy
+  provenance_by TEXT,                 -- model id
+  provenance_written_at TEXT,
+  provenance_basis_json TEXT,         -- array of paths/urls
+  provenance_reason TEXT
+);
+
+CREATE TABLE skill_configs (
+  vault_id TEXT NOT NULL,
+  skill_slug TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  cadence TEXT NOT NULL,              -- daily|weekly|on-demand|... per SPEC §14.8
+  last_run_at TEXT,
+  next_run_at TEXT,
+  PRIMARY KEY (vault_id, skill_slug)
+);
+```
+
+The 5–7 skill slugs themselves are hardcoded in TS (`src/skills/<slug>.ts`); the `skill_configs` table is just per-vault user state. No marketplace table in v2 (SPEC §9).
+
+**REST endpoints** (under existing `/v1/` namespace, vault-scoped per existing auth patterns in `proxy.ts`):
+
+```
+GET  /v1/tasks?vault=<slug>          → BacklogPayload (reviewTasks/pendingTasks/clearedTasks/throughput/skills/planTier)
+GET  /v1/tasks/<id>                  → Task (with provenance_blame join when artifact is a note-change)
+POST /v1/tasks/<id>/run              → trigger now (pending|review → running)
+POST /v1/tasks/<id>/defer            → {until: ISO} → pending with scheduled_for
+POST /v1/tasks/<id>/dismiss          → state=dismissed
+POST /v1/tasks/<id>/review           → {action: confirm-durable|refine|dismiss|mark-stale, refinement?}
+GET  /v1/skills?vault=<slug>         → Skill[] (joined config + hardcoded metadata)
+POST /v1/skills/<slug>/configure     → {cadence}
+POST /v1/skills/<slug>/enable
+POST /v1/skills/<slug>/disable
+GET  /v1/throughput?vault=<slug>     → ThroughputView (rolling 4-week velocity + cleared7d + estimatedClearText)
+```
+
+All inherit the existing Bearer-key auth + `vault_id` resolution from `proxy.ts`'s `/v1/notes/*` precedent. The 5 endpoints `W0-PROBE-1` checks are: `GET /v1/tasks`, `POST /v1/tasks/{id}/run`, `GET /v1/tasks/{id}`, `GET /v1/throughput`, `GET /v1/skills`. Ship these first; mutations second.
+
+**Skill executors** — TypeScript functions in `src/skills/<slug>.ts`. Per SPEC §14.8 there are 5–7; ship 3 to start:
+
+1. `daily-vault-review.ts` — the auto-install. Scans graph health signals + random walks (reuses `graph-health.ts` + the Growth Prompting Heartbeat shaped entry's mechanical+random-walk pattern). Produces surface-only Task artifacts in `review` state.
+2. `concept-graph-cleanup.ts` — finds thin concepts, orphans, suggests merges. Produces `note-change` artifacts requiring confirm-durable.
+3. `dup-people-detection.ts` — finds People notes with semantically-close names (cosine ≥ 0.85 + Levenshtein heuristic). Produces `note-change` merge proposals.
+
+Each executor implements:
+```ts
+type SkillRun = (ctx: {
+  vault: Vault;
+  mode: "surface-only" | "writes-allowed";
+  tokenCeiling: number;        // SPEC §8 — per-run cost ceiling
+  scheduledFor?: string;
+}) => Promise<TaskResult>;
+```
+
+**Scheduler** — new PM2 process `grove-scheduler` (or extend `grove-discovery-worker`). Cron at fixed cadence (1-min tick); reads `skill_configs WHERE enabled=1 AND next_run_at <= now()`; enqueues a `tasks` row; bumps `next_run_at` by the skill's cadence. The actual execution is a separate worker that pulls from `tasks WHERE state='pending' ORDER BY scheduled_for ASC LIMIT 1`. Matches existing `discovery-worker.ts` pattern.
+
+**First-run choreography** (SPEC §3, §12) — hook in `vault-provision.ts`:
+- After vault provisioned, INSERT `skill_configs` row for `daily-vault-review` with `enabled=1`, `cadence='daily'`, `next_run_at='tomorrow 6am PT'`.
+- Synchronously enqueue **one immediate** `daily-vault-review` task with `mode='surface-only'` so the first review item lands within ~25s (SPEC's 30s envelope).
+- The "surface-only" mode guarantees no vault writes during first run — the trust contract.
+- Insert 3-5 "starter" pending tasks (templates from the skill specs) so the backlog isn't empty.
+
+**Cost ceiling** (SPEC §8) — each executor reads its tier's token cap from a `plan_tier_caps` constant table. If the vault size estimate × tokens-per-note would exceed the cap, executor calls its own `shouldSample()` and processes a representative slice. Surfaces as part of the artifact: *"this run processed 80% of your vault; upgrade to Pro for full coverage."*
+
+**Subsume vs. alongside** — the load-bearing design call:
+
+The grove server already has three autonomous-AI-work pipes producing things that *want* human attention: `discovery_queue` / `discovery_results` (entity extraction), `graph_health_flags` (graph anomalies), and the unbuilt-but-shaped `heartbeat_items` (Growth Prompting Heartbeat + Extract Learnings + Heartbeat Digest). The v2 dashboard ships a *fourth* surface: `tasks` / `task_results`. Four parallel queues = split brain, duplicated review UX, and exactly the kind of accidental complexity CLAUDE.md tells me to avoid.
+
+**Recommendation: subsume in two steps.**
+- **Step 1 (in this graduation):** `tasks` ships as a new table. The 3 existing pipes continue to write to their own tables. The `daily-vault-review` skill READS from `graph_health_flags` and `discovery_results` to construct task bodies, but it does NOT replace those producers. Existing systems unchanged.
+- **Step 2 (separate IDEAS entry, after v2 ships and stabilizes):** retire `discovery_queue` / `graph_health_flags` as standalone tables; their producers write directly to `tasks` rows. The `heartbeat_items` shaped design folds into `tasks` (`kind='ask'` becomes `state='review'`; `kind='prompt'` becomes `state='pending' AND skill_slug='daily-vault-review'`). Heartbeat Digest's email + MCP-answer paths read from `tasks` instead of `heartbeat_items`. **Step 2 deletes ~3 tables and one shaped-but-unbuilt design** — the cleanup is real.
+
+This sequence buys v2 a clean ship without forcing a refactor of three live autonomous systems in the same release.
+
+**Dependencies:**
+- Provenance system (exists — `write_provenance`, `note_blame`, `provenance_blame`). Refine actions write attributed edits; the existing per-commit-trailer system covers this.
+- Vault auth + Bearer-key routing (exists — `proxy.ts` `/v1/` patterns).
+- Graph health + discovery results (exists — read sources for `daily-vault-review`).
+- Anthropic API + cost watchdog (exists — `P7-COST-*` series gives per-day cap + per-note cooldown patterns to mirror in skill executors).
+- `vault-provision.ts` (exists — first-run hook point).
+- PM2 ecosystem config (exists — `generate-ecosystem.ts`; adds 1 process).
+
+**Success signal:**
+1. `npm run probe:api` in `grove-www` reports ≥80% VERIFIED against staging.
+2. Setting `GROVE_API_MODE=live` in Vercel prod env stops the `grove-www` prod guard from 404-ing.
+3. First-time signup → `/{handle}/{vault}` lands user on a backlog with 1 surface-only review item + 3–5 pending tasks within 30 seconds.
+4. Hitting `c` on the review item resolves it; the next render shows it under "cleared this week."
+5. `dailyVaultReview` cron fires at 6am PT and produces a new review item that lands in the email digest (via Heartbeat Digest integration once that ships) OR just in the backlog (in the interim).
+6. Auto-revert: if 5xx rate on `/v1/tasks*` exceeds 1% in any 5-minute window, paging fires and the swap reverts (or `GROVE_API_MODE=mock` is flipped back, re-engaging the prod guard).
+
+**Counter-arguments + mitigations:**
+
+- *"Four queues is a problem; subsume now."* — Tempting, but the existing 3 producers + `heartbeat_items` are wired into prod cron + auto-healer paths. Touching them in the same release that ships v2 multiplies blast radius. Two-step subsume keeps the v2 ship surface scoped and lets us reuse the existing producers as data sources.
+- *"Why hardcode skills instead of a registry?"* — SPEC.md is explicit: v2 ships 5–7 hardcoded; marketplace is v3. A registry table without authors is premature abstraction. Add it when the third-party authoring story exists.
+- *"This is a lot for one phase."* — Three real surfaces (schema, REST, executors) + one cross-cutting (scheduler/first-run/cost). Sequence as **Phase 20** (schema + READ endpoints) → **Phase 21** (mutations + executor for daily-vault-review) → **Phase 22** (scheduler + first-run + 2 more executors). Phase 20 alone unblocks `GROVE_API_MODE=live` for the dashboard read path. Phase 21 unlocks review actions. Phase 22 unlocks autonomous cadence.
+
+**Open questions:**
+
+1. **Per-vault from day one or retrofit?** The Per-Vault SQLite Split spark says this is the right shape *eventually*. Shipping `tasks` as per-vault from day one validates that design with real production traffic before the split happens. But it also locks us into per-vault before the split tooling is ready (`forEachVaultDb`, backup, schema migration runner). My instinct: ship `tasks` in `control.db` with `vault_id` column + the existing invariant check, then move to per-vault as part of the split's Step 2. Confirm?
+2. **Should `daily-vault-review` write to `graph_health_flags` to "resolve" them when the user dispositions the task, or only update `tasks`?** Tighter coupling = cleaner UX (one place to dismiss); looser = simpler ship. My instinct: write-through to `graph_health_flags.dismissed_at` when a task derived from a flag is dismissed/confirmed. Confirm?
+3. **Scheduler implementation**: extend `discovery-worker.ts` (one process handles all autonomous AI work) or new `grove-scheduler` PM2 process (separation of concerns)? Either is fine; new process is slightly cleaner for blast-radius reasoning.
+4. **First-run choreography UI**: SPEC §12 wants the user to see the running skeleton + cleared `WelcomeReview` banner within 30s. If the executor takes >30s on a large vault (5K+ notes), what's the fallback? Stream the partial result? Show a "still working…" state? Hard timeout at 25s + show a "this took longer than usual; refresh in a minute"?
+5. **Provenance write path on refine action**: when a user refines a review item, the server must (a) update the underlying note, (b) attribute the edit to the *user* not the AI (because the user authored the refinement). The existing `write_provenance` per-commit trailer system supports this — the trailer just needs the user's identity in `voice=durable, by=human`. Confirm the per-commit-trailer system already handles `by=human`?
+
+**When to spec:** The grove-www stack is already merged (PR #62 closes the M0 milestone). Spec this as **Phase 20** in `grove/PLAN.md` next. Phase 20 ships unblock for the live read path (the dashboard renders against real data); Phase 21 ships the review-action surface; Phase 22 ships cadenced execution. Each is ~3–5 PRs.
+
+**Anchor:** `~/src/grove-www/SPEC.md` (the v2 dashboard contract from the `/mili:spec` workflow, 2026-05-13), `~/src/grove-www/PLAN.md` (the 18 W0–W3 tasks already shipped on the client), `~/src/grove-www/src/lib/grove-api.v2.ts` (the canonical client contract: 11 function signatures + types). The grove server's job is to make that contract real.
+
+---
+
 ### Embedding-Driven Vocab Retrieval for Discovery
 
 **Problem:** Discovery's entity-extraction call ships the full vault vocabulary on every prompt. At today's vault size (~2,713 entity notes) that's ~68K input tokens per call. PR #145 wires `cache_control` so repeats within a drain hit cache cheap, but every cache miss still re-bills the full payload, and the vocab grows linearly: at 5K entities it's ~125K tokens; at 10K, ~250K. Caching softens the cost curve; it doesn't flatten it. The curve needs to be vault-size-independent.
