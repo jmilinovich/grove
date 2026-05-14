@@ -87,6 +87,7 @@ import {
   deriveShareStatus,
   type SharedLink,
 } from "./share.js";
+import { handleV2TasksList } from "./v2-tasks.js";
 import {
   encryptVault,
   unlockVault,
@@ -2518,6 +2519,18 @@ const server = createServer(async (req, res) => {
     rateLimiter.record(restKey.id, restRateBucket);
 
     const restHeaders = { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN };
+
+    // GET /v1/tasks — v2 dashboard backlog payload (P21-3).
+    //
+    // Path-style only: this endpoint is meaningless without a vault slug,
+    // and the vaultV1Match auth/role/CORS gate above is what makes it
+    // safe. Legacy `/v1/tasks` requests would route to the proxy's
+    // default vault context — exactly the cross-vault leak shape the
+    // per-vault state.db split exists to prevent — so we refuse them.
+    if (restIsVaultScoped && restPath === "/v1/tasks" && req.method === "GET") {
+      handleV2TasksList(req, res, restCtx);
+      return;
+    }
 
     // Resolve trail for this key (null = owner, full access)
     const restTrail = resolveTrail(restKey.id);
