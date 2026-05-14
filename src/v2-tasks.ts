@@ -28,6 +28,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "./db.js";
 import { getVaultDb } from "./db-per-vault.js";
 import { SKILL_REGISTRY, type SkillMetadata } from "./skills/registry.js";
+import { dispatchTaskRun } from "./v2-task-run.js";
+import { ensureControlAttached } from "./v2-task-detail.js";
 import type { VaultContext } from "./vault-router.js";
 import type { Cadence, TaskState } from "./db-types.js";
 
@@ -388,4 +390,211 @@ export function handleV2TasksList(
     "Access-Control-Allow-Origin": corsOrigin(),
   });
   res.end(JSON.stringify(payload));
+}
+
+/**
+ * Handle `POST /v/<slug>/v1/tasks/<id>/run` (P22-1).
+ *
+ * Thin HTTP wrapper over `dispatchTaskRun`. The state machine lives in
+ * `src/v2-task-run.ts` so unit tests can drive transitions without
+ * standing up a server. Auth and rate-limiting happen upstream in the
+ * proxy's `vaultV1Match` + `/v1/*` blocks.
+ */
+export function handleV2TaskRun(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  vault: VaultContext,
+  taskId: string,
+): void {
+  const { status, body } = dispatchTaskRun(vault, taskId);
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": corsOrigin(),
+  });
+  res.end(JSON.stringify(body));
+}
+
+// ─── P22-2: defer + dismiss ──────────────────────────────────────────────
+
+const MAX_DEFER_DISMISS_BODY = 64 * 1024;
+
+function readJsonBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (c: Buffer) => {
+      size += c.length;
+      if (size > MAX_DEFER_DISMISS_BODY) {
+        req.destroy();
+        reject(new Error("payload too large"));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
+  });
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": corsOrigin(),
+  });
+  res.end(JSON.stringify(body));
+}
+
+
+function fetchTaskById(vaultId: string, taskId: string): Task | null {
+  const vaultDb = getVaultDb(vaultId);
+  const row = vaultDb
+    .prepare(
+      `SELECT ${TASK_SELECT_COLUMNS}
+         FROM tasks t
+         LEFT JOIN task_results r ON r.task_id = t.id
+        WHERE t.id = ?
+        LIMIT 1`,
+    )
+    .get(taskId) as TaskRowAliased | undefined;
+  return row ? rowToTask(row) : null;
+}
+
+/**
+ * `POST /v/<slug>/v1/tasks/<id>/defer` — body `{until: ISO_8601}`.
+ *
+ * Sets `tasks.scheduled_for = until` when the task is in a state where
+ * scheduling makes sense (`pending` or `review`). Terminal states
+ * (`done`, `dismissed`, `failed`) or already-running tasks return 409
+ * with the current state — defer is meaningless once the task has
+ * already executed. Bad ISO returns 400.
+ *
+ * Auth/CORS are enforced upstream by proxy.ts's `vaultV1Match` block;
+ * this handler trusts that gate.
+ */
+export async function handleV2TaskDefer(
+  req: IncomingMessage,
+  res: ServerResponse,
+  vault: VaultContext,
+  taskId: string,
+): Promise<void> {
+  let raw: string;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: "read_error" });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    sendJson(res, 400, { error: "invalid_json" });
+    return;
+  }
+
+  const until =
+    parsed && typeof parsed === "object" && "until" in parsed
+      ? (parsed as { until: unknown }).until
+      : undefined;
+  if (typeof until !== "string" || until.length === 0) {
+    sendJson(res, 400, { error: "until_required" });
+    return;
+  }
+  // Date.parse accepts a wide range of inputs; we only need to know
+  // whether the string is parseable as a timestamp. The value is stored
+  // as-is (TEXT) and compared via SQLite's `datetime()` later.
+  if (Number.isNaN(Date.parse(until))) {
+    sendJson(res, 400, { error: "invalid_until" });
+    return;
+  }
+
+  const vaultDb = getVaultDb(vault.vaultId);
+  const taskRow = vaultDb
+    .prepare("SELECT state FROM tasks WHERE id = ? LIMIT 1")
+    .get(taskId) as { state: TaskState } | undefined;
+  if (!taskRow) {
+    sendJson(res, 404, { error: "task_not_found" });
+    return;
+  }
+  if (taskRow.state !== "pending" && taskRow.state !== "review") {
+    sendJson(res, 409, { error: "invalid_state", state: taskRow.state });
+    return;
+  }
+
+  vaultDb
+    .prepare(
+      "UPDATE tasks SET scheduled_for = ?, updated_at = datetime('now') WHERE id = ?",
+    )
+    .run(until, taskId);
+
+  const updated = fetchTaskById(vault.vaultId, taskId);
+  sendJson(res, 200, updated);
+}
+
+/**
+ * `POST /v/<slug>/v1/tasks/<id>/dismiss` — idempotent.
+ *
+ * Transitions the task to `state = 'dismissed'`. If the task was
+ * derived from a `graph_health_flags` row (`source_flag_id` non-null),
+ * also marks that flag resolved in `control.db.graph_health_flags`
+ * within the same transaction — ATTACH-cross-DB write so the flag
+ * doesn't re-surface as a new task on the next cron tick (Phase 22
+ * locked design decision #1).
+ *
+ * ATTACH happens once per pooled vault connection
+ * (`ensureControlAttached`); the transaction itself wraps both UPDATEs
+ * via better-sqlite3's `.transaction().immediate()` so the two writes
+ * either both land or neither does.
+ */
+export async function handleV2TaskDismiss(
+  req: IncomingMessage,
+  res: ServerResponse,
+  vault: VaultContext,
+  taskId: string,
+): Promise<void> {
+  // Body is optional — dismiss takes no parameters today — but drain it
+  // anyway so the socket isn't left half-read on the next pipelined
+  // request.
+  try {
+    await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: "read_error" });
+    return;
+  }
+
+  const vaultDb = getVaultDb(vault.vaultId);
+  const taskRow = vaultDb
+    .prepare(
+      "SELECT state, source_flag_id FROM tasks WHERE id = ? LIMIT 1",
+    )
+    .get(taskId) as
+    | { state: TaskState; source_flag_id: string | null }
+    | undefined;
+  if (!taskRow) {
+    sendJson(res, 404, { error: "task_not_found" });
+    return;
+  }
+
+  const sourceFlagId = taskRow.source_flag_id;
+  const updateTask = vaultDb.prepare(
+    "UPDATE tasks SET state = 'dismissed', updated_at = datetime('now') WHERE id = ? AND state != 'dismissed'",
+  );
+
+  if (sourceFlagId) {
+    ensureControlAttached(vaultDb);
+    const updateFlag = vaultDb.prepare(
+      "UPDATE control.graph_health_flags SET resolved_at = datetime('now') WHERE id = ? AND resolved_at IS NULL",
+    );
+    const tx = vaultDb.transaction(() => {
+      updateTask.run(taskId);
+      updateFlag.run(sourceFlagId);
+    });
+    tx.immediate();
+  } else {
+    updateTask.run(taskId);
+  }
+
+  const updated = fetchTaskById(vault.vaultId, taskId);
+  sendJson(res, 200, updated);
 }

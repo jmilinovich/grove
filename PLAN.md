@@ -1558,7 +1558,7 @@ After P21-1 through P21-5 ship to prod, run `npm run probe:api` in grove-www aga
 | 5 | **`POST /v1/tasks/<id>/run` is synchronous** for v2 (no separate `/poll` endpoint) | Vercel function timeouts make long-running run-then-poll a v3 problem (matches grove-www SPEC §11). v2 executors hard-cap at ~25s; longer-running runs return a `state='running'` response and continue in the background. |
 | 6 | **Mutations bypass the write queue** (don't serialize with note writes) | `tasks` updates touch per-vault state.db only, not the vault repo. The existing write queue is for vault repo serialization; tasks have no such constraint. |
 
-#### P22-1: `POST /v1/tasks/<id>/run` (`src/v2-routes.ts`, `src/v2-task-run.ts`)
+#### P22-1: `POST /v1/tasks/<id>/run` (`src/v2-routes.ts`, `src/v2-task-run.ts`) ✅ COMPLETE 2026-05-14 (c206b1e)
 
 Triggers a task. For `pending` tasks, transitions to `running`, fires the skill executor, updates state on completion. For `review` tasks, idempotent — returns the existing review state without re-running (the user uses `/review` to disposition).
 
@@ -1585,7 +1585,7 @@ Triggers a task. For `pending` tasks, transitions to `running`, fires the skill 
 - `state = running` returns 409.
 - Timeout returns 202 with `running` state; user refreshes to see the result.
 
-#### P22-2: `POST /v1/tasks/<id>/defer` + `POST /v1/tasks/<id>/dismiss` (`src/v2-routes.ts`)
+#### P22-2: `POST /v1/tasks/<id>/defer` + `POST /v1/tasks/<id>/dismiss` (`src/v2-routes.ts`) ✅ COMPLETE 2026-05-14 (c206b1e)
 
 Simple state transitions. No executor involvement.
 
