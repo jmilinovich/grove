@@ -73,6 +73,11 @@ export const SKILL_REGISTRY: readonly SkillMetadata[] = [
     cadenceOptions: ["daily", "on-demand"],
     defaultCadence: "daily",
     defaultArtifactType: "surface",
+    starterPendingTasks: [
+      "Surface today's patterns from your journal",
+      "Flag perishable claims older than 14 days",
+      "Highlight concepts not touched in 30 days",
+    ],
   },
   {
     id: "skill-concept-graph-cleanup",

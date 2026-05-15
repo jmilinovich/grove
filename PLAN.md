@@ -1752,7 +1752,7 @@ New PM2 process. 1-minute cron tick evaluates `skill_configs` across all vaults;
 - `on-demand` cadence never auto-enqueues (only via P22-1 manual run).
 - Scheduler crash doesn't affect grove-server or grove-proxy.
 
-#### P23-2: First-run choreography (`src/vault-provision.ts`, `src/skills/first-run.ts`)
+#### P23-2: First-run choreography (`src/vault-provision.ts`, `src/skills/first-run.ts`) ✅ COMPLETE 2026-05-14
 
 Hook into existing `vault-provision.ts`. After a vault is created, auto-install `daily-vault-review`, enqueue an immediate `surface-only` run, and pre-populate 3–5 starter pending tasks. The user sees something concrete within 25s of signup.
 
