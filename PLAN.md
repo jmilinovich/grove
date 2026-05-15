@@ -1802,7 +1802,7 @@ Second skill executor. Finds thin concepts (<100 words, no outbound links), orph
 - Tasks land in `state='review'` (not `done`) — user must explicitly confirm.
 - Token ceiling enforced.
 
-#### P23-4: `dup-people-detection` executor (`src/skills/dup-people-detection.ts`)
+#### P23-4: `dup-people-detection` executor (`src/skills/dup-people-detection.ts`) ✅ COMPLETE 2026-05-15 (0f87d40)
 
 Third skill executor. Finds People notes with semantically-close names. Produces merge proposals as `note-change` artifacts.
 
