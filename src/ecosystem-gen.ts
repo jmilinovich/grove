@@ -75,13 +75,16 @@ export function generateEcosystemConfig(
 
   const apps: Record<string, unknown>[] = [];
 
-  // All TypeScript processes run under `/bin/bash -c 'npx tsx <file>'`
-  // so CI's `npm ci --production` (which skips devDependencies where
-  // tsx lives) doesn't break PM2 start-up. npx resolves tsx from node's
-  // own cache or fetches it on demand. Matches the legacy hand-rolled
-  // ecosystem.config.cjs that the VPS ran for months before multi-vault.
+  // All TypeScript processes run under `/bin/bash -c '<repoRoot>/node_modules/.bin/tsx <file>'`.
+  // The previous form used `npx tsx` which could silently fetch a different tsx
+  // version (or fail entirely) when the npx cache was cold — making the deploy
+  // non-deterministic. `node_modules/.bin/tsx` is hermetic: it uses exactly the
+  // version installed by `npm ci`. Both forms keep `/bin/bash` as the PM2 `script`
+  // so `pm2 reload` (which doesn't re-read a changed `script` field per
+  // feedback_pm2_reload_script_path) still picks up the updated `args`.
+  const tsxBin = `${repoRoot}/node_modules/.bin/tsx`;
   const tsxRunner = "/bin/bash";
-  const tsxArgs = (script: string) => `-c 'npx tsx ${repoRoot}/src/${script}'`;
+  const tsxArgs = (script: string) => `-c '${tsxBin} ${repoRoot}/src/${script}'`;
 
   // Proxy — one process, not vault-scoped. `env_static` is the static,
   // per-process override that sits on top of `.env` at PM2 load time.

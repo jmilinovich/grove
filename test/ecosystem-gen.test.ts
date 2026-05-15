@@ -132,15 +132,17 @@ describe("ecosystem-gen (P8-A4)", () => {
     expect(discoveryBlock?.[0] ?? "").not.toContain("GROVE_REQUIRE_PROVENANCE");
   });
 
-  it("wraps tsx invocations in bash so prod without node_modules/.bin/tsx still boots", () => {
-    // CI's `npm ci --production` skips devDependencies (where tsx lives),
-    // so a direct `script: <repo>/node_modules/.bin/tsx` reference dies on
-    // first PM2 start. /bin/bash + `npx tsx` resolves tsx from node's
-    // cache or fetches on demand — matches the legacy ecosystem config.
+  it("wraps tsx invocations in bash using the hermetic node_modules/.bin/tsx path", () => {
+    // The deploy uses full `npm ci` (NOT --production) so tsx is always present
+    // at node_modules/.bin/tsx. We invoke tsx via /bin/bash to keep `script`
+    // constant across deploys (pm2 reload doesn't re-read a changed `script`
+    // field per feedback_pm2_reload_script_path). Using `node_modules/.bin/tsx`
+    // instead of `npx tsx` makes the deploy hermetic — no network fetch, no
+    // silent version drift when the npx cache is cold.
     const out = generateEcosystemConfig(vaults);
     expect(out).toContain(`"script": "/bin/bash"`);
-    expect(out).toContain("npx tsx");
-    expect(out).not.toContain("node_modules/.bin/tsx");
+    expect(out).toContain("node_modules/.bin/tsx");
+    expect(out).not.toContain("npx tsx");
   });
 
   it("spreads .env under each process's static env at PM2 load time", () => {
