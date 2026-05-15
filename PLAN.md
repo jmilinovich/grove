@@ -1725,7 +1725,7 @@ The first real executor. Reads existing `graph_health_flags` + recent `discovery
 | 4 | **Slow-vault fallback: "still working — refresh in a minute" state** | No sampling on first run (undermines trust); no SSE (v3-deferred per SPEC §11). Honest about reality is the v2 ship. |
 | 5 | **First-run starter pending tasks pre-populated** | 3–5 tasks per skill registry's `sample_tasks` field, inserted as `state='pending'` so the user has obvious "things to run" on day one. |
 
-#### P23-1: `grove-scheduler` PM2 process (`src/scheduler.ts`, `src/ecosystem-gen.ts`)
+#### P23-1: `grove-scheduler` PM2 process (`src/scheduler.ts`, `src/ecosystem-gen.ts`) ✅ COMPLETE 2026-05-15 (684cbdb)
 
 New PM2 process. 1-minute cron tick evaluates `skill_configs` across all vaults; enqueues tasks where `next_run_at <= now() AND enabled=1`.
 
