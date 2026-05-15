@@ -11,8 +11,9 @@
 # testing the SSH path locally. It will:
 #   * push main to origin
 #   * git pull on the VPS
-#   * npm install --production
-#   * pm2 restart
+#   * npm ci  (full — tsx is in devDependencies; --production breaks PM2)
+#   * regenerate the runtime ecosystem from the vaults DB
+#   * pm2 reload the generated ecosystem (all provisioned vaults)
 #   * curl /health once and print the result (doesn't exit on failure)
 #
 # Usage: bash scripts/deploy.sh
@@ -26,11 +27,17 @@ git push origin main
 
 echo "Deploying to VPS..."
 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$HOST" 'sudo bash -s' << 'REMOTE'
+set -eu
 cd /root/grove
 git pull origin main
-npm install --production
-pm2 restart grove-server grove-proxy
-sleep 3
+# Full `npm ci` (NOT --production) so tsx + better-sqlite3 are available.
+# Every grove process runs via tsx (devDependency). --production breaks them.
+npm ci
+# Regenerate the runtime ecosystem from the vaults table so ALL provisioned
+# vaults are started/reloaded — not just the hardcoded grove-server/grove-proxy
+# names. Without this, any vault added since the last deploy is silently skipped.
+npx tsx scripts/generate-ecosystem.ts
+pm2 reload /root/grove/ecosystem.runtime.config.cjs --update-env
 pm2 list
 echo "---"
 curl -sf http://localhost:8420/health && echo " Health OK" || echo " Health FAILED"
