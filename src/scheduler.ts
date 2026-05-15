@@ -414,12 +414,16 @@ export async function startScheduler(
     })();
   }, workerMs);
 
-  // Don't keep the event loop alive solely for the timers — matches the
-  // discovery worker so `node --stop-on-empty` style shutdowns aren't
-  // blocked.
-  if (typeof tickTimer.unref === "function") tickTimer.unref();
-  if (typeof workerTimer.unref === "function") workerTimer.unref();
-
+  // The two intervals ARE what keeps the scheduler process alive between
+  // ticks — under PM2 (grove-scheduler-<slug>) this loop is the whole
+  // job. Do NOT call .unref() on them. The original P23-1 code did so
+  // "to match the discovery worker", but discovery uses a (non-unref'd)
+  // setTimeout chain and has other refs holding the loop; the scheduler
+  // has neither. Unref'ing here makes the process exit clean immediately
+  // after startScheduler returns → PM2 restart → infinite loop with no
+  // stderr (2026-05-14 prod incident).
+  //
+  // Tests that need the process to terminate call stopScheduler().
   handle = { tickTimer, workerTimer };
 }
 
