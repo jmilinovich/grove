@@ -34,7 +34,7 @@ describe("ecosystem-gen (P8-A4)", () => {
     },
   ];
 
-  it("emits grove-proxy + one server/discovery pair per vault (no qmd-server)", () => {
+  it("emits grove-proxy + one server/discovery/scheduler triple per vault (no qmd-server)", () => {
     const out = generateEcosystemConfig(vaults);
     expect(out).toContain(`"name": "grove-proxy"`);
     // qmd-server is intentionally NOT emitted — qmd 2.1+ has no `serve`
@@ -42,8 +42,23 @@ describe("ecosystem-gen (P8-A4)", () => {
     expect(out).not.toContain(`"name": "qmd-server"`);
     expect(out).toContain(`"name": "grove-server-personal"`);
     expect(out).toContain(`"name": "grove-discovery-personal"`);
+    expect(out).toContain(`"name": "grove-scheduler-personal"`);
     expect(out).toContain(`"name": "grove-server-team"`);
     expect(out).toContain(`"name": "grove-discovery-team"`);
+    expect(out).toContain(`"name": "grove-scheduler-team"`);
+  });
+
+  it("pins GROVE_VAULT_ID on each grove-scheduler-<slug> entry (P23-1)", () => {
+    const out = generateEcosystemConfig(vaults);
+    expect(out).toMatch(
+      /"name": "grove-scheduler-personal"[\s\S]*?"GROVE_VAULT_ID": "vault_00000000"/,
+    );
+    expect(out).toMatch(
+      /"name": "grove-scheduler-team"[\s\S]*?"GROVE_VAULT_ID": "vault_team"/,
+    );
+    expect(out).toMatch(
+      /"name": "grove-scheduler-personal"[\s\S]*?scheduler-bin\.ts/,
+    );
   });
 
   it("injects GROVE_VAULT_ID + port env per vault", () => {
@@ -200,12 +215,15 @@ describe("ecosystem-gen (P8-A4)", () => {
         apps: Array<{ name: string }>;
       };
       expect(Array.isArray(parsed.apps)).toBe(true);
-      // proxy + 2 per vault = 1 + 4 = 5 (qmd-server intentionally absent)
-      expect(parsed.apps).toHaveLength(5);
+      // proxy + 3 per vault = 1 + 6 = 7 (qmd-server intentionally absent;
+      // grove-scheduler-<slug> joined the per-vault trio in P23-1)
+      expect(parsed.apps).toHaveLength(7);
       expect(parsed.apps.map((a) => a.name).sort()).toEqual([
         "grove-discovery-personal",
         "grove-discovery-team",
         "grove-proxy",
+        "grove-scheduler-personal",
+        "grove-scheduler-team",
         "grove-server-personal",
         "grove-server-team",
       ]);
@@ -225,11 +243,12 @@ describe("ecosystem-gen (P8-A4)", () => {
     expect(out).toContain(`"QMD_PORT": "9177"`);
   });
 
-  it("handles zero-vault input (proxy only, no server/discovery entries)", () => {
+  it("handles zero-vault input (proxy only, no server/discovery/scheduler entries)", () => {
     const out = generateEcosystemConfig([]);
     expect(out).toContain(`"name": "grove-proxy"`);
     expect(out).not.toContain(`"name": "qmd-server"`);
     expect(out).not.toContain(`"grove-server-`);
     expect(out).not.toContain(`"grove-discovery-`);
+    expect(out).not.toContain(`"grove-scheduler-`);
   });
 });

@@ -164,6 +164,27 @@ export function generateEcosystemConfig(
       autorestart: true,
       max_restarts: 10,
     });
+    // P23-1 — per-vault scheduler. Mirrors the discovery worker's
+    // pinning: one process per vault, GROVE_VAULT_ID locked at PM2
+    // load time so the cron tick + worker drain can't drift across
+    // tenants. The proxy's in-process task worker (P22-1) becomes
+    // redundant once this is running for every vault and is gated
+    // off via GROVE_DISABLE_TASK_WORKER=1 in deploy environments.
+    apps.push({
+      name: `grove-scheduler-${v.slug}`,
+      script: tsxRunner,
+      args: tsxArgs("scheduler-bin.ts"),
+      cwd: repoRoot,
+      env_static: {
+        NODE_ENV: "production",
+        GROVE_VAULT: v.git_repo_path,
+        GROVE_VAULT_ID: v.id,
+        GROVE_VAULT_SLUG: v.slug,
+      },
+      autorestart: true,
+      max_restarts: 10,
+      max_memory_restart: "512M",
+    });
   }
 
   // The generated CJS wrapper reads `.env` at PM2 load time and spreads

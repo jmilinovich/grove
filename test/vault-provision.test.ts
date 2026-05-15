@@ -244,7 +244,12 @@ describe("vault-provision (P8-A4)", () => {
       const effects: Effects = {
         ...noopEffects,
         // Proxy + personal vault are already running.
-        listPm2Apps: () => ["grove-proxy", "grove-server-personal", "grove-discovery-personal"],
+        listPm2Apps: () => [
+          "grove-proxy",
+          "grove-server-personal",
+          "grove-discovery-personal",
+          "grove-scheduler-personal",
+        ],
         reloadPm2: () => {
           reloaded = true;
         },
@@ -260,7 +265,11 @@ describe("vault-provision (P8-A4)", () => {
         { effects },
       );
       expect(reloaded).toBe(false);
-      expect(started).toEqual(["grove-server-team", "grove-discovery-team"]);
+      expect(started).toEqual([
+        "grove-server-team",
+        "grove-discovery-team",
+        "grove-scheduler-team",
+      ]);
       expect(polledPort).toBe(8191);
     });
 
@@ -276,8 +285,10 @@ describe("vault-provision (P8-A4)", () => {
           "grove-proxy",
           "grove-server-personal",
           "grove-discovery-personal",
+          "grove-scheduler-personal",
           "grove-server-team",
           "grove-discovery-team",
+          "grove-scheduler-team",
         ],
         reloadPm2: () => {
           reloaded = true;
@@ -317,6 +328,7 @@ describe("vault-provision (P8-A4)", () => {
         "grove-proxy",
         "grove-server-personal",
         "grove-discovery-personal",
+        "grove-scheduler-personal",
       ]);
       expect(result.orphans).toEqual(["qmd-server"]);
       expect(result.wrote).toBe(false);

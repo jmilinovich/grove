@@ -394,6 +394,7 @@ export function createSchema(): void {
   migrateApiKeyVaultId(database);
   migrateVaultProvenanceRequired(database);
   migrateDiscoveryQueueBatch(database);
+  migrateVaultBootstrapPending(database);
 }
 
 /**
@@ -919,6 +920,28 @@ function migrateVaultProvenanceRequired(database: Database.Database): void {
   // would silently disable strict mode on personal until the operator
   // ran `grove vault set-provenance-required personal true`.
   database.exec("UPDATE vaults SET provenance_required = 1 WHERE slug = 'personal'");
+}
+
+/**
+ * P23-1: `bootstrap_pending` column on `vaults`.
+ *
+ * Set to 1 by `vault-provision.ts` immediately after a vault is created;
+ * the per-vault scheduler clears it after running `bootstrapFirstRun` on
+ * its boot pass or the next 1-minute tick. Replaces the prior inline-LLM
+ * call inside provision (Phase 23 revision note #2) — the user sees
+ * `state='running'` on the first review item within ~60s of vault-create
+ * instead of provisioning blocking on a synchronous Claude call.
+ */
+function migrateVaultBootstrapPending(database: Database.Database): void {
+  const exists = database
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='vaults'")
+    .get();
+  if (!exists) return;
+  const cols = database.prepare("PRAGMA table_info(vaults)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "bootstrap_pending")) return;
+  database.exec(
+    "ALTER TABLE vaults ADD COLUMN bootstrap_pending INTEGER NOT NULL DEFAULT 0",
+  );
 }
 
 /** Add display_name column to existing users tables that lack it (P15-1). */

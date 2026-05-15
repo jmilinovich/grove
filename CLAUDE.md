@@ -38,7 +38,7 @@ Requires QMD running separately. The proxy does not start QMD — it expects it 
 
 ## Running on AWS
 
-Grove runs on AWS g4dn.xlarge (T4 GPU) at `api.grove.md`. PM2 manages four processes: `grove-server` (8190), `grove-proxy` (8420), `grove-discovery` (worker, no port), `qmd-server` (8177). Nginx terminates TLS.
+Grove runs on AWS g4dn.xlarge (T4 GPU) at `api.grove.md`. PM2 manages a per-vault trio plus a shared proxy: for each vault `<slug>` row in the control db, `grove-server-<slug>` (port from `vaults.server_port`), `grove-discovery-<slug>` (worker, no port), and `grove-scheduler-<slug>` (worker, no port — runs the 1-min cron tick + 1s task drain, P23-1). The shared `grove-proxy` (8420) sits in front of every vault server. `qmd-server` is intentionally not emitted post-P8; BM25 runs in-process via FTS5. Nginx terminates TLS.
 
 ```bash
 ssh -i ~/.ssh/grove-aws.pem ubuntu@52.37.76.231
