@@ -31,7 +31,7 @@
 
 import type Database from "better-sqlite3";
 import { getVaultDb, forEachVaultDb, type VaultRow } from "./db-per-vault.js";
-import { getSkillBySlug } from "./skills/registry.js";
+import { getSkillBySlug, loadSkillModule } from "./skills/registry.js";
 import type { VaultContext } from "./vault-router.js";
 import type { TaskRow, TaskState } from "./db-types.js";
 import type {
@@ -121,12 +121,13 @@ export function clearExecutorOverrides(): void {
 async function loadExecutor(slug: string): Promise<SkillExecutor> {
   const override = executorOverrides.get(slug);
   if (override) return override;
-  // Skill modules don't exist yet in P22-1 (P22-5+ land them). Try the
-  // dynamic import optimistically; on any error (ENOENT, missing export)
-  // fall through to the stub. Production logs the fallback so we notice
-  // if a registered skill is missing its module.
+  // Slug → module wiring lives in `skills/registry.ts`'s
+  // `loadSkillModule`. The registry returns `null` for skills whose
+  // executor hasn't shipped yet (e.g., concept-graph-cleanup before
+  // P23) — we fall through to the stub in that case so the dispatcher
+  // still completes the task end-to-end rather than 500'ing.
   try {
-    const mod: unknown = await import(`./skills/${slug}.js`);
+    const mod: unknown = await loadSkillModule(slug);
     if (
       mod &&
       typeof mod === "object" &&
@@ -135,8 +136,10 @@ async function loadExecutor(slug: string): Promise<SkillExecutor> {
     ) {
       return (mod as { run: SkillExecutor }).run;
     }
-  } catch {
-    // module not present — expected for P22-1
+  } catch (err) {
+    console.error(
+      `[v2-task-run] loadSkillModule(${slug}) failed: ${(err as Error).message}`,
+    );
   }
   return stubExecutor;
 }
