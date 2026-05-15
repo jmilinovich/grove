@@ -985,6 +985,23 @@ export function runMigration(): void {
     )
   `);
 
+  // Fast path — check version BEFORE acquiring the writer lock. Under
+  // cold-start contention (N schedulers + N servers + N discovery +
+  // proxy all calling runMigration() in parallel), the first process
+  // to win the lock can take >5s through migrateMultiVault's
+  // ALTER/UPDATE chain. Subsequent processes time out on busy_timeout
+  // and crash with SQLITE_BUSY. Skipping the lock entirely when the
+  // schema is already at target version stops the cascade.
+  //
+  // Race: between this check and tx.immediate() below another process
+  // could finish the migration. That's harmless — the IMMEDIATE wrap
+  // serializes work, and createSchema is internally idempotent. We do
+  // a second check inside the transaction body for the same reason.
+  const fastState = database
+    .prepare("SELECT schema_version FROM _migration_state WHERE id = 1")
+    .get() as { schema_version: number } | undefined;
+  if (fastState && fastState.schema_version >= SCHEMA_VERSION) return;
+
   // BEGIN IMMEDIATE acquires the writer lock at transaction start, so
   // contending processes block on getDb's busy_timeout (5s) instead of
   // hammering each other into SQLITE_BUSY restart loops.
