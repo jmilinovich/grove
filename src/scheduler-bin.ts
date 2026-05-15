@@ -11,14 +11,17 @@
  *   GROVE_VAULT_ID=vault_xxx GROVE_VAULT_SLUG=personal
  */
 
-import { createSchema } from "./db.js";
+import { runMigration } from "./db.js";
 import { getVaultDb, closeAllVaultDbs } from "./db-per-vault.js";
 import { startScheduler, stopScheduler } from "./scheduler.js";
 
-// Ensure control-db schema exists (idempotent — same call pattern as
-// discovery-worker.ts). The per-vault state.db migration runs lazily on
-// first `getVaultDb(vaultId)` call below.
-createSchema();
+// Ensure control-db schema exists. Use runMigration (not createSchema)
+// so the migrate*() body runs inside BEGIN IMMEDIATE with 5s busy_timeout
+// backoff — N schedulers + N servers + N discovery + proxy all hit
+// grove.db on cold start, and raw createSchema() races the destructive
+// DROP/RENAME paths into SQLITE_BUSY restart loops (1300+ restarts per
+// scheduler observed in prod, 2026-05-14).
+runMigration();
 
 const vaultId = process.env.GROVE_VAULT_ID;
 if (!vaultId) {
