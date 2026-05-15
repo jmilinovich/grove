@@ -1658,7 +1658,7 @@ Skill config writes. Updates `skill_configs` per-vault state.db rows.
 - `/disable` clears `next_run_at`.
 - Unknown skill slug returns 404.
 
-#### P22-5: `daily-vault-review` executor (`src/skills/daily-vault-review.ts`)
+#### P22-5: `daily-vault-review` executor (`src/skills/daily-vault-review.ts`) ✅ COMPLETE 2026-05-15 (af67fb8)
 
 The first real executor. Reads existing `graph_health_flags` + recent `discovery_results` to construct surface-only review tasks. Subsume Step 1 — old producers untouched; this skill READS them.
 
