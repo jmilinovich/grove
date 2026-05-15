@@ -127,8 +127,8 @@ export function getSkillBySlug(slug: string): SkillMetadata | undefined {
  *
  * Returns the imported module namespace (callers introspect for a `run`
  * export) or null when the slug has no executor wired yet — e.g., the
- * `concept-graph-cleanup` and `dup-people-detection` entries are still
- * waiting on P23-3/P23-4 for their executors.
+ * `concept-graph-cleanup` entry is still waiting on P23-3 for its
+ * executor.
  *
  * Lazy `await import` avoids loading the Anthropic SDK and per-skill
  * dependencies at module-eval time (the registry is hot — it's read on
@@ -138,7 +138,9 @@ export async function loadSkillModule(slug: string): Promise<unknown | null> {
   switch (slug) {
     case "daily-vault-review":
       return await import("./daily-vault-review.js");
-    // P23 wires concept-graph-cleanup + dup-people-detection.
+    case "dup-people-detection":
+      return await import("./dup-people-detection.js");
+    // P23-3 wires concept-graph-cleanup.
     default:
       return null;
   }
