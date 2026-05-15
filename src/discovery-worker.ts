@@ -11,7 +11,7 @@
 
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { createSchema } from "./db.js";
+import { runMigration } from "./db.js";
 import { startDiscoveryLoop, stopDiscoveryLoop } from "./discovery.js";
 import {
   startHealthCronLoop,
@@ -19,8 +19,11 @@ import {
   DEFAULT_HEALTH_INTERVAL_MS,
 } from "./graph-health.js";
 
-// Ensure schema exists (idempotent)
-createSchema();
+// Ensure schema exists. runMigration wraps the body in BEGIN IMMEDIATE +
+// busy_timeout so concurrent workers (4 discovery + 4 scheduler + 4
+// server + proxy) serialize on cold start instead of racing destructive
+// DROP/RENAME paths into SQLITE_BUSY.
+runMigration();
 
 // Per-vault binding. PM2 sets GROVE_VAULT_ID for every grove-discovery-*
 // process via the generated ecosystem.config.cjs. If it's missing we fall
