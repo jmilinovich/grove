@@ -1,0 +1,16 @@
+{
+  "ran_at": "2026-05-15T15:11:37Z",
+  "prod_sha": null,
+  "main_sha": "4dc21511cac6861daab5321f456a5b3f3e3f2ca7",
+  "green": [
+    "pattern-A: false-positive confirmed (scheduler-bin.ts already uses runMigration(); grep matched comment on line 21; falsifier tests pass 13/13)",
+    "pattern-B: no .unref() matches in src/scheduler.ts",
+    "pattern-C: false-positive confirmed (ecosystem-gen.ts grep matched comment on line 79; code uses node_modules/.bin/tsx correctly)",
+    "stale-PRs: 1 open PR (#178, feat/admin-watchdog-clean), updated 2026-05-15T03:32:23Z — not stale (<7 days)"
+  ],
+  "flagged": [
+    "health-check: api.grove.md unreachable from Anthropic Cloud sandbox (HTTP 403, 'Host not in allowlist') — prod SHA and prod/main drift unknown; this is an egress policy gap, not a confirmed prod outage. PR #178 (/admin/watchdog endpoint) would close this gap once merged and deployed."
+  ],
+  "prs_opened": [],
+  "issues_opened": []
+}
