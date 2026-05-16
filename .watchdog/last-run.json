@@ -1,0 +1,17 @@
+{
+  "ran_at": "2026-05-16T15:03:00Z",
+  "prod_sha": null,
+  "main_sha": "4dc21511cac6861daab5321f456a5b3f3e3f2ca7",
+  "green": [
+    "pattern_a_createSchema: false positive — grep matched comments only in scheduler-bin.ts:18,21; live code uses runMigration(). Falsifier 13/13 pass.",
+    "pattern_b_unref: clean — no .unref() matches in src/scheduler.ts",
+    "pattern_c_npx_tsx: false positive — grep matched comment on ecosystem-gen.ts:79; live code uses node_modules/.bin/tsx at line 85",
+    "stale_prs: PR #178 (1d old, /admin/watchdog feature), PR #179 (1d old, yesterday watchdog report) — neither exceeds 7-day threshold"
+  ],
+  "flagged": [
+    "prod_health: api.grove.md /health unreachable from Anthropic Cloud sandbox — TLS inspection proxy returned 403. Environment limitation; not a confirmed prod outage. PROD_SHA unknown. PR #178 (/admin/watchdog endpoint) would close this gap.",
+    "pr_179_open: Yesterday's watchdog report PR (#179) remains open and unmerged. Not opened by this run; no action taken per policy."
+  ],
+  "prs_opened": [],
+  "issues_opened": []
+}
