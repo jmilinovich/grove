@@ -1371,17 +1371,29 @@ const server = createServer(async (req, res) => {
   }
 
   if (url.pathname === "/admin/watchdog" && req.method === "GET") {
+    // IP-scoped rate limit. buildWatchdogReport() forks pm2 + df on every
+    // call — a tight loop would be a cheap DoS via child-process spawns.
+    // Ceiling of 5/min per IP is well above any legitimate polling cadence.
+    const wdIp = clientIp(req);
+    const wdLimit = rateLimiter.checkWithLimit(`admin-watchdog:${wdIp}`, "read", 5);
+    if (!wdLimit.allowed) {
+      sendJson(res, 429, { error: "rate_limited", retry_after_ms: wdLimit.retryAfterMs });
+      return;
+    }
     const admin = adminAuth(req);
     if (!admin.ok) {
       sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" });
       return;
     }
+    rateLimiter.record(`admin-watchdog:${wdIp}`, "read");
     try {
       const report = buildWatchdogReport();
       sendJson(res, 200, report);
     } catch (err) {
       console.error("[admin-watchdog] failed:", err);
-      sendJson(res, 500, { error: "internal", message: (err as Error).message });
+      // Don't echo the raw error message — pm2/df failures can embed internal
+      // filesystem paths or process arguments in their error strings.
+      sendJson(res, 500, { error: "internal" });
     }
     return;
   }
