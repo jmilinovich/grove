@@ -131,6 +131,7 @@ import {
   type VaultContext,
 } from "./vault-router.js";
 import { adminAuth, isPlatformOwner, type AdminAuthResult } from "./admin-auth.js";
+import { buildWatchdogReport } from "./admin-watchdog.js";
 import {
   addToWaitlist,
   listWaitlist,
@@ -1365,6 +1366,22 @@ const server = createServer(async (req, res) => {
       }
       console.error("[waitlist] insert failed:", err);
       sendJson(res, 500, { error: "internal error" });
+    }
+    return;
+  }
+
+  if (url.pathname === "/admin/watchdog" && req.method === "GET") {
+    const admin = adminAuth(req);
+    if (!admin.ok) {
+      sendJson(res, admin.status, { error: admin.status === 403 ? "forbidden" : "unauthorized" });
+      return;
+    }
+    try {
+      const report = buildWatchdogReport();
+      sendJson(res, 200, report);
+    } catch (err) {
+      console.error("[admin-watchdog] failed:", err);
+      sendJson(res, 500, { error: "internal", message: (err as Error).message });
     }
     return;
   }
