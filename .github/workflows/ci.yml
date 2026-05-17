@@ -2,6 +2,12 @@ name: CI
 
 on:
   pull_request:
+    # `edited` is included so schema-change-check below re-runs when
+    # the author edits the PR body to add the
+    # `Schema-Change-Confirmed: yes` trailer after the check first
+    # fails — without it the check stays red and an empty commit
+    # would be the only way to retrigger.
+    types: [opened, synchronize, reopened, edited]
     branches: [main]
   push:
     branches: [main]
@@ -58,6 +64,45 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check:cache-version
+
+  # When a PR touches src/db.ts or migration files, require the PR body
+  # to carry a `Schema-Change-Confirmed: yes` trailer. GitHub squash-merge
+  # carries the PR body into the merge commit, where the deploy script's
+  # schema-change guard then reads the trailer and pre-authorizes the
+  # migration without a separate workflow_dispatch. Without this check,
+  # schema PRs merge silently and the next push to main (often an
+  # autonomous watchdog/assure PR) fails its deploy because the cumulative
+  # diff vs prod still includes the unconfirmed migration.
+  schema-change-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Require Schema-Change-Confirmed trailer when schema files change
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          SCHEMA_DIFF=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- 'src/db-migration*.ts' 'src/db.ts' 2>/dev/null || true)
+          if [ -z "$SCHEMA_DIFF" ]; then
+            echo "[schema-check] no schema files touched — ok"
+            exit 0
+          fi
+          echo "[schema-check] schema files changed:"
+          echo "$SCHEMA_DIFF" | sed 's/^/  /'
+          if printf '%s\n' "$PR_BODY" | grep -qE '^Schema-Change-Confirmed:[[:space:]]*yes[[:space:]]*$'; then
+            echo "[schema-check] PR body carries 'Schema-Change-Confirmed: yes' — ok"
+            exit 0
+          fi
+          echo "::error::Schema files changed but PR body lacks the 'Schema-Change-Confirmed: yes' trailer."
+          echo "::error::Add a line 'Schema-Change-Confirmed: yes' to the PR body (any position) so the"
+          echo "::error::squash-merge commit carries it forward and the deploy guard pre-authorizes the migration."
+          exit 1
 
   audit:
     runs-on: ubuntu-latest
@@ -215,13 +260,28 @@ jobs:
             # rolled back code-only, so refuse unless the operator
             # ticked confirm_schema_change.
             SCHEMA_DIFF=$(git diff --name-only "$BEFORE_SHA" "$TARGET_SHA" -- 'src/db-migration*.ts' 'src/db.ts' 2>/dev/null || true)
-            if [ -n "$SCHEMA_DIFF" ] && [ "${CONFIRM_SCHEMA_CHANGE:-false}" != "true" ]; then
-              echo "::error::Schema change detected in: $SCHEMA_DIFF"
-              echo "::error::Re-run workflow_dispatch with confirm_schema_change=true to proceed."
-              exit 1
-            fi
             if [ -n "$SCHEMA_DIFF" ]; then
-              echo "[deploy] schema-change deploy acknowledged: $SCHEMA_DIFF"
+              # Three ways to authorize a schema-change deploy, in priority order:
+              # 1. CONFIRM_SCHEMA_CHANGE=true via workflow_dispatch — manual override
+              # 2. A `Schema-Change-Confirmed: yes` trailer in any commit in the
+              #    deploy range. The schema PR's pre-merge check (schema-change-check)
+              #    requires this trailer in the PR body; GitHub squash-merge carries
+              #    it into the merge commit, pre-authorizing the deploy at merge time.
+              #    This is the path that keeps autonomous follow-up PRs (watchdog,
+              #    assure) from inheriting an unconfirmed schema diff and failing.
+              # 3. Neither present → fail loud with both remediation paths.
+              if [ "${CONFIRM_SCHEMA_CHANGE:-false}" = "true" ]; then
+                echo "[deploy] schema-change deploy via workflow_dispatch override: $SCHEMA_DIFF"
+              elif git log "$BEFORE_SHA..$TARGET_SHA" --format=%B | grep -qE '^Schema-Change-Confirmed:[[:space:]]*yes[[:space:]]*$'; then
+                echo "[deploy] schema-change pre-confirmed via commit trailer: $SCHEMA_DIFF"
+              else
+                echo "::error::Schema change detected in: $SCHEMA_DIFF"
+                echo "::error::No 'Schema-Change-Confirmed: yes' trailer in the commit range, and CONFIRM_SCHEMA_CHANGE is not 'true'."
+                echo "::error::Fix one of:"
+                echo "::error::  1) Add 'Schema-Change-Confirmed: yes' to the schema PR body before merging, or"
+                echo "::error::  2) Re-run this workflow via workflow_dispatch with confirm_schema_change=true."
+                exit 1
+              fi
             fi
 
             # Deploy.
