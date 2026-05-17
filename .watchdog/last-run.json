@@ -1,16 +1,15 @@
 {
-  "ran_at": "2026-05-16T15:03:00Z",
+  "ran_at": "2026-05-17T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "4dc21511cac6861daab5321f456a5b3f3e3f2ca7",
+  "main_sha": "b4f94cc837d5a6613468ef459e2738451f54b0c2",
   "green": [
-    "pattern_a_createSchema: false positive — grep matched comments only in scheduler-bin.ts:18,21; live code uses runMigration(). Falsifier 13/13 pass.",
     "pattern_b_unref: clean — no .unref() matches in src/scheduler.ts",
-    "pattern_c_npx_tsx: false positive — grep matched comment on ecosystem-gen.ts:79; live code uses node_modules/.bin/tsx at line 85",
-    "stale_prs: PR #178 (1d old, /admin/watchdog feature), PR #179 (1d old, yesterday watchdog report) — neither exceeds 7-day threshold"
+    "pattern_a_createSchema: false positive — grep matched comment text in scheduler-bin.ts:21 ('raw createSchema() races…'); live code calls runMigration() at line 24. No actual bug present.",
+    "pattern_c_npx_tsx: false positive — grep matched explanatory comment on ecosystem-gen.ts:79; live code uses node_modules/.bin/tsx via tsxBin at line 85. No actual bug present.",
+    "stale_prs: no open PRs — all previously open PRs (#178 /admin/watchdog, #179/#180 watchdog reports, #181 rate-limiter fix) are merged."
   ],
   "flagged": [
-    "prod_health: api.grove.md /health unreachable from Anthropic Cloud sandbox — TLS inspection proxy returned 403. Environment limitation; not a confirmed prod outage. PROD_SHA unknown. PR #178 (/admin/watchdog endpoint) would close this gap.",
-    "pr_179_open: Yesterday's watchdog report PR (#179) remains open and unmerged. Not opened by this run; no action taken per policy."
+    "prod_health: api.grove.md /health unreachable from Anthropic Cloud sandbox (TLS inspection proxy returned 403, cert issuer 'O=Anthropic; CN=sandbox-egress-production TLS Inspection CA'). Persistent environment limitation — not a confirmed prod outage. PROD_SHA remains unknown. The /admin/watchdog endpoint (PR #178, merged to main) would expose prod state; gap closes once prod is deployed to main SHA."
   ],
   "prs_opened": [],
   "issues_opened": []
