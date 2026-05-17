@@ -146,6 +146,22 @@ export function lookupById(id: string): VaultRoute | null {
   return byId.get(id) ?? null;
 }
 
+/**
+ * Resolve a vault_id from an on-disk git_repo_path. Used by blame.ts to
+ * tag note_blame cache rows with the writing vault so readBlameForNote
+ * can scope reads and prevent cross-vault blame leaks.
+ *
+ * Returns null when the path doesn't match any loaded vault (e.g., test
+ * fixtures, paths outside the vault map). Callers treat null as "unscoped"
+ * and fall back to legacy behaviour.
+ */
+export function lookupIdByPath(vaultPath: string): string | null {
+  for (const route of byId.values()) {
+    if (route.git_repo_path === vaultPath) return route.id;
+  }
+  return null;
+}
+
 export function vaultMapLoadedAt(): number {
   return loadedAt;
 }

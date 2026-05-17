@@ -395,6 +395,7 @@ export function createSchema(): void {
   migrateVaultProvenanceRequired(database);
   migrateDiscoveryQueueBatch(database);
   migrateVaultBootstrapPending(database);
+  migrateNoteBlameVaultId(database);
 }
 
 /**
@@ -941,6 +942,25 @@ function migrateVaultBootstrapPending(database: Database.Database): void {
   if (cols.some((c) => c.name === "bootstrap_pending")) return;
   database.exec(
     "ALTER TABLE vaults ADD COLUMN bootstrap_pending INTEGER NOT NULL DEFAULT 0",
+  );
+}
+
+/**
+ * Add `vault_id` column to `note_blame` so blame lookups can be scoped
+ * to the requesting vault. Rows written before this migration have
+ * `vault_id = NULL` — they act as unscoped legacy entries and are
+ * returned only when no vault-scoped row matches (see `getNoteBlame` and
+ * `readBlameForNote`). The cross-vault leak in readBlameForNote was that
+ * `ORDER BY computed_at DESC LIMIT 1` could return Vault B's blame row
+ * when Vault A had the same note path. After this migration, queries that
+ * supply a vault_id prefer scoped rows, eliminating the leak.
+ */
+function migrateNoteBlameVaultId(database: Database.Database): void {
+  const cols = database.prepare("PRAGMA table_info(note_blame)").all() as { name: string }[];
+  if (cols.some((c) => c.name === "vault_id")) return;
+  database.exec("ALTER TABLE note_blame ADD COLUMN vault_id TEXT");
+  database.exec(
+    "CREATE INDEX IF NOT EXISTS idx_note_blame_vault_id ON note_blame(vault_id) WHERE vault_id IS NOT NULL",
   );
 }
 
@@ -2086,18 +2106,22 @@ export function getNoteBlame(path: string, sourceHash: string): string | null {
  * Cache a freshly-computed blame. JSON serialization is the caller's job —
  * this function just persists the opaque string. Idempotent on (path,
  * source_hash) — re-running with identical inputs is a no-op via the PK.
+ *
+ * When `vaultId` is supplied the row is tagged with that vault so
+ * `readNoteBlameScoped` (task-detail cross-vault fix) can filter by vault.
  */
-export function setNoteBlame(path: string, sourceHash: string, blameJson: string): void {
+export function setNoteBlame(path: string, sourceHash: string, blameJson: string, vaultId?: string): void {
   const database = getDb();
   database
     .prepare(
-      `INSERT INTO note_blame (path, source_hash, blame_json, computed_at)
-       VALUES (?, ?, ?, datetime('now'))
+      `INSERT INTO note_blame (path, source_hash, blame_json, computed_at, vault_id)
+       VALUES (?, ?, ?, datetime('now'), ?)
        ON CONFLICT(path, source_hash) DO UPDATE SET
          blame_json = excluded.blame_json,
-         computed_at = excluded.computed_at`,
+         computed_at = excluded.computed_at,
+         vault_id = COALESCE(excluded.vault_id, note_blame.vault_id)`,
     )
-    .run(path, sourceHash, blameJson);
+    .run(path, sourceHash, blameJson, vaultId ?? null);
 }
 
 /**
