@@ -235,7 +235,7 @@ export function handleV2TaskDetail(
     result = { artifact, provenance };
 
     if (artifact.type === "note-change" && typeof artifact.notePath === "string") {
-      const blame = readBlameForNote(vaultDb, artifact.notePath);
+      const blame = readBlameForNote(vaultDb, artifact.notePath, vault.vaultId);
       if (blame.length > 0) result.provenanceBlame = blame;
     }
   }
@@ -280,22 +280,44 @@ function safeParseProvenance(json: string): GroveProvenance {
  *
  * ATTACH happens once per pooled connection (see `ensureControlAttached`);
  * the SELECT then reads the latest cached blame row for the path.
+ *
+ * `vaultId` scopes the query to rows written by this vault. Without
+ * scoping, `ORDER BY computed_at DESC LIMIT 1` would return the most
+ * recently written blame row for the path regardless of which vault owns
+ * it — a cross-vault information leak when two tenants have a note at
+ * the same relative path (e.g. both have `Resources/People/Alice.md`).
+ * Prefer vault-scoped rows; fall back to unscoped (vault_id IS NULL)
+ * legacy rows so existing blame data remains accessible.
  */
 function readBlameForNote(
   vaultDb: Database.Database,
   notePath: string,
+  vaultId: string,
 ): ProvenanceBlameEntry[] {
   ensureControlAttached(vaultDb);
 
-  const blameRow = vaultDb
-    .prepare(
-      `SELECT blame_json
-         FROM control.note_blame
-        WHERE path = ?
-        ORDER BY computed_at DESC
-        LIMIT 1`,
-    )
-    .get(notePath) as NoteBlameRow | undefined;
+  // Prefer a row tagged for this vault; fall back to unscoped legacy rows.
+  const blameRow =
+    (vaultDb
+      .prepare(
+        `SELECT blame_json
+           FROM control.note_blame
+          WHERE path = ?
+            AND vault_id = ?
+          ORDER BY computed_at DESC
+          LIMIT 1`,
+      )
+      .get(notePath, vaultId) as NoteBlameRow | undefined) ??
+    (vaultDb
+      .prepare(
+        `SELECT blame_json
+           FROM control.note_blame
+          WHERE path = ?
+            AND vault_id IS NULL
+          ORDER BY computed_at DESC
+          LIMIT 1`,
+      )
+      .get(notePath) as NoteBlameRow | undefined);
 
   if (!blameRow) return [];
 
