@@ -141,8 +141,17 @@ fi
 # at 06:00 UTC). Quietly skips when yesterday's data isn't present yet
 # — this avoids false positives during the daily ingest warmup window.
 #
-# GROVE_COST_THRESHOLD_USD (default 20) — emit alert if yesterday > $X.
-# GROVE_COST_WATCH_KEY_ID (empty = sum across keys) — filter to one key.
+# Two independent thresholds:
+#   GROVE_COST_PER_KEY_THRESHOLD_USD (default 5)  — alert per-key when any
+#     single API key crossed this. Catches "personal-cli leak" patterns
+#     where one key silently spends while aggregate stays under cap.
+#   GROVE_COST_THRESHOLD_USD (default 20) — alert when org-wide aggregate
+#     crossed this. Catches broad cost drift across many keys.
+#
+# GROVE_COST_WATCH_KEY_ID (empty = all) — filter aggregate to one key for
+# backward-compat. The per-key check ignores the filter and always
+# evaluates every key independently — that's the whole point.
+PER_KEY_THRESHOLD_USD="${GROVE_COST_PER_KEY_THRESHOLD_USD:-5}"
 COST_THRESHOLD_USD="${GROVE_COST_THRESHOLD_USD:-20}"
 COST_KEY_FILTER="${GROVE_COST_WATCH_KEY_ID:-}"
 YESTERDAY=$(date -u -d 'yesterday' +%Y-%m-%d)
@@ -164,6 +173,50 @@ if [ "$YESTERDAY_ROWS" -gt 0 ]; then
        AND ('$COST_KEY_FILTER' = '' OR api_key_id = '$COST_KEY_FILTER')
   " 2>/dev/null || echo "0")
   COST_DELTA=$(awk "BEGIN { printf \"%.2f\", $YESTERDAY_COST - $DAY_BEFORE_COST }")
+
+  # Per-key check: any single key over PER_KEY_THRESHOLD_USD. Fetch the
+  # id→name map from the admin API once so alerts name the key the
+  # operator actually recognises ("personal-cli", not "apikey_01Uv2…").
+  # Map lookup failure degrades gracefully — alert still fires with bare id.
+  OVER_KEYS=$(sqlite3 -separator '|' "$DB" "
+    SELECT api_key_id, ROUND(SUM(estimated_cost_usd), 2)
+      FROM discovery_cost_daily
+     WHERE day = '$YESTERDAY' AND estimated_cost_usd IS NOT NULL
+     GROUP BY api_key_id
+     HAVING SUM(estimated_cost_usd) > $PER_KEY_THRESHOLD_USD
+     ORDER BY 2 DESC
+  " 2>/dev/null || true)
+
+  if [ -n "$OVER_KEYS" ]; then
+    KEY_MAP=""
+    if [ -n "${ANTHROPIC_ADMIN_API_KEY:-}" ]; then
+      KEY_MAP=$(curl -s --max-time 5 -H "x-api-key: $ANTHROPIC_ADMIN_API_KEY" \
+        -H "anthropic-version: 2023-06-01" \
+        "https://api.anthropic.com/v1/organizations/api_keys?limit=100" 2>/dev/null \
+        | jq -r '.data[]? | [.id, .name] | @tsv' 2>/dev/null || true)
+    fi
+    while IFS='|' read -r KEY_ID KEY_USD; do
+      [ -z "$KEY_ID" ] && continue
+      KEY_NAME=$(awk -F'\t' -v id="$KEY_ID" '$1==id{print $2;exit}' <<< "$KEY_MAP")
+      [ -z "$KEY_NAME" ] && KEY_NAME="(unknown name)"
+      MODEL_BREAKDOWN=$(sqlite3 -separator '|' "$DB" "
+        SELECT model || '  $' || ROUND(SUM(estimated_cost_usd),2)
+          FROM discovery_cost_daily
+         WHERE day = '$YESTERDAY' AND api_key_id = '$KEY_ID'
+         GROUP BY model
+         ORDER BY 2 DESC
+      " 2>/dev/null || true)
+      ALERTS+=("Signal 5 (per-key): '$KEY_NAME' ($KEY_ID) spent \$$KEY_USD on $YESTERDAY (per-key threshold \$$PER_KEY_THRESHOLD_USD).
+Models:
+$(echo "$MODEL_BREAKDOWN" | sed 's/^/  /')
+If this key isn't supposed to be active, archive it at https://console.anthropic.com/settings/keys")
+    done <<< "$OVER_KEYS"
+  fi
+
+  # Aggregate check (legacy behavior preserved). Independent of the
+  # per-key alerts above — it's possible to trip both simultaneously
+  # (one runaway key + healthy spend on others) or just the aggregate
+  # (many small keys adding up). Both are useful.
   TOP_KEY=$(sqlite3 -separator '|' "$DB" "
     SELECT api_key_id, ROUND(SUM(estimated_cost_usd), 2)
       FROM discovery_cost_daily
@@ -171,11 +224,9 @@ if [ "$YESTERDAY_ROWS" -gt 0 ]; then
      GROUP BY api_key_id
      ORDER BY 2 DESC LIMIT 1
   " 2>/dev/null || true)
-
-  # Threshold comparison via awk (bash arithmetic doesn't do floats)
   OVER=$(awk "BEGIN { print ($YESTERDAY_COST > $COST_THRESHOLD_USD) }")
   if [ "$OVER" = "1" ]; then
-    ALERTS+=("Signal 5: Anthropic cost for $YESTERDAY = \$$YESTERDAY_COST (threshold \$$COST_THRESHOLD_USD).
+    ALERTS+=("Signal 5 (aggregate): Anthropic cost for $YESTERDAY = \$$YESTERDAY_COST (threshold \$$COST_THRESHOLD_USD).
 Day-over-day: \$$DAY_BEFORE_COST -> \$$YESTERDAY_COST  (Δ \$$COST_DELTA).
 Top key: $TOP_KEY.
 Inspect: sqlite3 $DB \"SELECT model, ROUND(estimated_cost_usd,2) FROM discovery_cost_daily WHERE day='$YESTERDAY' ORDER BY 2 DESC\"")
