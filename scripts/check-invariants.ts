@@ -42,7 +42,7 @@ const INVARIANTS: Invariant[] = [
     allowlist: [
       'src/proxy.ts:308:  return { kind: "ok", vaultId: membership?.vault_id ?? "life" };',
       'src/rest.ts:76:    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
-      'src/rest.ts:1901:let vaultIdResolver: VaultIdResolver = () => process.env.GROVE_VAULT_ID ?? "life";',
+      'src/rest.ts:1907:let vaultIdResolver: VaultIdResolver = () => process.env.GROVE_VAULT_ID ?? "life";',
       'src/discovery.ts:65:    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
       'src/server.ts:105:  vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",',
     ],
