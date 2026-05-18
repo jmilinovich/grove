@@ -1780,7 +1780,7 @@ Hook into existing `vault-provision.ts`. After a vault is created, auto-install 
 - Re-calling `bootstrapFirstRun` is a no-op.
 - Slow-vault timeout produces a `running` task that the dashboard renders as the "still working" state.
 
-#### P23-3: `concept-graph-cleanup` executor (`src/skills/concept-graph-cleanup.ts`)
+#### P23-3: `concept-graph-cleanup` executor (`src/skills/concept-graph-cleanup.ts`) ✅ COMPLETE 2026-05-18 (8fb75c2)
 
 Second skill executor. Finds thin concepts (<100 words, no outbound links), orphans, suggests merges. Produces `note-change` artifacts requiring confirm-durable.
 
