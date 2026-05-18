@@ -39,7 +39,7 @@ import {
  * cleans them up. There's a TODO to wire a `scripts/check-cache-version.ts`
  * lint into CI; for now the discipline is purely social.
  */
-export const DISCOVERY_CACHE_VERSION = 1;
+export const DISCOVERY_CACHE_VERSION = 2;
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -193,14 +193,20 @@ export function matchEntity(
 
 function newNotePathExample(config: VaultConfig): string {
   const concept = entityPath(config, "concept");
-  return `${concept}Name.md`;
+  return `${concept}concept-name.md`;
 }
 
 function entityFolderHint(config: VaultConfig): string {
+  const examples: Record<string, string> = {
+    concept: "concept-name",
+    person: "first-last",
+    project: "project-name",
+    company: "company-name",
+  };
   const lines: string[] = [];
   for (const type of ["concept", "person", "project", "company"]) {
     const p = entityPath(config, type);
-    lines.push(`- ${type} → ${p}Name.md`);
+    lines.push(`- ${type} → ${p}${examples[type]}.md`);
   }
   return lines.join("\n");
 }
@@ -237,7 +243,7 @@ ${entityFolderHint(config)}
 1. Extract all notable entities (people, concepts, projects, companies) mentioned in the note.
 2. For each entity, assess confidence (0.0–1.0) that it's a meaningful, linkable entity (not just a passing mention).
 3. If an entity matches an existing vault note (by name or alias, case-insensitive), include the existing_path.
-4. For entities with confidence > 0.8 that do NOT match any existing note, suggest creating a new concept note at the configured folder for its type (see "Entity folders" above). New-note paths follow the pattern: \`${newNotePathExample(config)}\`.
+4. For entities with confidence > 0.8 that do NOT match any existing note, suggest creating a new concept note at the configured folder for its type (see "Entity folders" above). New-note paths follow the pattern: \`${newNotePathExample(config)}\`. Filenames MUST be kebab-case (lowercase, hyphens between words, no spaces, no capital letters) — e.g. \`hadal-zone.md\` not \`Hadal Zone.md\` or \`Hadal-Zone.md\`. This is enforced at write time; non-conformant filenames will be silently corrected, but emitting the right form lets the matching step find existing kebab notes and avoid duplicate stubs.
 5. For each entity found in the text, suggest a wikilink: identify the exact text span (from_text) and the target path (to_path).`;
 
   const noteBlock = `## Note content
@@ -322,9 +328,28 @@ const EXTRACT_TOOL: Anthropic.Tool = {
 };
 
 /** Rewrite a new-note path to the folder configured for its type. */
+/**
+ * Coerce a filename to kebab-case (lowercase, hyphens, .md). The LLM
+ * sometimes returns Title-Case-with-spaces filenames despite the prompt;
+ * Echo's vault picked up duplicate stubs (`Hadal Zone.md` next to
+ * `hadal-zone.md`) on 2026-05-18 because of this. Normalizing at write
+ * time is defense-in-depth — also avoids collisions when one note exists
+ * in kebab and the LLM proposes the Title-Case form.
+ */
+function kebabFilename(filename: string): string {
+  const stem = filename.replace(/\.md$/i, "");
+  const slug = stem
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  // Fall back to the original stem (sanitized) if slug ends up empty —
+  // e.g. an entity name that's purely non-alphanumeric.
+  return (slug || stem.replace(/\s+/g, "-")) + ".md";
+}
+
 function normalizeNewNotePath(note: NewNote, config: VaultConfig): NewNote {
   const folder = entityPath(config, note.type);
-  const filename = basename(note.path);
+  const filename = kebabFilename(basename(note.path));
   const normalized = folder + filename;
   if (normalized === note.path) return note;
   return { ...note, path: normalized };
