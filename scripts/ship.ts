@@ -52,6 +52,12 @@ const PR_POLL_INTERVAL_MS = 15_000;
 // Max time to wait for PR merge (CI + auto-merge queue).
 const PR_MERGE_TIMEOUT_MS = 30 * 60 * 1000;
 
+// Exit code used when a parallel-batch merge conflict halts the run.
+// Distinct from 1 so operators can tell at a glance whether a failure
+// is a transient agent crash vs a structural conflict that needs the
+// batch redesigned (see batches.ts header for the partition rule).
+export const EXIT_MERGE_CONFLICT = 78;
+
 // ── CLI parsing ────────────────────────────────────────────────────
 
 interface Args {
@@ -114,6 +120,194 @@ function appendProgress(entry: Record<string, unknown>): void {
   mkdirSync(dirname(PROGRESS_LOG), { recursive: true });
   const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
   appendFileSync(PROGRESS_LOG, line + "\n", "utf8");
+}
+
+// ── Hook + PLAN.md helpers ─────────────────────────────────────────
+
+/**
+ * Parse PLAN.md task IDs out of a batch title.
+ *
+ * Batch titles follow the conventional-commit shape used everywhere else
+ * in this repo: `feat(P22-1, P22-2): ...`, `fix(CLI-A3): ...`, etc. The
+ * tokens inside the parens are PLAN.md task IDs that the post-commit
+ * hook in `.claude/hooks/post-commit-mark-plan.sh` would normally mark
+ * complete; ship.ts re-runs that mark on `main` as a safety net for the
+ * case where the agent's worktree commits don't fire the hook (or fire
+ * it but never commit the staged PLAN.md edit before exiting).
+ *
+ * Exported for testing — kept in sync with the regex in
+ * `scripts/check-plan-drift.ts` and `.claude/hooks/post-commit-mark-plan.sh`.
+ */
+export function parseTaskIds(title: string): string[] {
+  const parens = title.match(/^[a-z]+\(([^)]+)\)/i);
+  if (!parens) return [];
+  const tokens = parens[1].split(",").map((t) => t.trim()).filter(Boolean);
+  const idRe = /^(P\d+(?:-[A-Z]+)*-[A-Z0-9]+|CLI-[A-Z]\d+|REST-\d+)$/i;
+  return tokens.filter((t) => idRe.test(t)).map((t) => t.toUpperCase());
+}
+
+/**
+ * One-line warning if `core.hooksPath` isn't pointed at `.claude/hooks`.
+ *
+ * The PLAN.md auto-marker lives in `.claude/hooks/post-commit-mark-plan.sh`.
+ * It's wired as a Claude Code PostToolUse hook today (fires on the agent's
+ * own `git commit`), but pointing git's `core.hooksPath` at the same dir
+ * lets it double as a real git post-commit hook — which catches commits
+ * made outside Claude Code (e.g. manual rebases, the safety-net path
+ * below). We don't auto-set it; just nudge.
+ *
+ * Exported for testing.
+ */
+export function shouldWarnHooksPath(cfg: string | null): boolean {
+  if (cfg === null) return true;
+  return cfg.trim() !== ".claude/hooks";
+}
+
+function checkHooksPath(): void {
+  const out = shTry(`git config --get core.hooksPath`, {});
+  const cfg = out.ok ? out.out : null;
+  if (shouldWarnHooksPath(cfg)) {
+    log(
+      `⚠ core.hooksPath is ${cfg ? `'${cfg}'` : "unset"} — consider:` +
+        ` \`git config core.hooksPath .claude/hooks\` so the PLAN.md auto-marker` +
+        ` runs on every commit (including outside Claude Code).`,
+    );
+  }
+}
+
+/**
+ * Find files declared by two or more entries in the same batch. Used by
+ * the pre-flight overlap check — returns a map of file → branches that
+ * declared it (only for files declared by ≥2 entries). When `targetFiles`
+ * is undefined on an entry, that entry contributes nothing to the check.
+ *
+ * Exported for testing.
+ */
+export function findOverlappingTargets(
+  entries: ReadonlyArray<{ branch: string; targetFiles?: readonly string[] }>,
+): Map<string, string[]> {
+  const byFile = new Map<string, string[]>();
+  for (const e of entries) {
+    if (!e.targetFiles) continue;
+    for (const f of e.targetFiles) {
+      const list = byFile.get(f) ?? [];
+      list.push(e.branch);
+      byFile.set(f, list);
+    }
+  }
+  const out = new Map<string, string[]>();
+  for (const [f, branches] of byFile) {
+    if (branches.length >= 2) out.set(f, branches);
+  }
+  return out;
+}
+
+function warnOnOverlappingTargets(batch: Batch): void {
+  const overlaps = findOverlappingTargets(batch.entries);
+  if (overlaps.size === 0) return;
+  log(
+    `⚠ ${batch.id}: ${overlaps.size} file(s) declared by multiple parallel entries —` +
+      ` expect merge conflicts. See batches.ts header for the partition rule.`,
+  );
+  for (const [file, branches] of overlaps) {
+    log(`    ${file} ← ${branches.join(", ")}`);
+  }
+}
+
+/**
+ * Run mark-plan-task.mjs on `main` for each task ID parsed out of the
+ * batch title. If anything was staged (the marker stages PLAN.md but
+ * does not commit), make one follow-up commit + push it. Idempotent:
+ * mark-plan-task.mjs no-ops when the heading is already ✅ COMPLETE,
+ * and we no-op when nothing was staged.
+ *
+ * Runs on the repo root (already checked out to main by the caller).
+ */
+async function runMarkPlanSafetyNet(
+  batch: Batch,
+  mergeSha: string,
+): Promise<void> {
+  const taskIds = parseTaskIds(batch.title);
+  if (taskIds.length === 0) {
+    log(`  no PLAN.md task IDs parsed from title — skipping mark-plan safety net`);
+    return;
+  }
+
+  const shortSha = mergeSha.slice(0, 7);
+  for (const id of taskIds) {
+    const res = shTry(`node scripts/mark-plan-task.mjs ${id} ${shortSha}`, {});
+    if (!res.ok) {
+      log(`  ⚠ mark-plan-task ${id} exited non-zero — continuing (next batch will retry)`);
+    }
+  }
+
+  // Anything staged? Commit + push.
+  const staged = shTry(`git diff --cached --name-only`, {});
+  if (!staged.ok || !staged.out.trim()) {
+    log(`  mark-plan: PLAN.md already up to date (hook caught it earlier)`);
+    return;
+  }
+
+  const subject = `chore(plan): mark ${taskIds.join(", ")} complete (${shortSha})`;
+  const body = [
+    `Safety-net follow-up commit by scripts/ship.ts.`,
+    "",
+    `The PostToolUse hook stages PLAN.md when a worktree commit references a`,
+    `task ID, but the staged change is lost if the agent exits before its`,
+    `next commit. This catches the gap by re-running mark-plan-task.mjs on`,
+    `main after the batch's PR merges.`,
+    "",
+    `Idempotent — re-running is a no-op once the heading is ✅ COMPLETE.`,
+  ].join("\n");
+  const commitRes = shTry(
+    `git commit -m ${JSON.stringify(subject)} -m ${JSON.stringify(body)}`,
+    {},
+  );
+  if (!commitRes.ok) {
+    log(`  ⚠ mark-plan safety-net commit failed: ${commitRes.out}`);
+    return;
+  }
+  const pushRes = shTry(`git push origin main`, {});
+  if (!pushRes.ok) {
+    log(`  ⚠ mark-plan safety-net push failed: ${pushRes.out}`);
+    return;
+  }
+  log(`  ✓ mark-plan safety-net pushed for ${taskIds.join(", ")}`);
+}
+
+/**
+ * Reset the local repo to a clean state on `main`. Best-effort: aborts
+ * any in-progress merge/rebase first, then checks out main and fast-
+ * forwards. Used in `runBatch`'s `finally` so the next iteration's
+ * `assertCleanAndOnMain` doesn't blow up on a stray ship/<id> checkout
+ * left behind by a crashed run.
+ */
+function resetToMain(dir: string, label: string): void {
+  // Abort any half-finished merge/rebase first.
+  const gitDir = shTry(`git rev-parse --git-dir`, { cwd: dir });
+  if (gitDir.ok) {
+    const gd = resolve(dir, gitDir.out);
+    if (existsSync(resolve(gd, "MERGE_HEAD"))) {
+      shTry(`git merge --abort`, { cwd: dir });
+    }
+    if (existsSync(resolve(gd, "rebase-merge")) || existsSync(resolve(gd, "rebase-apply"))) {
+      shTry(`git rebase --abort`, { cwd: dir });
+    }
+    if (existsSync(resolve(gd, "CHERRY_PICK_HEAD"))) {
+      shTry(`git cherry-pick --abort`, { cwd: dir });
+    }
+  }
+  const branch = shTry(`git rev-parse --abbrev-ref HEAD`, { cwd: dir });
+  if (!branch.ok) return; // not a git repo, give up
+  if (branch.out !== "main") {
+    const checkout = shTry(`git checkout main`, { cwd: dir });
+    if (!checkout.ok) {
+      log(`  ⚠ ${label}: couldn't checkout main during cleanup: ${checkout.out}`);
+      return;
+    }
+  }
+  shTry(`git fetch origin main --quiet`, { cwd: dir });
+  shTry(`git pull origin main --ff-only`, { cwd: dir });
 }
 
 // ── Resume resolution ──────────────────────────────────────────────
@@ -452,12 +646,35 @@ function runAgent(entry: BatchEntry, logDir: string): Promise<AgentResult> {
 
 // ── Ship branch + PR ───────────────────────────────────────────────
 
+/**
+ * Error thrown by `buildShipBranch` when two worktree branches in the
+ * same batch touch the same file. The caller catches this, logs the
+ * affected branches + files, and exits 78 (`EXIT_MERGE_CONFLICT`).
+ *
+ * Exported so tests can assert the type without string-matching the
+ * message.
+ */
+export class MergeConflictError extends Error {
+  constructor(
+    public readonly mergedBranches: string[],
+    public readonly conflictBranch: string,
+    public readonly files: string[],
+  ) {
+    super(
+      `merge conflict between ${mergedBranches.join(", ") || "(no prior)"} and ${conflictBranch} ` +
+        `on file(s): ${files.join(", ")}`,
+    );
+    this.name = "MergeConflictError";
+  }
+}
+
 function buildShipBranch(batch: Batch): { sha: string; shipBranch: string } {
   const shipBranch = `ship/${batch.id}`;
   // Start from latest origin/main
   shTry(`git branch -D ${shipBranch}`, {}); // nuke any stale local
   sh(`git checkout -B ${shipBranch} origin/main`);
 
+  const mergedBranches: string[] = [];
   for (const entry of batch.entries) {
     const wtBranch = `worktree-${entry.branch}`;
     // Does the worktree branch have commits ahead of origin/main?
@@ -469,7 +686,19 @@ function buildShipBranch(batch: Batch): { sha: string; shipBranch: string } {
       continue;
     }
     log(`  merge ${wtBranch} (${ahead} commits)`);
-    sh(`git merge ${wtBranch} --no-edit`);
+    const merge = shTry(`git merge ${wtBranch} --no-edit`, {});
+    if (!merge.ok) {
+      // Capture conflicted files BEFORE aborting (they're only listed
+      // mid-merge). git diff --name-only --diff-filter=U lists them.
+      const conflictedRes = shTry(`git diff --name-only --diff-filter=U`, {});
+      const files = conflictedRes.ok
+        ? conflictedRes.out.split("\n").map((s) => s.trim()).filter(Boolean)
+        : [];
+      // Abort so the working tree isn't left mid-merge.
+      shTry(`git merge --abort`, {});
+      throw new MergeConflictError(mergedBranches, wtBranch, files);
+    }
+    mergedBranches.push(wtBranch);
   }
 
   const sha = sh(`git rev-parse HEAD`, { quiet: true });
@@ -632,10 +861,12 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
     for (const e of batch.entries) {
       log(`  └─ worktree-${e.branch}`);
     }
+    warnOnOverlappingTargets(batch);
     return;
   }
 
   assertCleanAndOnMain(REPO_ROOT, "grove");
+  warnOnOverlappingTargets(batch);
   await groveWwwSyncBefore();
 
   // Per-batch log directory — each agent gets its own file under here
@@ -669,7 +900,37 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
   await groveWwwSyncAfter();
 
   log("building ship branch");
-  const { sha, shipBranch } = buildShipBranch(batch);
+  let sha: string;
+  let shipBranch: string;
+  try {
+    ({ sha, shipBranch } = buildShipBranch(batch));
+  } catch (err) {
+    if (err instanceof MergeConflictError) {
+      log("");
+      log(`✗ ${batch.id}: merge conflict on parallel worktrees — halting`);
+      log(`  already merged: ${err.mergedBranches.join(", ") || "(none)"}`);
+      log(`  conflicted:     ${err.conflictBranch}`);
+      log(`  on file(s):     ${err.files.join(", ") || "(none captured)"}`);
+      log("");
+      log("  Worktrees preserved for inspection. Resolve by either:");
+      log("    1. Reshape the batch so parallel entries don't share files");
+      log("       (see scripts/ship/batches.ts header), then re-run.");
+      log("    2. Manually rebase one worktree on top of the other and rerun");
+      log("       --only this batch.");
+      appendProgress({
+        batch: batch.id,
+        status: "merge_conflict",
+        merged_branches: err.mergedBranches,
+        conflict_branch: err.conflictBranch,
+        files: err.files,
+      });
+      // Reset local repo so the operator (or a later --from rerun) doesn't
+      // trip assertCleanAndOnMain.
+      resetToMain(REPO_ROOT, "grove");
+      process.exit(EXIT_MERGE_CONFLICT);
+    }
+    throw err;
+  }
   log(`  ship branch ${shipBranch} @ ${sha.slice(0, 7)}`);
 
   log("opening PR");
@@ -699,7 +960,18 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
   }
 
   log("waiting for checks + merge");
-  const mergeSha = await enableAutoMergeAndWait(prNumber);
+  let mergeSha: string;
+  try {
+    mergeSha = await enableAutoMergeAndWait(prNumber);
+  } catch (err) {
+    // Wait timed out or merge failed. Reset local state so the next
+    // batch (or a re-run) doesn't crash in assertCleanAndOnMain on a
+    // stale ship/<id> checkout. Worktrees stay so the operator can
+    // inspect the agent output.
+    log(`  ⚠ merge wait failed: ${(err as Error).message} — resetting local state`);
+    resetToMain(REPO_ROOT, "grove");
+    throw err;
+  }
   log(`  ✓ PR #${prNumber} merged at ${mergeSha.slice(0, 7)}`);
 
   if (batch.noAutoMerge && autoConfirmSchema) {
@@ -714,9 +986,22 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
     sha: mergeSha,
   });
 
-  // Sync local main with the merge + clean up worktrees
+  // Sync local main with the merge + clean up worktrees.
+  // Order matters: checkout main BEFORE running the mark-plan safety net
+  // (it stages PLAN.md, which only exists at repo root on main).
   sh(`git checkout main`);
   sh(`git pull origin main --ff-only`);
+
+  // Belt-and-braces for the PostToolUse hook: if the agent's worktree
+  // commits didn't end up marking PLAN.md (hook didn't fire, agent
+  // exited before staging propagated, etc.), re-run mark-plan-task.mjs
+  // here and push a single follow-up commit. Idempotent.
+  try {
+    await runMarkPlanSafetyNet(batch, mergeSha);
+  } catch (err) {
+    log(`  ⚠ mark-plan safety net errored: ${(err as Error).message} — continuing`);
+  }
+
   for (const e of batch.entries) cleanupWorktree(e);
 
   log(`batch ${batch.id} complete`);
@@ -726,6 +1011,10 @@ async function runBatch(batch: Batch, dryRun: boolean): Promise<void> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+
+  // Non-fatal nudge — see shouldWarnHooksPath / checkHooksPath above.
+  // Skip in --list mode so `npm run ship -- --list` is quiet.
+  if (!args.list) checkHooksPath();
 
   if (args.list) {
     const done = await mergedShipPRs();
@@ -766,8 +1055,14 @@ async function main(): Promise<void> {
   log("✅ DONE");
 }
 
-main().catch((err) => {
-  console.error("\nFATAL:", err.message);
-  if (err.stack) console.error(err.stack);
-  process.exit(1);
-});
+// Only execute when invoked as the entry script — `import { ... } from
+// "scripts/ship.ts"` (the tests do this) should NOT trigger main().
+const __entry = process.argv[1] ? resolve(process.argv[1]) : "";
+const __self = fileURLToPath(import.meta.url);
+if (__entry === __self) {
+  main().catch((err) => {
+    console.error("\nFATAL:", err.message);
+    if (err.stack) console.error(err.stack);
+    process.exit(1);
+  });
+}
