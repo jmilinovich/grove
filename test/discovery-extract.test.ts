@@ -222,7 +222,9 @@ describe("extractEntities", () => {
     const result = await extractEntities("I've been studying reinforcement learning.", vocab);
 
     expect(result.new_notes).toHaveLength(1);
-    expect(result.new_notes[0].path).toBe("Resources/Concepts/Reinforcement Learning.md");
+    // Filename gets kebab-cased at normalization time, even when the LLM
+    // emits Title Case with spaces. See `kebabFilename` in discovery-extract.
+    expect(result.new_notes[0].path).toBe("Resources/Concepts/reinforcement-learning.md");
   });
 
   it("rewrites new-note paths to the folder configured for the type", async () => {
@@ -262,7 +264,33 @@ describe("extractEntities", () => {
     );
 
     expect(result.new_notes).toHaveLength(1);
-    expect(result.new_notes[0].path).toBe("Ideas/Context Engineering.md");
+    expect(result.new_notes[0].path).toBe("Ideas/context-engineering.md");
+  });
+
+  it("kebab-cases Title-Case filenames the LLM emits (avoids duplicate stubs)", async () => {
+    // Reproduces the echo-vault 2026-05-18 incident: the LLM kept emitting
+    // `Hadal Zone.md` filenames even though the prompt said kebab-case, and
+    // those landed alongside the user's own `hadal-zone.md`. The normalizer
+    // collapses them to a single kebab path, so the existsSync check in
+    // discovery-link.ts hits the already-existing note.
+    const apiResponse: ExtractionResult = {
+      entities: [
+        { name: "Hadal Zone", type: "concept", confidence: 0.95 },
+        { name: "John Smith", type: "person", confidence: 0.9 },
+      ],
+      suggested_links: [],
+      new_notes: [
+        { path: "Resources/Concepts/Hadal Zone.md", type: "concept", tags: ["ocean"], content: "x" },
+        { path: "Resources/People/John Smith.md", type: "person", tags: ["person"], content: "x" },
+      ],
+    };
+
+    mockClient(apiResponse);
+    const result = await extractEntities("Reading about the hadal zone with John.", []);
+
+    expect(result.new_notes).toHaveLength(2);
+    expect(result.new_notes[0].path).toBe("Resources/Concepts/hadal-zone.md");
+    expect(result.new_notes[1].path).toBe("Resources/People/john-smith.md");
   });
 
   it("includes confidence scores and logs low-confidence entities", async () => {
