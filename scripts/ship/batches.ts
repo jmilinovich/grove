@@ -8,6 +8,29 @@
  * Task discipline (commit format, grove-www rules, exit behavior) lives in
  * `.claude/settings.json`'s systemPrompt — DON'T duplicate it in each entry's
  * prompt. Just describe the task.
+ *
+ * Parallel-overlap constraint
+ * ───────────────────────────
+ * Parallel entries in the same batch run as independent worktrees and are
+ * merged sequentially into `ship/<id>`. If two entries write to the SAME
+ * file, the second merge hits a CONFLICT and ship.ts halts with exit 78
+ * (manual intervention required). Patterns we've burned on:
+ *
+ *   p21-3  → 2 entries wrote `src/v2-tasks.ts`, 3 modified `src/proxy.ts`
+ *   p22-1  → both entries modified `src/v2-tasks.ts` + `src/proxy.ts`
+ *   p22-2  → both entries modified `src/v2-tasks.ts` (or v2-skills.ts) + proxy
+ *
+ * When fanning out parallel agents, partition the file space cleanly:
+ *
+ *   - Give each entry its OWN source file (one writes v2-tasks.ts, the
+ *     other writes v2-skills.ts) — don't fan out tasks that both edit
+ *     v2-tasks.ts in parallel.
+ *   - For shared anchor files like `src/proxy.ts`, route all dispatch
+ *     wiring through ONE entry; the others export handlers from their
+ *     own files. Avoids the 3-way proxy.ts merge that bit p21-3.
+ *
+ * If you do declare overlapping `targetFiles`, ship.ts logs a warning at
+ * batch start so the operator can choose to abort before agents run.
  */
 
 export interface BatchEntry {
@@ -15,6 +38,13 @@ export interface BatchEntry {
   branch: string;
   /** Prompt for the agent. Keep it spec-only; commit discipline comes from settings. */
   prompt: string;
+  /**
+   * Files this entry is expected to write. Used by ship.ts for the
+   * pre-flight overlap check — if two entries in the same batch declare
+   * the same file, ship.ts logs a warning before launching agents.
+   * Optional: when omitted, the overlap check skips this entry.
+   */
+  targetFiles?: string[];
 }
 
 export interface Batch {
