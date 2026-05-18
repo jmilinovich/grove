@@ -89,6 +89,13 @@ END_DAY=$(date_add_day "$DAY" 1)
 # Pricing (USD per million tokens). Models not in this table store
 # estimated_cost_usd=NULL and emit a stderr warning. Keep in sync with
 # https://docs.anthropic.com/pricing.
+#
+# Cache multipliers across the Claude 4 family follow a fixed shape:
+#   cache_read       = input × 0.10
+#   cache_creation_5m = input × 1.25
+#   cache_creation_1h = input × 2.00
+# Verify each new entry against the docs above — the multipliers have
+# held across recent model bumps but are not contractually guaranteed.
 PRICING_JSON=$(cat <<'EOF'
 {
   "claude-haiku-4-5-20251001": {
@@ -97,6 +104,27 @@ PRICING_JSON=$(cat <<'EOF'
     "cache_creation_5m": 1.00,
     "cache_creation_1h": 1.60,
     "output": 4.00
+  },
+  "claude-sonnet-4-6": {
+    "uncached": 3.00,
+    "cache_read": 0.30,
+    "cache_creation_5m": 3.75,
+    "cache_creation_1h": 6.00,
+    "output": 15.00
+  },
+  "claude-opus-4-7": {
+    "uncached": 15.00,
+    "cache_read": 1.50,
+    "cache_creation_5m": 18.75,
+    "cache_creation_1h": 30.00,
+    "output": 75.00
+  },
+  "claude-opus-4-5-20251101": {
+    "uncached": 15.00,
+    "cache_read": 1.50,
+    "cache_creation_5m": 18.75,
+    "cache_creation_1h": 30.00,
+    "output": 75.00
   }
 }
 EOF
