@@ -1754,7 +1754,13 @@ export async function handleMoveNote(
 
     const modified = updateWikilinks(ctx.vaultPath, srcRel, dstRel, aliases);
 
-    const paths = [srcRel, dstRel, ...modified];
+    // `git mv` has already staged both srcRel (deleted) and dstRel (added) as a
+    // rename. Don't re-add srcRel — once it's part of a staged rename it isn't
+    // a regular path entry, and `git add -A -- srcRel` errors with "pathspec
+    // did not match any files". Stage only the wikilink-rewritten files;
+    // the commit step picks up the already-staged rename. (Bug surfaced
+    // 2026-05-18 during the echo-vault cleanup, blocked every PATCH.)
+    const paths = modified;
     const commitSha = await gitCommitPaths(
       ctx.vaultPath,
       paths,
