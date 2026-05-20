@@ -113,6 +113,23 @@ export const SKILL_REGISTRY: readonly SkillMetadata[] = [
     defaultCadence: "weekly",
     defaultArtifactType: "concept-merge",
   },
+  {
+    id: "skill-disambiguation",
+    slug: "disambiguation",
+    name: "Disambiguation",
+    domain: "knowledge",
+    author: "builtin",
+    description:
+      "Scans Journal entries for ambiguous Person mentions (e.g., \"Anna\" matching two People notes), picks a best-guess candidate by backlink + recency score, applies a provisional [[link]], and records a Decision for review.",
+    sampleTasks: [
+      "Journal mentions matching 2+ People notes",
+      "ambiguous first-name references in today's entry",
+      "provisional Person links awaiting confirmation",
+    ],
+    cadenceOptions: ["weekly", "on-demand"],
+    defaultCadence: "weekly",
+    defaultArtifactType: "note-link",
+  },
 ];
 
 /** Lookup by slug; returns undefined if the slug isn't a registered builtin. */
@@ -140,6 +157,8 @@ export async function loadSkillModule(slug: string): Promise<unknown | null> {
       return await import("./dup-people-detection.js");
     case "concept-graph-cleanup":
       return await import("./concept-graph-cleanup.js");
+    case "disambiguation":
+      return await import("./disambiguation.js");
     default:
       return null;
   }
