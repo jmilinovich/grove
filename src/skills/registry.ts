@@ -147,6 +147,23 @@ export const SKILL_REGISTRY: readonly SkillMetadata[] = [
     defaultCadence: "weekly",
     defaultArtifactType: "note-link",
   },
+  {
+    id: "skill-enrichment",
+    slug: "enrichment",
+    name: "Enrichment",
+    domain: "knowledge",
+    author: "builtin",
+    description:
+      "Identifies thin Concept notes (body under 200 chars with 3+ backlinks) and drafts a four-paragraph expansion grounded in backlink context via Claude Haiku. Records a provisional Decision with prior_content captured byte-for-byte for compensation on rollback. Replaces the legacy daily-vault-review skill in Inbox v2.",
+    sampleTasks: [
+      "thin Concept notes with rich backlink context",
+      "Concepts mentioned often but undefined",
+      "provisional enrichments awaiting confirmation",
+    ],
+    cadenceOptions: ["weekly", "on-demand"],
+    defaultCadence: "weekly",
+    defaultArtifactType: "note-change",
+  },
 ];
 
 /** Lookup by slug; returns undefined if the slug isn't a registered builtin. */
@@ -178,6 +195,8 @@ export async function loadSkillModule(slug: string): Promise<unknown | null> {
       return await import("./disambiguation.js");
     case "links-suggestion":
       return await import("./links-suggestion.js");
+    case "enrichment":
+      return await import("./enrichment.js");
     default:
       return null;
   }
