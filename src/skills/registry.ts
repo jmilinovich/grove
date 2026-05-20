@@ -164,6 +164,26 @@ export const SKILL_REGISTRY: readonly SkillMetadata[] = [
     defaultCadence: "weekly",
     defaultArtifactType: "note-change",
   },
+  {
+    // S-INBOX-10: stub executor for `/review {kind:"refine"}` tasks.
+    // Spawned by dispatchTaskReviewV2, NEVER scheduled on a cadence
+    // (defaultCadence=null, cadenceOptions=["on-demand"]). Today it
+    // just logs the refinement and completes; real execution lands
+    // when a follow-up PR replaces the stub.
+    id: "skill-refine-handler",
+    slug: "refine-handler",
+    name: "Refinement Handler",
+    domain: "system",
+    author: "builtin",
+    description:
+      "Executes refinement tasks spawned when an operator picks 'refine' on an inbox item. Today logs the refinement instruction as a surface artifact; a future PR will regenerate the original suggestion with the instruction folded in.",
+    sampleTasks: [
+      "refinement instructions awaiting execution",
+    ],
+    cadenceOptions: ["on-demand"],
+    defaultCadence: null,
+    defaultArtifactType: "surface",
+  },
 ];
 
 /** Lookup by slug; returns undefined if the slug isn't a registered builtin. */
@@ -197,6 +217,8 @@ export async function loadSkillModule(slug: string): Promise<unknown | null> {
       return await import("./links-suggestion.js");
     case "enrichment":
       return await import("./enrichment.js");
+    case "refine-handler":
+      return await import("./refine-handler.js");
     default:
       return null;
   }
