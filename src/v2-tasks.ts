@@ -27,6 +27,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "./db.js";
 import { getVaultDb } from "./db-per-vault.js";
+import { bridgeDecisionsToTasks } from "./decision-writer.js";
 import { SKILL_REGISTRY, type SkillMetadata } from "./skills/registry.js";
 import { dispatchTaskRun } from "./v2-task-run.js";
 import {
@@ -140,6 +141,18 @@ interface TaskRowAliased {
   provenanceJson: string | null;
 }
 
+/**
+ * Review-state row shape: TaskRowAliased + two columns from the JOINed
+ * `decisions` table. `decisionType` and `decisionOptionsJson` are null
+ * for legacy review tasks with no backing decision; the DTO mapper
+ * leaves `itemType`/`options` undefined in that case (UI handles
+ * gracefully).
+ */
+interface ReviewRowAliased extends TaskRowAliased {
+  decisionType: SuggestionType | null;
+  decisionOptionsJson: string | null;
+}
+
 // LEFT JOIN task_results so we can shape `Task.result` in a single
 // round-trip; `result` is null when no row exists. Column aliases match
 // grove-www's camelCase field names exactly so rows pass through as the
@@ -190,6 +203,30 @@ function rowToTask(row: TaskRowAliased): Task {
     result,
   };
   if (row.sourceNotePath) task.sourceNotes = [row.sourceNotePath];
+  return task;
+}
+
+/**
+ * S-INBOX-9 — same as rowToTask but hydrates `itemType` + `options` from
+ * the JOINed decisions row when present. Legacy review tasks (no
+ * matching decision) leave both undefined; the UI must handle that.
+ */
+function reviewRowToTask(row: ReviewRowAliased): Task {
+  const task = rowToTask(row);
+  if (row.decisionType !== null) {
+    task.itemType = row.decisionType;
+    if (row.decisionOptionsJson) {
+      try {
+        task.options = JSON.parse(row.decisionOptionsJson) as ReviewOption[];
+      } catch (err) {
+        console.error(
+          "[v2-tasks] failed to parse decision options_json for task",
+          row.id,
+          err,
+        );
+      }
+    }
+  }
   return task;
 }
 
@@ -330,18 +367,62 @@ function buildSkillsForVault(vaultId: string): Skill[] {
 export function buildBacklogPayload(vaultId: string): BacklogPayload {
   const vaultDb = getVaultDb(vaultId);
 
+  // S-INBOX-9 — lazily bridge any provisional Decision without a
+  // task_id into a review-state Task. Without this, decisions recorded
+  // by the suggestion skills (S-INBOX-6/7/8) are invisible to the
+  // inbox UI. Idempotent: bridged Decisions have non-null task_id and
+  // are skipped on subsequent calls. Tolerates a missing decisions
+  // table (returns {created: 0}) — see decision-writer.ts.
+  bridgeDecisionsToTasks(vaultId);
+
+  // Detect whether the decisions table exists in this vault's
+  // state.db. Production always has it (migration 003); fixture
+  // databases that copy only 001/002 don't. The presence flag picks
+  // between two equivalent review queries — JOINed (with itemType/
+  // options hydration) vs unjoined (legacy fallback). Avoids forcing
+  // every test fixture to copy migration 003.
+  const hasDecisionsTable =
+    vaultDb
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='decisions'",
+      )
+      .get() !== undefined;
+
   // review: oldest-disposition-first would invert the user's intuition;
   // newest review items go to the top of the list (matches the mock
   // implementation, SPEC §4).
-  const reviewRows = vaultDb
-    .prepare(
-      `SELECT ${TASK_SELECT_COLUMNS}
-         FROM tasks t
-         LEFT JOIN task_results r ON r.task_id = t.id
-        WHERE t.state = 'review'
-        ORDER BY t.created_at DESC`,
-    )
-    .all() as TaskRowAliased[];
+  //
+  // LEFT JOIN decisions ON decisions.task_id = t.id hydrates `itemType`
+  // and `options` on review-state Task DTOs (S-INBOX-9). Legacy review
+  // tasks with no backing decision return null for both columns and
+  // surface with itemType + options undefined.
+  const reviewRows = hasDecisionsTable
+    ? (vaultDb
+        .prepare(
+          `SELECT ${TASK_SELECT_COLUMNS},
+                  d.type         AS decisionType,
+                  d.options_json AS decisionOptionsJson
+             FROM tasks t
+             LEFT JOIN task_results r ON r.task_id = t.id
+             LEFT JOIN decisions d    ON d.task_id = t.id
+            WHERE t.state = 'review'
+            ORDER BY t.created_at DESC`,
+        )
+        .all() as ReviewRowAliased[])
+    : (vaultDb
+        .prepare(
+          `SELECT ${TASK_SELECT_COLUMNS}
+             FROM tasks t
+             LEFT JOIN task_results r ON r.task_id = t.id
+            WHERE t.state = 'review'
+            ORDER BY t.created_at DESC`,
+        )
+        .all() as TaskRowAliased[]
+      ).map((r) => ({
+        ...r,
+        decisionType: null,
+        decisionOptionsJson: null,
+      })) as ReviewRowAliased[];
 
   // pending+running: scheduled items first by scheduled_for ASC; unscheduled
   // fall to the bottom; ties break by most-recently-created. SQLite sorts
@@ -371,7 +452,7 @@ export function buildBacklogPayload(vaultId: string): BacklogPayload {
     .all() as TaskRowAliased[];
 
   return {
-    reviewTasks: reviewRows.map(rowToTask),
+    reviewTasks: reviewRows.map(reviewRowToTask),
     pendingTasks: pendingRows.map(rowToTask),
     clearedTasks: clearedRows.map(rowToTask),
     throughput: computeThroughput(vaultId),
