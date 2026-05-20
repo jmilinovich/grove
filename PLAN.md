@@ -16,6 +16,9 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Live:** Phases 0-5 complete, security hardened, observable, magic link auth, persistent sessions, S3 backups, cross-domain auth with grove.md
 **Next:** Phase 20 (dashboard IA: Home + Access, supersedes Phase 4b visuals + Phase 4d) → Multi-user (Phase 9a) → Discovery (Phase 7)
 
+**Active feature plans (cross-cutting):**
+- **Inbox v2** — `docs/inbox-v2-spec.md` (design) + `docs/inbox-v2-plan.md` (work items). Server items prefixed `S-INBOX-*`. Critical path: 10 hops, peak parallelism: 5 agents at W3.
+
 ---
 
 ## Architecture
