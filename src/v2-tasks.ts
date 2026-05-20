@@ -37,6 +37,7 @@ import {
 import { ensureControlAttached } from "./v2-task-detail.js";
 import type { VaultContext } from "./vault-router.js";
 import type { Cadence, TaskState } from "./db-types.js";
+import type { ReviewOption, SuggestionType } from "./v2-decisions.js";
 
 // ─── Shared types — mirror grove-www/src/lib/grove-api.v2.types.ts ───────
 
@@ -80,6 +81,12 @@ export interface Task {
   needsReviewReason?: string;
   sourceNotes?: string[];
   errorMessage?: string;
+  // Inbox v2 (S-INBOX-1). Optional + additive — populated for tasks
+  // emitted by a suggestion-class skill once S-INBOX-9 wires
+  // buildBacklogPayload to JOIN the decisions table. Legacy tasks
+  // without a linked decision leave both undefined.
+  itemType?: SuggestionType;
+  options?: ReviewOption[];
 }
 
 export interface Skill {
