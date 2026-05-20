@@ -118,13 +118,14 @@ describe("listSkillsForVault — P21-5 skills endpoint", () => {
     closeAllVaultDbs();
   });
 
-  it("returns exactly the 4 builtin skills", () => {
+  it("returns exactly the 5 builtin skills", () => {
     const skills = listSkillsForVault("vault_skills");
     expect(skills.map((s) => s.slug).sort()).toEqual([
       "concept-graph-cleanup",
       "daily-vault-review",
       "disambiguation",
       "dup-people-detection",
+      "links-suggestion",
     ]);
   });
 
@@ -185,7 +186,7 @@ describe("listSkillsForVault — P21-5 skills endpoint", () => {
     // The `satisfies Skill[]` check is the load-bearing assertion: if the
     // wire shape drifts from grove-www's contract, this stops compiling.
     const typed = skills satisfies Skill[];
-    expect(typed.length).toBe(4);
+    expect(typed.length).toBe(5);
 
     for (const skill of typed) {
       expect(typeof skill.id).toBe("string");
