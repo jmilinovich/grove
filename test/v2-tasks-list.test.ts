@@ -170,17 +170,18 @@ describe("v2-tasks: buildBacklogPayload", () => {
     expect(payload.throughput.estimatedClearText).toBe("all clear");
   });
 
-  it("returns the 5 registry skills with installState='available' when no configs exist", () => {
+  it("returns the 6 registry skills with installState='available' when no configs exist", () => {
     seedVault("vault_skills", "skills");
 
     const payload = buildBacklogPayload("vault_skills");
 
-    expect(payload.skills).toHaveLength(5);
+    expect(payload.skills).toHaveLength(6);
     expect(payload.skills.map((s) => s.slug).sort()).toEqual([
       "concept-graph-cleanup",
       "daily-vault-review",
       "disambiguation",
       "dup-people-detection",
+      "enrichment",
       "links-suggestion",
     ]);
     for (const skill of payload.skills) {

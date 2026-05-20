@@ -1,3 +1,4 @@
+// @deprecated — replaced by enrichment (S-INBOX-8); removal in C-INBOX-1
 /**
  * P22-5 — `daily-vault-review` skill executor.
  *
