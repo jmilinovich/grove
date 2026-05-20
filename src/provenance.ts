@@ -261,3 +261,54 @@ export const PERISHABLE_USAGE_DIRECTIVE =
 
 export const PERISHABLE_USAGE_DIRECTIVE_SOFT =
   "This note is unstamped, but its location and content suggest it may be perishable (AI synthesis or moment-in-time snapshot). Verify the content reflects current understanding before extending it.";
+
+// ── Decision-Id trailers (S-INBOX-3) ───────────────────────────────
+//
+// Inbox v2 records "decisions" (disambiguation / link / enrichment
+// resolutions) as their own git trailer alongside Provenance-*. One
+// `Decision-Id: <id>` line per decision; the trailer is repeatable and
+// follows the canonical provenance trailers in the commit footer.
+//
+// `appendDecisionTrailers` is the one place that knows how to splice
+// these into an already-composed commit message: if the message already
+// carries a trailer block (e.g. Provenance-*), the Decision-Id lines
+// join that block; if it doesn't, a blank line is inserted first so
+// the result is still a well-formed trailer block per
+// git-interpret-trailers(1).
+
+/** Token used for the Decision-Id trailer. Exported for the parser side. */
+export const DECISION_ID_TRAILER = "Decision-Id";
+
+/**
+ * Append one `Decision-Id: <id>` trailer line per id to an existing
+ * commit message. No-op when `decisionIds` is empty. Validates that ids
+ * are single-line strings (no newlines, non-empty) — same shape rule
+ * the trailer composer enforces.
+ *
+ * The message returned is suitable to pass straight to `git commit -m`.
+ */
+export function appendDecisionTrailers(
+  message: string,
+  decisionIds: readonly string[],
+): string {
+  if (decisionIds.length === 0) return message;
+
+  for (const id of decisionIds) {
+    if (typeof id !== "string" || id.length === 0 || id.includes("\n")) {
+      throw new Error(
+        `Decision-Id must be a non-empty single-line string; got ${JSON.stringify(id)}`,
+      );
+    }
+  }
+
+  const lines = decisionIds.map((id) => `${DECISION_ID_TRAILER}: ${id}`).join("\n");
+
+  // If the message already has a trailer block, splice into it; else
+  // start a new block separated by a blank line from the body.
+  const hasTrailerBlock = Object.keys(parseTrailers(message)).length > 0;
+  const stripped = message.replace(/\n+$/, "");
+  if (hasTrailerBlock) {
+    return `${stripped}\n${lines}`;
+  }
+  return `${stripped}\n\n${lines}`;
+}

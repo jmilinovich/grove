@@ -12,6 +12,7 @@ import {
   getVaultKey,
   isEncrypted,
 } from "./crypto.js";
+import { appendDecisionTrailers } from "./provenance.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -186,24 +187,35 @@ export async function gitCommit(
   vaultPath: string,
   filePath: string,
   message: string,
+  decisionIds: readonly string[] = [],
 ): Promise<string> {
   await exec("git", ["add", filePath], vaultPath);
-  await exec("git", ["commit", "-m", message], vaultPath);
+  const finalMessage = appendDecisionTrailers(message, decisionIds);
+  await exec("git", ["commit", "-m", finalMessage], vaultPath);
   const sha = await exec("git", ["rev-parse", "HEAD"], vaultPath);
   return sha.trim();
 }
 
-/** Commit a set of already-staged-or-to-be-added paths in a single commit. */
+/**
+ * Commit a set of already-staged-or-to-be-added paths in a single commit.
+ *
+ * `decisionIds` (S-INBOX-3): optional list of Inbox v2 decision ids whose
+ * `Decision-Id:` trailers should land on this commit alongside the
+ * provenance trailers in `message`. Defaults to empty so existing callers
+ * are unaffected.
+ */
 export async function gitCommitPaths(
   vaultPath: string,
   paths: string[],
   message: string,
+  decisionIds: readonly string[] = [],
 ): Promise<string> {
   if (paths.length > 0) {
     // `git add` handles both new/modified files and deletions (via -A on the path).
     await exec("git", ["add", "-A", "--", ...paths], vaultPath);
   }
-  await exec("git", ["commit", "-m", message], vaultPath);
+  const finalMessage = appendDecisionTrailers(message, decisionIds);
+  await exec("git", ["commit", "-m", finalMessage], vaultPath);
   const sha = await exec("git", ["rev-parse", "HEAD"], vaultPath);
   return sha.trim();
 }
