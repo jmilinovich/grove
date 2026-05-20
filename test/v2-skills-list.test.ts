@@ -118,11 +118,10 @@ describe("listSkillsForVault — P21-5 skills endpoint", () => {
     closeAllVaultDbs();
   });
 
-  it("returns exactly the 7 builtin skills", () => {
+  it("returns exactly the 6 builtin skills", () => {
     const skills = listSkillsForVault("vault_skills");
     expect(skills.map((s) => s.slug).sort()).toEqual([
       "concept-graph-cleanup",
-      "daily-vault-review",
       "disambiguation",
       "dup-people-detection",
       "enrichment",
@@ -131,7 +130,7 @@ describe("listSkillsForVault — P21-5 skills endpoint", () => {
     ]);
   });
 
-  it("preserves registry order (daily-vault-review first)", () => {
+  it("preserves registry order (concept-graph-cleanup first)", () => {
     const skills = listSkillsForVault("vault_skills");
     expect(skills.map((s) => s.slug)).toEqual(
       SKILL_REGISTRY.map((s) => s.slug),
@@ -149,12 +148,12 @@ describe("listSkillsForVault — P21-5 skills endpoint", () => {
     const db = getVaultDb("vault_skills");
     db.prepare(
       "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
-    ).run("daily-vault-review", 1, "daily");
+    ).run("enrichment", 1, "weekly");
 
     const skills = listSkillsForVault("vault_skills");
-    const daily = skills.find((s) => s.slug === "daily-vault-review");
+    const enrichment = skills.find((s) => s.slug === "enrichment");
     const cleanup = skills.find((s) => s.slug === "concept-graph-cleanup");
-    expect(daily?.installState).toBe("installed");
+    expect(enrichment?.installState).toBe("installed");
     expect(cleanup?.installState).toBe("available");
   });
 
@@ -176,11 +175,11 @@ describe("listSkillsForVault — P21-5 skills endpoint", () => {
     const db = getVaultDb("vault_skills");
     db.prepare(
       "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
-    ).run("daily-vault-review", 1, "on-demand");
+    ).run("enrichment", 1, "on-demand");
 
     const skills = listSkillsForVault("vault_skills");
-    const daily = skills.find((s) => s.slug === "daily-vault-review");
-    expect(daily?.defaultCadence).toBe("daily");
+    const enrichment = skills.find((s) => s.slug === "enrichment");
+    expect(enrichment?.defaultCadence).toBe("weekly");
   });
 
   it("each result satisfies the canonical Skill interface verbatim", () => {
@@ -188,7 +187,7 @@ describe("listSkillsForVault — P21-5 skills endpoint", () => {
     // The `satisfies Skill[]` check is the load-bearing assertion: if the
     // wire shape drifts from grove-www's contract, this stops compiling.
     const typed = skills satisfies Skill[];
-    expect(typed.length).toBe(7);
+    expect(typed.length).toBe(6);
 
     for (const skill of typed) {
       expect(typeof skill.id).toBe("string");
@@ -244,10 +243,10 @@ describe("listSkillsForVault — P21-5 skills endpoint", () => {
       .prepare(
         "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
       )
-      .run("daily-vault-review", 1, "daily");
+      .run("enrichment", 1, "weekly");
 
     const skills = listSkillsForVault("vault_skills");
-    const daily = skills.find((s) => s.slug === "daily-vault-review");
-    expect(daily?.installState).toBe("available");
+    const enrichment = skills.find((s) => s.slug === "enrichment");
+    expect(enrichment?.installState).toBe("available");
   });
 });

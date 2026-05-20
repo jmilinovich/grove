@@ -80,7 +80,7 @@ function insertDoneTask(vaultId: string, id: string, daysAgo: number): void {
       `INSERT INTO tasks (id, skill_slug, state, title, completed_at)
        VALUES (?, ?, 'done', ?, ?)`,
     )
-    .run(id, "daily-vault-review", `done-${id}`, ts);
+    .run(id, "enrichment", `done-${id}`, ts);
 }
 
 function insertPendingTask(vaultId: string, id: string): void {
@@ -89,7 +89,7 @@ function insertPendingTask(vaultId: string, id: string): void {
       `INSERT INTO tasks (id, skill_slug, state, title)
        VALUES (?, ?, 'pending', ?)`,
     )
-    .run(id, "daily-vault-review", `pending-${id}`);
+    .run(id, "enrichment", `pending-${id}`);
 }
 
 function insertRunningTask(vaultId: string, id: string): void {
@@ -98,7 +98,7 @@ function insertRunningTask(vaultId: string, id: string): void {
       `INSERT INTO tasks (id, skill_slug, state, title)
        VALUES (?, ?, 'running', ?)`,
     )
-    .run(id, "daily-vault-review", `running-${id}`);
+    .run(id, "enrichment", `running-${id}`);
 }
 
 const VAULT_ID = "vault_thru";

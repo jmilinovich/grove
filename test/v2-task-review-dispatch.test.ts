@@ -1,31 +1,24 @@
 /**
  * S-INBOX-10 — per-type review dispatch falsifier.
  *
- * Eight sub-tests covering:
- *   1. New shape apply (matching option_id) → decision confirmed,
- *      task done.
- *   2. New shape apply (different option_id) → compensateDecision
- *      called, original compensated, compensation row recorded, task
- *      done.
- *   3. New shape refine → compensateDecision called, refine-handler
- *      task spawned in pending state with body carrying the refinement,
+ * Five sub-tests covering the V2 shape (the legacy `{action: ...}` shape
+ * was retired in C-INBOX-1 along with the three legacy-shape sub-tests
+ * this file originally carried):
+ *   1. V2 apply (matching option_id) → decision confirmed, task done.
+ *   2. V2 apply (different option_id) → compensateDecision called,
+ *      original compensated, compensation row recorded, task done.
+ *   3. V2 refine → compensateDecision called, refine-handler task
+ *      spawned in pending state with body carrying the refinement,
  *      original task done.
- *   4. New shape dismiss → compensateDecision called, suppression row
- *      inserted with (type, entity_key, 14-day TTL), task dismissed.
- *   5. Legacy shape confirm-durable on a task linked to a decision →
- *      dispatched as apply-matching, decision confirmed.
- *   6. Legacy shape mark-stale on a task linked to a decision →
- *      dispatched as dismiss, suppression created.
- *   7. Legacy task (no decision), confirm-durable → task done, no
- *      decision/compensation/suppression touched.
- *   8. Refine-handler scheduler round-trip → spawn refine task via
+ *   4. V2 dismiss → compensateDecision called, suppression row inserted
+ *      with (type, entity_key, 14-day TTL), task dismissed.
+ *   5. Refine-handler scheduler round-trip → spawn refine task via
  *      refine action, invoke drain, refine-handler executes, task →
  *      done with surface artifact mentioning the refinement.
  *
- * Setup mirrors v2-task-review.test.ts: env-pointed control db + per-
- * vault state root with real migration SQL (including 003_decisions),
- * plus a real git repo seeded with an initial commit so compensateDecision
- * can land commits.
+ * Setup: env-pointed control db + per-vault state root with real
+ * migration SQL (including 003_decisions), plus a real git repo seeded
+ * with an initial commit so compensateDecision can land commits.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -518,118 +511,7 @@ describe("handleV2TaskReview — S-INBOX-10 per-type dispatch", () => {
     expect(untilMs).toBeLessThan(expectedMs + 5 * 60_000);
   });
 
-  // ── Test 5: legacy shape, confirm-durable on linked task ────────────
-
-  it("legacy confirm-durable on a task with a decision dispatches as apply-matching", async () => {
-    const { taskId, decision } = seedLinkDecisionWithTask();
-    const db = getVaultDb(VAULT_ID);
-
-    const cap = makeRes();
-    await handleV2TaskReview(
-      makeReq(JSON.stringify({ action: "confirm-durable" })),
-      cap.res,
-      ctx(),
-      taskId,
-      USER_ID,
-    );
-
-    expect(cap.status).toBe(200);
-
-    // Decision confirmed (apply-matching path — no compensation)
-    const dRow = db
-      .prepare("SELECT status FROM decisions WHERE id = ?")
-      .get(decision.id) as DecisionRow;
-    expect(dRow.status).toBe("confirmed");
-
-    const tRow = db
-      .prepare("SELECT state FROM tasks WHERE id = ?")
-      .get(taskId) as { state: string };
-    expect(tRow.state).toBe("done");
-  });
-
-  // ── Test 6: legacy shape, mark-stale on linked task → dismiss ───────
-
-  it("legacy mark-stale on a task with a decision dispatches as dismiss + suppression", async () => {
-    const { taskId, decision } = seedLinkDecisionWithTask();
-    const db = getVaultDb(VAULT_ID);
-
-    const cap = makeRes();
-    await handleV2TaskReview(
-      makeReq(JSON.stringify({ action: "mark-stale" })),
-      cap.res,
-      ctx(),
-      taskId,
-      USER_ID,
-    );
-
-    expect(cap.status).toBe(200);
-
-    // Decision compensated, suppression inserted (dismiss semantics)
-    const dRow = db
-      .prepare("SELECT status FROM decisions WHERE id = ?")
-      .get(decision.id) as DecisionRow;
-    expect(dRow.status).toBe("compensated");
-
-    const supRow = db
-      .prepare("SELECT * FROM suppressions LIMIT 1")
-      .get() as SuppressionRow | undefined;
-    expect(supRow).toBeDefined();
-    expect(supRow!.suggestion_type).toBe("link");
-
-    const tRow = db
-      .prepare("SELECT state FROM tasks WHERE id = ?")
-      .get(taskId) as { state: string };
-    expect(tRow.state).toBe("dismissed");
-  });
-
-  // ── Test 7: legacy task (no decision), confirm-durable ──────────────
-
-  it("legacy confirm-durable on a task with no decision closes it without touching decisions/suppressions", async () => {
-    // Seed a plain review-state task — no decision, no note-change
-    // artifact. Mirrors the daily-vault-review surface-only path.
-    const db = getVaultDb(VAULT_ID);
-    const taskId = "t-legacy-no-decision";
-    db.prepare(
-      `INSERT INTO tasks (id, skill_slug, state, title, body)
-       VALUES (?, ?, 'review', ?, ?)`,
-    ).run(
-      taskId,
-      "daily-vault-review",
-      "legacy review task",
-      "no decision linked",
-    );
-
-    const cap = makeRes();
-    await handleV2TaskReview(
-      makeReq(JSON.stringify({ action: "confirm-durable" })),
-      cap.res,
-      ctx(),
-      taskId,
-      USER_ID,
-    );
-
-    expect(cap.status).toBe(200);
-
-    const tRow = db
-      .prepare("SELECT state, completed_at FROM tasks WHERE id = ?")
-      .get(taskId) as { state: string; completed_at: string | null };
-    expect(tRow.state).toBe("done");
-    expect(tRow.completed_at).not.toBeNull();
-
-    // No decisions, no compensations, no suppressions touched.
-    const decisionCount = (
-      db.prepare("SELECT COUNT(*) AS n FROM decisions").get() as { n: number }
-    ).n;
-    expect(decisionCount).toBe(0);
-    const supCount = (
-      db.prepare("SELECT COUNT(*) AS n FROM suppressions").get() as {
-        n: number;
-      }
-    ).n;
-    expect(supCount).toBe(0);
-  });
-
-  // ── Test 8: refine-handler scheduler round-trip ─────────────────────
+  // ── Test 5: refine-handler scheduler round-trip ─────────────────────
 
   it("refine-handler task spawned by refine executes through the scheduler drain", async () => {
     const { taskId, decision } = seedLinkDecisionWithTask({

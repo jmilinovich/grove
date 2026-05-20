@@ -2622,11 +2622,15 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    // POST /v1/tasks/<id>/review — disposition a review-state task (P22-3).
-    // Body {action: 'confirm-durable'|'refine'|'dismiss'|'mark-stale',
-    // refinement?: string}. confirm-durable stamps the operator's user_id
-    // as Provenance-By; refine stamps 'human'. dismiss inherits the P22-2
-    // flag write-through. Vault-scoped only — vaultV1Match enforces auth/role.
+    // POST /v1/tasks/<id>/review — disposition a review-state task
+    // (S-INBOX-10). Body is the V2 shape only after C-INBOX-1:
+    //   {kind: "apply", option_id} | {kind: "refine", refinement} | {kind: "dismiss"}
+    // `apply` confirms a decision (matching option = no-op + confirm;
+    // different option = compensate + re-apply). `refine` rolls back
+    // and spawns a refine-handler task. `dismiss` rolls back and
+    // inserts a 14-day suppression (no-op suppression when the task
+    // has no backing decision). Vault-scoped only — vaultV1Match
+    // enforces auth/role.
     const taskReviewMatch =
       restIsVaultScoped && req.method === "POST"
         ? /^\/v1\/tasks\/([^/?#]+)\/review$/.exec(restPath)

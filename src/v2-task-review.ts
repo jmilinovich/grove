@@ -1,58 +1,44 @@
 /**
- * P22-3 — v2 task review disposition dispatcher.
+ * S-INBOX-10 — v2 task review disposition dispatcher.
  *
- * `POST /v/<slug>/v1/tasks/<id>/review` accepts one of four LEGACY actions
- * or the new S-INBOX-10 V2 shape:
+ * `POST /v/<slug>/v1/tasks/<id>/review` accepts only the V2 shape
+ * introduced in S-INBOX-10:
  *
- *   Legacy (PR #71 grove-www UI):  confirm-durable | refine | dismiss | mark-stale
- *   V2 (post-S-INBOX-10):          {kind: "apply", option_id} |
- *                                  {kind: "refine", refinement} |
- *                                  {kind: "dismiss"}
+ *   {kind: "apply",   option_id} |
+ *   {kind: "refine",  refinement} |
+ *   {kind: "dismiss"}
+ *
+ * The legacy string-action shape (PR #71) was retired in C-INBOX-1 once
+ * `grove-www` stopped sending it. Anything that isn't the V2 shape
+ * returns 400.
  *
  * Only tasks in `state = 'review'` are dispositionable. Anything else
  * returns 409 with the current state.
  *
- * Dispatch routing (S-INBOX-10):
- *   - Task linked to a Decision → V2 per-type dispatch (apply / refine /
- *     dismiss). compensateDecision handles rollback; suppression rows
- *     handle dismiss memory; refine-handler tasks carry forward the
- *     operator's refinement instruction.
- *   - Task with a note-change artifact and NO decision → legacy P22-3
- *     dispatch (note-change write + provenance trailer). Preserves the
- *     pre-Inbox-v2 daily-vault-review behavior.
- *   - Task with no decision and no note-change → V2 legacy-compat
- *     fallback: confirm → done, dismiss → dismissed, refine → spawn
- *     refine-handler.
+ * Dispatch routing:
+ *   - apply (matching option_id)   → confirm decision (no compensation)
+ *   - apply (different option_id)  → compensateDecision(... newChoice)
+ *   - apply (no decision linked)   → no-op + state='done'
+ *   - refine (decision exists)     → compensateDecision(rollback) + spawn refine-handler
+ *   - refine (no decision)         → spawn refine-handler (skip compensation)
+ *   - dismiss (decision exists)    → compensateDecision(rollback) + insert suppression
+ *   - dismiss (no decision)        → state='dismissed' (no suppression — nothing to suppress)
  *
- * Writes (confirm-durable on a note-change artifact, and refine) go to the
- * vault repo via `vault-ops.ts` helpers with provenance trailers composed
- * by `provenance.ts`. The two voices differ:
- *   - confirm-durable: `by: <api_key.user_id>` — the operator confirmed the
- *     Claude-generated change as durable intent.
- *   - refine: `by: 'human'` — the operator rewrote the change; the
- *     refinement field carries the new note content verbatim.
- *
- * dismiss mirrors P22-2: state→dismissed plus a cross-DB ATTACH write
- * to `control.graph_health_flags.resolved_at` when the task was derived
- * from a flag (locked design decision #1).
- *
- * mark-stale leaves the artifact untouched, transitions to dismissed,
- * and appends a stale marker to `tasks.body` so the audit log carries
- * the operator's signal.
+ * Provenance: each decision class writes its provisional change with a
+ * full provenance trailer at the moment it lands (see
+ * `recordDecision`/`commitSkillRun` in `decision-writer.ts`). The
+ * `apply` path here either confirms the existing commit in-place
+ * (matching option) or runs `compensateDecision` (different option),
+ * which itself emits a compensating commit with its own trailers.
+ * Refine/dismiss go through `compensateDecision` for the rollback.
+ * Nothing in this file writes to the vault directly — the legacy
+ * note-change write path (and the `applyNoteChange` / `readArtifact`
+ * helpers) was retired with C-INBOX-1.
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
 import type Database from "better-sqlite3";
 import { getVaultDb } from "./db-per-vault.js";
-import { gitCommit, qmdReindex, writeNoteFile } from "./vault-ops.js";
-import {
-  composeCommitMessage,
-  provenanceToTrailers,
-  type Provenance,
-} from "./provenance.js";
-import { ensureControlAttached } from "./v2-task-detail.js";
 import { compensateDecision } from "./decision-compensate.js";
 import type { VaultContext } from "./vault-router.js";
 import type { DecisionRow, TaskState } from "./db-types.js";
@@ -64,31 +50,6 @@ import type {
   ReviewOption,
   SuggestionType,
 } from "./v2-decisions.js";
-
-/**
- * Legacy ReviewAction union — the wire shape PR #71's grove-www UI ships
- * today. Kept intact so the live UI keeps working until W-INBOX-1..3 cut
- * over to the V2 shape. Exported as both `LegacyReviewAction` (the new
- * preferred name) and `ReviewAction` (the original name; preserved so
- * existing imports compile without changes).
- */
-export type LegacyReviewAction =
-  | "confirm-durable"
-  | "refine"
-  | "dismiss"
-  | "mark-stale";
-export type ReviewAction = LegacyReviewAction;
-
-const REVIEW_ACTIONS: ReadonlySet<LegacyReviewAction> = new Set([
-  "confirm-durable",
-  "refine",
-  "dismiss",
-  "mark-stale",
-]);
-
-export function isReviewAction(s: unknown): s is LegacyReviewAction {
-  return typeof s === "string" && REVIEW_ACTIONS.has(s as LegacyReviewAction);
-}
 
 /**
  * S-INBOX-10 — the V2 review action shape. `apply` confirms a decision
@@ -105,32 +66,13 @@ export type ReviewActionV2 =
 /** Suppression TTL for dismiss actions — 14 days per S-INBOX-10 spec. */
 const SUPPRESSION_TTL_DAYS = 14;
 
-/** Synthetic option id used when a legacy `confirm-durable` lands on a
- *  task with no backing Decision. The V2 dispatcher treats this as
- *  "no-op + confirm" — no compensation, no decision touched. */
-const LEGACY_CONFIRM_OPTION_ID = "opt-confirm";
-
-export interface DispatchReviewInput {
-  vault: VaultContext;
-  taskId: string;
-  /**
-   * API key user_id from auth resolution (proxy.ts vaultV1Match block).
-   * Stamped as `Provenance-By` on confirm-durable commits.
-   */
-  userId: string;
-  action: LegacyReviewAction;
-  refinement?: string;
-}
-
 export interface DispatchReviewResponse {
   status: 200 | 400 | 404 | 409;
   body: unknown;
 }
 
 /**
- * S-INBOX-10 input for the V2 dispatcher. Same shape as the legacy
- * `DispatchReviewInput` but carries the parsed `ReviewActionV2` instead
- * of the legacy string-typed action.
+ * S-INBOX-10 input for the V2 dispatcher.
  */
 export interface DispatchReviewV2Input {
   vault: VaultContext;
@@ -143,299 +85,6 @@ interface TaskCoreRow {
   state: TaskState;
   body: string | null;
   source_flag_id: string | null;
-}
-
-interface ResultRow {
-  artifact_json: string;
-  note_change_json: string | null;
-}
-
-interface ArtifactSummary {
-  artifactType: string;
-  notePath: string | null;
-  /** Parsed note-change payload — null when absent or malformed. */
-  noteChange: { content: string } | null;
-}
-
-function readArtifact(
-  db: Database.Database,
-  taskId: string,
-): ArtifactSummary | null {
-  const row = db
-    .prepare(
-      "SELECT artifact_json, note_change_json FROM task_results WHERE task_id = ? LIMIT 1",
-    )
-    .get(taskId) as ResultRow | undefined;
-  if (!row) return null;
-
-  let artifactType = "surface";
-  let notePath: string | null = null;
-  try {
-    const a = JSON.parse(row.artifact_json) as {
-      type?: string;
-      notePath?: string;
-    };
-    if (typeof a.type === "string") artifactType = a.type;
-    if (typeof a.notePath === "string") notePath = a.notePath;
-  } catch {
-    // malformed artifact_json — surface as plain 'surface' artifact
-  }
-
-  let noteChange: { content: string } | null = null;
-  if (row.note_change_json) {
-    try {
-      const parsed = JSON.parse(row.note_change_json) as { content?: unknown };
-      if (parsed && typeof parsed.content === "string") {
-        noteChange = { content: parsed.content };
-      }
-    } catch {
-      // malformed note_change_json — treat as if no change recorded
-    }
-  }
-
-  return { artifactType, notePath, noteChange };
-}
-
-async function applyNoteChange(
-  vault: VaultContext,
-  notePath: string,
-  content: string,
-  prov: Provenance,
-  subject: string,
-): Promise<void> {
-  const absPath = join(vault.vaultPath, notePath);
-  const dir = dirname(absPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeNoteFile(absPath, content);
-  const message = composeCommitMessage(subject, provenanceToTrailers(prov));
-  await gitCommit(vault.vaultPath, notePath, message);
-  // Fire-and-forget reindex — `qmd update` failures shouldn't fail the
-  // disposition, and a search-index lag is recoverable on next sync.
-  qmdReindex(vault.vaultPath).catch(() => {});
-}
-
-/**
- * Dispatch a `/review` action. Validates state, applies the action,
- * returns the response envelope for the HTTP wrapper.
- *
- * Routing (S-INBOX-10):
- *   1. If the task is linked to a Decision (`decisions.task_id = task.id`),
- *      translate the legacy action to V2 and dispatch via the V2 path
- *      (compensate / confirm / spawn-refine-handler / suppression-insert).
- *   2. Otherwise — the legacy P22-3 path runs as-is: confirm-durable
- *      writes a note-change artifact's content with a durable provenance
- *      trailer; refine writes the operator's edit; dismiss resolves any
- *      linked graph_health_flag; mark-stale appends the stale marker.
- *      This preserves the pre-Inbox-v2 daily-vault-review semantics.
- *
- * The legacy-shape parser feeds this function; the V2-shape parser
- * skips ahead to `dispatchTaskReviewV2` directly.
- */
-export async function dispatchTaskReview(
-  input: DispatchReviewInput,
-): Promise<DispatchReviewResponse> {
-  const { vault, taskId, userId, action, refinement } = input;
-  if (!isReviewAction(action)) {
-    return { status: 400, body: { error: "invalid_action" } };
-  }
-
-  const db = getVaultDb(vault.vaultId);
-  const taskRow = db
-    .prepare(
-      "SELECT state, body, source_flag_id FROM tasks WHERE id = ? LIMIT 1",
-    )
-    .get(taskId) as TaskCoreRow | undefined;
-  if (!taskRow) {
-    return { status: 404, body: { error: "task_not_found" } };
-  }
-  if (taskRow.state !== "review") {
-    return {
-      status: 409,
-      body: { error: "invalid_state", state: taskRow.state },
-    };
-  }
-
-  const decision = loadDecisionForTask(db, taskId);
-
-  // Route 1: Task linked to a Decision → V2 dispatch (Inbox v2 path).
-  if (decision) {
-    // Refine via the legacy shape still needs a non-empty refinement —
-    // validate at the boundary so a missing field doesn't slip into the
-    // V2 dispatcher as an empty instruction.
-    if (action === "refine") {
-      if (typeof refinement !== "string" || refinement.length === 0) {
-        return { status: 400, body: { error: "refinement_required" } };
-      }
-    }
-    const v2Action = translateLegacyToV2(action, refinement, decision);
-    return dispatchTaskReviewV2({
-      vault,
-      taskId,
-      userId,
-      action: v2Action,
-    });
-  }
-
-  // Route 2: Legacy P22-3 — no backing Decision. Keep the original
-  // per-action behavior so daily-vault-review note-change writes,
-  // graph_health_flag resolution, and stale-marker appends all work
-  // exactly as they did pre-S-INBOX-10.
-  switch (action) {
-    case "confirm-durable":
-      return confirmDurable(db, vault, taskId, userId);
-    case "refine":
-      return refine(db, vault, taskId, refinement);
-    case "dismiss":
-      return dismiss(db, taskId, taskRow.source_flag_id);
-    case "mark-stale":
-      return markStale(db, taskId, taskRow.body);
-  }
-}
-
-/**
- * Translate a legacy review action to the V2 shape. The translation
- * depends on whether the task has a linked Decision:
- *   - confirm-durable + decision  → {kind: "apply", option_id: decision.chosenOptionId}
- *   - confirm-durable + no decision → {kind: "apply", option_id: "opt-confirm"}
- *   - refine                      → {kind: "refine", refinement}
- *   - dismiss / mark-stale        → {kind: "dismiss"}
- *
- * The synthetic `opt-confirm` id is recognized by the V2 dispatcher as
- * "no-op + confirm" so legacy tasks with no backing decision pass
- * through cleanly.
- */
-function translateLegacyToV2(
-  action: LegacyReviewAction,
-  refinement: string | undefined,
-  decision: LoadedDecision | null,
-): ReviewActionV2 {
-  switch (action) {
-    case "confirm-durable":
-      return {
-        kind: "apply",
-        option_id: decision?.chosen_option_id ?? LEGACY_CONFIRM_OPTION_ID,
-      };
-    case "refine":
-      return {
-        kind: "refine",
-        refinement: refinement ?? "",
-      };
-    case "dismiss":
-    case "mark-stale":
-      return { kind: "dismiss" };
-  }
-}
-
-async function confirmDurable(
-  db: Database.Database,
-  vault: VaultContext,
-  taskId: string,
-  userId: string,
-): Promise<DispatchReviewResponse> {
-  const artifact = readArtifact(db, taskId);
-  if (artifact && artifact.artifactType === "note-change") {
-    if (!artifact.notePath || !artifact.noteChange) {
-      // A note-change artifact without a path or change payload can't
-      // produce a deterministic write — refuse rather than guess.
-      return {
-        status: 409,
-        body: { error: "incomplete_note_change_artifact" },
-      };
-    }
-    const provenance: Provenance = {
-      voice: "durable",
-      by: userId,
-      written_at: new Date().toISOString(),
-    };
-    const subject = `grove: confirm-durable ${artifact.notePath}`;
-    await applyNoteChange(
-      vault,
-      artifact.notePath,
-      artifact.noteChange.content,
-      provenance,
-      subject,
-    );
-  }
-  db.prepare(
-    "UPDATE tasks SET state = 'done', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-  ).run(taskId);
-  return { status: 200, body: { id: taskId, state: "done" } };
-}
-
-async function refine(
-  db: Database.Database,
-  vault: VaultContext,
-  taskId: string,
-  refinement: string | undefined,
-): Promise<DispatchReviewResponse> {
-  if (typeof refinement !== "string" || refinement.length === 0) {
-    return { status: 400, body: { error: "refinement_required" } };
-  }
-  const artifact = readArtifact(db, taskId);
-  if (
-    !artifact ||
-    artifact.artifactType !== "note-change" ||
-    !artifact.notePath
-  ) {
-    return { status: 409, body: { error: "not_a_note_change_artifact" } };
-  }
-  const provenance: Provenance = {
-    voice: "durable",
-    by: "human",
-    written_at: new Date().toISOString(),
-  };
-  const subject = `grove: refine ${artifact.notePath}`;
-  await applyNoteChange(
-    vault,
-    artifact.notePath,
-    refinement,
-    provenance,
-    subject,
-  );
-  db.prepare(
-    "UPDATE tasks SET state = 'done', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-  ).run(taskId);
-  return { status: 200, body: { id: taskId, state: "done" } };
-}
-
-function dismiss(
-  db: Database.Database,
-  taskId: string,
-  sourceFlagId: string | null,
-): DispatchReviewResponse {
-  if (sourceFlagId) {
-    ensureControlAttached(db);
-    const updateTask = db.prepare(
-      "UPDATE tasks SET state = 'dismissed', updated_at = datetime('now') WHERE id = ? AND state != 'dismissed'",
-    );
-    const updateFlag = db.prepare(
-      "UPDATE control.graph_health_flags SET resolved_at = datetime('now') WHERE id = ? AND resolved_at IS NULL",
-    );
-    const tx = db.transaction(() => {
-      updateTask.run(taskId);
-      updateFlag.run(sourceFlagId);
-    });
-    tx.immediate();
-  } else {
-    db.prepare(
-      "UPDATE tasks SET state = 'dismissed', updated_at = datetime('now') WHERE id = ? AND state != 'dismissed'",
-    ).run(taskId);
-  }
-  return { status: 200, body: { id: taskId, state: "dismissed" } };
-}
-
-const STALE_MARKER = "\n\n[stale: marked by user]";
-
-function markStale(
-  db: Database.Database,
-  taskId: string,
-  body: string | null,
-): DispatchReviewResponse {
-  const newBody = (body ?? "") + STALE_MARKER;
-  db.prepare(
-    "UPDATE tasks SET state = 'dismissed', body = ?, updated_at = datetime('now') WHERE id = ?",
-  ).run(newBody, taskId);
-  return { status: 200, body: { id: taskId, state: "dismissed" } };
 }
 
 // ─── S-INBOX-10 — V2 per-type dispatch ───────────────────────────────────

@@ -92,7 +92,7 @@ function insertTask(opts: {
   if (opts.createdAt) {
     db.prepare(
       `INSERT INTO tasks (id, skill_slug, state, title, scheduled_for, created_at, updated_at)
-       VALUES (?, 'daily-vault-review', ?, ?, ?, ?, ?)`,
+       VALUES (?, 'enrichment', ?, ?, ?, ?, ?)`,
     ).run(
       opts.id,
       opts.state ?? "pending",
@@ -104,7 +104,7 @@ function insertTask(opts: {
   } else {
     db.prepare(
       `INSERT INTO tasks (id, skill_slug, state, title, scheduled_for)
-       VALUES (?, 'daily-vault-review', ?, ?, ?)`,
+       VALUES (?, 'enrichment', ?, ?, ?)`,
     ).run(
       opts.id,
       opts.state ?? "pending",
@@ -138,7 +138,7 @@ describe("scheduler worker drain (P23-1)", () => {
     copyRealMigrations();
     createSchema();
     seedVault();
-    setExecutorForTesting("daily-vault-review", fakeExecutor);
+    setExecutorForTesting("enrichment", fakeExecutor);
   });
 
   afterEach(() => {
@@ -230,7 +230,7 @@ describe("scheduler worker drain (P23-1)", () => {
   });
 
   it("flips the task to failed on executor throw", async () => {
-    setExecutorForTesting("daily-vault-review", async () => {
+    setExecutorForTesting("enrichment", async () => {
       throw new Error("executor blew up");
     });
     insertTask({ id: "task_throw" });

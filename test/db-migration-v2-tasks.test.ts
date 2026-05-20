@@ -116,7 +116,7 @@ describe("v2 tasks schema migration (002_v2_tasks.sql)", () => {
         .prepare(
           "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?)",
         )
-        .run("t1", "daily-vault-review", "not-a-real-state", "test"),
+        .run("t1", "enrichment", "not-a-real-state", "test"),
     ).toThrow(/CHECK constraint/);
   });
 
@@ -128,7 +128,7 @@ describe("v2 tasks schema migration (002_v2_tasks.sql)", () => {
         .prepare(
           "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
         )
-        .run("daily-vault-review", 0, "every-other-tuesday"),
+        .run("enrichment", 0, "every-other-tuesday"),
     ).toThrow(/CHECK constraint/);
 
     expect(() =>
@@ -144,7 +144,7 @@ describe("v2 tasks schema migration (002_v2_tasks.sql)", () => {
     const db = getVaultDb("vault_v2");
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?)",
-    ).run("t1", "daily-vault-review", "review", "test");
+    ).run("t1", "enrichment", "review", "test");
     db.prepare(
       "INSERT INTO task_results (task_id, artifact_json) VALUES (?, ?)",
     ).run("t1", '{"type":"surface","surfaceText":"hi"}');

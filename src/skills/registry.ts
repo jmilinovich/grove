@@ -58,28 +58,6 @@ export interface SkillMetadata {
 
 export const SKILL_REGISTRY: readonly SkillMetadata[] = [
   {
-    id: "skill-daily-vault-review",
-    slug: "daily-vault-review",
-    name: "Daily Vault Review",
-    domain: "system",
-    author: "builtin",
-    description:
-      "Surfaces today's noteworthy patterns, dormant threads, and perishable claims approaching staleness. Surface-only — never writes.",
-    sampleTasks: [
-      "today's patterns from your journal",
-      "concepts that haven't been touched in 30 days",
-      "perishable claims older than 14 days",
-    ],
-    cadenceOptions: ["daily", "on-demand"],
-    defaultCadence: "daily",
-    defaultArtifactType: "surface",
-    starterPendingTasks: [
-      "Surface today's patterns from your journal",
-      "Flag perishable claims older than 14 days",
-      "Highlight concepts not touched in 30 days",
-    ],
-  },
-  {
     id: "skill-concept-graph-cleanup",
     slug: "concept-graph-cleanup",
     name: "Concept Graph Cleanup",
@@ -154,7 +132,7 @@ export const SKILL_REGISTRY: readonly SkillMetadata[] = [
     domain: "knowledge",
     author: "builtin",
     description:
-      "Identifies thin Concept notes (body under 200 chars with 3+ backlinks) and drafts a four-paragraph expansion grounded in backlink context via Claude Haiku. Records a provisional Decision with prior_content captured byte-for-byte for compensation on rollback. Replaces the legacy daily-vault-review skill in Inbox v2.",
+      "Identifies thin Concept notes (body under 200 chars with 3+ backlinks) and drafts a four-paragraph expansion grounded in backlink context via Claude Haiku. Records a provisional Decision with prior_content captured byte-for-byte for compensation on rollback. The first-run review skill in Inbox v2.",
     sampleTasks: [
       "thin Concept notes with rich backlink context",
       "Concepts mentioned often but undefined",
@@ -205,8 +183,6 @@ export function getSkillBySlug(slug: string): SkillMetadata | undefined {
  */
 export async function loadSkillModule(slug: string): Promise<unknown | null> {
   switch (slug) {
-    case "daily-vault-review":
-      return await import("./daily-vault-review.js");
     case "dup-people-detection":
       return await import("./dup-people-detection.js");
     case "concept-graph-cleanup":

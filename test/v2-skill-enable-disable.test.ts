@@ -159,21 +159,21 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(200);
     const body = cap.body as { installState: string };
     expect(body.installState).toBe("installed");
 
-    const row = fetchRow("vault_en", "daily-vault-review");
+    const row = fetchRow("vault_en", "enrichment");
     expect(row?.enabled).toBe(1);
-    // daily-vault-review's registry default is 'daily'.
-    expect(row?.cadence).toBe("daily");
-    // daily cadence → next_run_at ~ 24h ahead.
+    // enrichment's registry default is 'weekly'.
+    expect(row?.cadence).toBe("weekly");
+    // weekly cadence → next_run_at ~ 7 days ahead.
     expect(row?.next_run_at).not.toBeNull();
     const nextRunMs = new Date(row!.next_run_at!.replace(" ", "T") + "Z").getTime();
-    const expectedMs = Date.now() + 24 * 60 * 60 * 1000;
+    const expectedMs = Date.now() + 7 * 24 * 60 * 60 * 1000;
     expect(Math.abs(nextRunMs - expectedMs)).toBeLessThan(60 * 1000);
   });
 
@@ -182,7 +182,7 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
     // Pre-configured at weekly while still disabled.
     db.prepare(
       "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
-    ).run("daily-vault-review", 0, "weekly");
+    ).run("enrichment", 0, "weekly");
 
     const cap = makeRes();
     const req = makeReq();
@@ -190,11 +190,11 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(200);
-    const row = fetchRow("vault_en", "daily-vault-review");
+    const row = fetchRow("vault_en", "enrichment");
     expect(row?.enabled).toBe(1);
     expect(row?.cadence).toBe("weekly");
     // weekly cadence → +7 days.
@@ -207,7 +207,7 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
     const db = getVaultDb("vault_en");
     db.prepare(
       "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
-    ).run("daily-vault-review", 0, "on-demand");
+    ).run("enrichment", 0, "on-demand");
 
     const cap = makeRes();
     const req = makeReq();
@@ -215,11 +215,11 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(200);
-    const row = fetchRow("vault_en", "daily-vault-review");
+    const row = fetchRow("vault_en", "enrichment");
     expect(row).toEqual({
       enabled: 1,
       cadence: "on-demand",
@@ -231,7 +231,7 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
     const db = getVaultDb("vault_en");
     db.prepare(
       "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
-    ).run("daily-vault-review", 0, "on-trigger");
+    ).run("enrichment", 0, "on-trigger");
 
     const cap = makeRes();
     const req = makeReq();
@@ -239,11 +239,11 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(200);
-    const row = fetchRow("vault_en", "daily-vault-review");
+    const row = fetchRow("vault_en", "enrichment");
     expect(row).toEqual({
       enabled: 1,
       cadence: "on-trigger",
@@ -301,27 +301,27 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
       makeReq(),
       makeRes().res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
-    expect(fetchRow("vault_en", "daily-vault-review")?.enabled).toBe(1);
+    expect(fetchRow("vault_en", "enrichment")?.enabled).toBe(1);
 
     const cap = makeRes();
     await handleV2SkillDisable(
       makeReq(),
       cap.res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(200);
     const body = cap.body as { installState: string };
     expect(body.installState).toBe("available");
 
-    const row = fetchRow("vault_en", "daily-vault-review");
+    const row = fetchRow("vault_en", "enrichment");
     expect(row?.enabled).toBe(0);
     expect(row?.next_run_at).toBeNull();
     // Cadence is preserved across enable/disable cycles.
-    expect(row?.cadence).toBe("daily");
+    expect(row?.cadence).toBe("weekly");
   });
 
   it("disable on a missing row creates a disabled row with default cadence", async () => {
@@ -349,7 +349,7 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
       makeReq(),
       cap1.res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
     expect(cap1.status).toBe(200);
 
@@ -358,11 +358,11 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
       makeReq(),
       cap2.res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
     expect(cap2.status).toBe(200);
 
-    const row = fetchRow("vault_en", "daily-vault-review");
+    const row = fetchRow("vault_en", "enrichment");
     expect(row?.enabled).toBe(0);
     expect(row?.next_run_at).toBeNull();
   });
@@ -383,16 +383,16 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
   // ── round-trip ───────────────────────────────────────────────────────
 
   it("enable → disable → enable round-trip preserves cadence each step", async () => {
-    // Enable: cadence falls back to registry default 'daily'.
+    // Enable: cadence falls back to registry default 'weekly'.
     await handleV2SkillEnable(
       makeReq(),
       makeRes().res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
-    expect(fetchRow("vault_en", "daily-vault-review")).toMatchObject({
+    expect(fetchRow("vault_en", "enrichment")).toMatchObject({
       enabled: 1,
-      cadence: "daily",
+      cadence: "weekly",
     });
 
     // Disable: enabled flips off; cadence preserved; next_run_at cleared.
@@ -400,24 +400,24 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
       makeReq(),
       makeRes().res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
-    expect(fetchRow("vault_en", "daily-vault-review")).toMatchObject({
+    expect(fetchRow("vault_en", "enrichment")).toMatchObject({
       enabled: 0,
-      cadence: "daily",
+      cadence: "weekly",
       next_run_at: null,
     });
 
-    // Re-enable: cadence still 'daily'; next_run_at re-materialized.
+    // Re-enable: cadence still 'weekly'; next_run_at re-materialized.
     await handleV2SkillEnable(
       makeReq(),
       makeRes().res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
-    const final = fetchRow("vault_en", "daily-vault-review");
+    const final = fetchRow("vault_en", "enrichment");
     expect(final?.enabled).toBe(1);
-    expect(final?.cadence).toBe("daily");
+    expect(final?.cadence).toBe("weekly");
     expect(final?.next_run_at).not.toBeNull();
   });
 
@@ -427,7 +427,7 @@ describe("handleV2SkillEnable / handleV2SkillDisable (P22-4)", () => {
       makeReq(),
       makeRes().res,
       ctx("vault_en", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     const otherCount = (

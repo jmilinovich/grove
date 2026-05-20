@@ -97,7 +97,7 @@ function insertTask(
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
-    overrides.skill_slug ?? "daily-vault-review",
+    overrides.skill_slug ?? "enrichment",
     overrides.state ?? "pending",
     overrides.title ?? "Test task",
     overrides.body ?? null,
@@ -289,7 +289,7 @@ describe("runTaskOnce (P22-1 worker path)", () => {
       },
       finalState: "review",
     });
-    setExecutorForTesting("daily-vault-review", executor);
+    setExecutorForTesting("enrichment", executor);
 
     const id = insertTask("vault_run", {
       state: "running",
@@ -324,7 +324,7 @@ describe("runTaskOnce (P22-1 worker path)", () => {
   });
 
   it("transitions to done and stamps completed_at when executor returns finalState=done", async () => {
-    setExecutorForTesting("daily-vault-review", async () => ({
+    setExecutorForTesting("enrichment", async () => ({
       artifact: { type: "surface", surfaceText: "auto-done" },
       provenance: { voice: "perishable", by: "test-executor" },
       finalState: "done",
@@ -346,7 +346,7 @@ describe("runTaskOnce (P22-1 worker path)", () => {
   });
 
   it("records a failed state with error artifact when the executor throws", async () => {
-    setExecutorForTesting("daily-vault-review", async () => {
+    setExecutorForTesting("enrichment", async () => {
       throw new Error("Anthropic API: 503 Service Unavailable");
     });
 
@@ -380,7 +380,7 @@ describe("runTaskOnce (P22-1 worker path)", () => {
 
   it("no-ops when the task isn't in running state (avoids double-process)", async () => {
     let executorCalls = 0;
-    setExecutorForTesting("daily-vault-review", async () => {
+    setExecutorForTesting("enrichment", async () => {
       executorCalls++;
       return {
         artifact: { type: "surface", surfaceText: "should not run" },

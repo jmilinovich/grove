@@ -277,7 +277,7 @@ describe("S-INBOX-9 — backlog itemType/options + bridge", () => {
     const db = getVaultDb(VAULT_ID);
     db.prepare(
       `INSERT INTO tasks (id, skill_slug, state, title, body)
-       VALUES ('legacy_1', 'daily-vault-review', 'review', 'Legacy review item', '.')`,
+       VALUES ('legacy_1', 'enrichment', 'review', 'Legacy review item', '.')`,
     ).run();
 
     const payload = buildBacklogPayload(VAULT_ID);
