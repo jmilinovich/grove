@@ -170,15 +170,14 @@ describe("v2-tasks: buildBacklogPayload", () => {
     expect(payload.throughput.estimatedClearText).toBe("all clear");
   });
 
-  it("returns the 7 registry skills with installState='available' when no configs exist", () => {
+  it("returns the 6 registry skills with installState='available' when no configs exist", () => {
     seedVault("vault_skills", "skills");
 
     const payload = buildBacklogPayload("vault_skills");
 
-    expect(payload.skills).toHaveLength(7);
+    expect(payload.skills).toHaveLength(6);
     expect(payload.skills.map((s) => s.slug).sort()).toEqual([
       "concept-graph-cleanup",
-      "daily-vault-review",
       "disambiguation",
       "dup-people-detection",
       "enrichment",
@@ -199,14 +198,14 @@ describe("v2-tasks: buildBacklogPayload", () => {
     const db = getVaultDb("vault_installed");
     db.prepare(
       "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
-    ).run("daily-vault-review", 1, "daily");
+    ).run("enrichment", 1, "daily");
     db.prepare(
       "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
     ).run("concept-graph-cleanup", 0, "weekly");
 
     const payload = buildBacklogPayload("vault_installed");
     const bySlug = new Map(payload.skills.map((s) => [s.slug, s]));
-    expect(bySlug.get("daily-vault-review")?.installState).toBe("installed");
+    expect(bySlug.get("enrichment")?.installState).toBe("installed");
     expect(bySlug.get("concept-graph-cleanup")?.installState).toBe("available");
     expect(bySlug.get("dup-people-detection")?.installState).toBe("available");
   });
@@ -215,7 +214,7 @@ describe("v2-tasks: buildBacklogPayload", () => {
     seedVault("vault_aliases", "aliases");
     insertTask("vault_aliases", {
       id: "task-aliases-1",
-      skill_slug: "daily-vault-review",
+      skill_slug: "enrichment",
       state: "review",
       title: "today's patterns",
       body: "Three things stood out today.",
@@ -233,7 +232,7 @@ describe("v2-tasks: buildBacklogPayload", () => {
     const task = payload.reviewTasks[0]!;
     // Field names must match grove-api.v2.types.ts Task exactly.
     expect(task.id).toBe("task-aliases-1");
-    expect(task.skillId).toBe("daily-vault-review");
+    expect(task.skillId).toBe("enrichment");
     expect(task.description).toBe("Three things stood out today.");
     expect(task.scheduledFor).toBe("2026-05-14T16:00:00Z");
     expect(task.startedAt).toBe("2026-05-14T16:00:30Z");
@@ -252,7 +251,7 @@ describe("v2-tasks: buildBacklogPayload", () => {
     seedVault("vault_defaults", "defaults");
     insertTask("vault_defaults", {
       id: "task-defaults-1",
-      skill_slug: "daily-vault-review",
+      skill_slug: "enrichment",
       state: "pending",
       title: "no body, no estimate",
     });
@@ -266,9 +265,9 @@ describe("v2-tasks: buildBacklogPayload", () => {
 
   it("orders reviewTasks newest-first by created_at", () => {
     seedVault("vault_review_order", "review-order");
-    insertTask("vault_review_order", { id: "r-old", skill_slug: "daily-vault-review", state: "review", title: "old", created_at: "2026-05-10T10:00:00Z" });
-    insertTask("vault_review_order", { id: "r-new", skill_slug: "daily-vault-review", state: "review", title: "new", created_at: "2026-05-14T10:00:00Z" });
-    insertTask("vault_review_order", { id: "r-mid", skill_slug: "daily-vault-review", state: "review", title: "mid", created_at: "2026-05-12T10:00:00Z" });
+    insertTask("vault_review_order", { id: "r-old", skill_slug: "enrichment", state: "review", title: "old", created_at: "2026-05-10T10:00:00Z" });
+    insertTask("vault_review_order", { id: "r-new", skill_slug: "enrichment", state: "review", title: "new", created_at: "2026-05-14T10:00:00Z" });
+    insertTask("vault_review_order", { id: "r-mid", skill_slug: "enrichment", state: "review", title: "mid", created_at: "2026-05-12T10:00:00Z" });
 
     const payload = buildBacklogPayload("vault_review_order");
     expect(payload.reviewTasks.map((t) => t.id)).toEqual(["r-new", "r-mid", "r-old"]);
@@ -277,12 +276,12 @@ describe("v2-tasks: buildBacklogPayload", () => {
   it("orders pendingTasks scheduled-first ASC, NULLs at the end, ties broken by created_at DESC", () => {
     seedVault("vault_pending_order", "pending-order");
     // Two scheduled (different times) + two unscheduled (different created_at).
-    insertTask("vault_pending_order", { id: "p-sched-late", skill_slug: "daily-vault-review", state: "pending", title: "later sched", scheduled_for: "2026-05-20T10:00:00Z", created_at: "2026-05-13T08:00:00Z" });
-    insertTask("vault_pending_order", { id: "p-sched-early", skill_slug: "daily-vault-review", state: "pending", title: "earlier sched", scheduled_for: "2026-05-15T10:00:00Z", created_at: "2026-05-13T09:00:00Z" });
-    insertTask("vault_pending_order", { id: "p-null-new", skill_slug: "daily-vault-review", state: "pending", title: "unscheduled, new", scheduled_for: null, created_at: "2026-05-14T10:00:00Z" });
-    insertTask("vault_pending_order", { id: "p-null-old", skill_slug: "daily-vault-review", state: "pending", title: "unscheduled, old", scheduled_for: null, created_at: "2026-05-10T10:00:00Z" });
+    insertTask("vault_pending_order", { id: "p-sched-late", skill_slug: "enrichment", state: "pending", title: "later sched", scheduled_for: "2026-05-20T10:00:00Z", created_at: "2026-05-13T08:00:00Z" });
+    insertTask("vault_pending_order", { id: "p-sched-early", skill_slug: "enrichment", state: "pending", title: "earlier sched", scheduled_for: "2026-05-15T10:00:00Z", created_at: "2026-05-13T09:00:00Z" });
+    insertTask("vault_pending_order", { id: "p-null-new", skill_slug: "enrichment", state: "pending", title: "unscheduled, new", scheduled_for: null, created_at: "2026-05-14T10:00:00Z" });
+    insertTask("vault_pending_order", { id: "p-null-old", skill_slug: "enrichment", state: "pending", title: "unscheduled, old", scheduled_for: null, created_at: "2026-05-10T10:00:00Z" });
     // 'running' is part of the pending bucket per SPEC §4.
-    insertTask("vault_pending_order", { id: "p-running", skill_slug: "daily-vault-review", state: "running", title: "running", scheduled_for: "2026-05-14T08:00:00Z", started_at: "2026-05-14T08:00:00Z" });
+    insertTask("vault_pending_order", { id: "p-running", skill_slug: "enrichment", state: "running", title: "running", scheduled_for: "2026-05-14T08:00:00Z", started_at: "2026-05-14T08:00:00Z" });
 
     const payload = buildBacklogPayload("vault_pending_order");
     expect(payload.pendingTasks.map((t) => t.id)).toEqual([
@@ -301,7 +300,7 @@ describe("v2-tasks: buildBacklogPayload", () => {
       const day = String(i).padStart(2, "0");
       insertTask("vault_cleared", {
         id: `done-${day}`,
-        skill_slug: "daily-vault-review",
+        skill_slug: "enrichment",
         state: "done",
         title: `done ${day}`,
         completed_at: `2026-05-${day}T12:00:00Z`,
@@ -352,7 +351,7 @@ describe("v2-tasks: buildBacklogPayload", () => {
     seedVault("vault_partial", "partial");
     insertTask("vault_partial", {
       id: "task-partial",
-      skill_slug: "daily-vault-review",
+      skill_slug: "enrichment",
       state: "done",
       title: "old task",
       completed_at: "2026-05-14T10:00:00Z",
@@ -369,14 +368,14 @@ describe("v2-tasks: buildBacklogPayload", () => {
     const now = new Date();
     const daysAgo = (d: number) => new Date(now.getTime() - d * 86400_000).toISOString();
     // 3 completed in the last 7 days.
-    insertTask("vault_throughput", { id: "c1", skill_slug: "daily-vault-review", state: "done", title: "c1", completed_at: daysAgo(1) });
-    insertTask("vault_throughput", { id: "c2", skill_slug: "daily-vault-review", state: "done", title: "c2", completed_at: daysAgo(3) });
-    insertTask("vault_throughput", { id: "c3", skill_slug: "daily-vault-review", state: "done", title: "c3", completed_at: daysAgo(6) });
+    insertTask("vault_throughput", { id: "c1", skill_slug: "enrichment", state: "done", title: "c1", completed_at: daysAgo(1) });
+    insertTask("vault_throughput", { id: "c2", skill_slug: "enrichment", state: "done", title: "c2", completed_at: daysAgo(3) });
+    insertTask("vault_throughput", { id: "c3", skill_slug: "enrichment", state: "done", title: "c3", completed_at: daysAgo(6) });
     // 5 more completed in the broader 28-day window (so velocity = 8 / 4 = 2).
     for (let i = 0; i < 5; i++) {
       insertTask("vault_throughput", {
         id: `c-old-${i}`,
-        skill_slug: "daily-vault-review",
+        skill_slug: "enrichment",
         state: "done",
         title: `c-old-${i}`,
         completed_at: daysAgo(15 + i),
@@ -384,7 +383,7 @@ describe("v2-tasks: buildBacklogPayload", () => {
     }
     // 4 pending.
     for (let i = 0; i < 4; i++) {
-      insertTask("vault_throughput", { id: `p${i}`, skill_slug: "daily-vault-review", state: "pending", title: `p${i}` });
+      insertTask("vault_throughput", { id: `p${i}`, skill_slug: "enrichment", state: "pending", title: `p${i}` });
     }
 
     const t = computeThroughput("vault_throughput");
@@ -409,8 +408,8 @@ describe("v2-tasks: buildBacklogPayload", () => {
   it("a vault sees only its own tasks (per-vault state.db isolation)", () => {
     seedVault("vault_alpha", "alpha");
     seedVault("vault_bravo", "bravo");
-    insertTask("vault_alpha", { id: "alpha-only", skill_slug: "daily-vault-review", state: "review", title: "alpha review" });
-    insertTask("vault_bravo", { id: "bravo-only", skill_slug: "daily-vault-review", state: "review", title: "bravo review" });
+    insertTask("vault_alpha", { id: "alpha-only", skill_slug: "enrichment", state: "review", title: "alpha review" });
+    insertTask("vault_bravo", { id: "bravo-only", skill_slug: "enrichment", state: "review", title: "bravo review" });
 
     const alphaPayload = buildBacklogPayload("vault_alpha");
     const bravoPayload = buildBacklogPayload("vault_bravo");

@@ -3,8 +3,9 @@
  *
  * `bootstrapFirstRun(vault)` is the out-of-band first-run choreography
  * triggered by the per-vault scheduler when `vaults.bootstrap_pending=1`.
- * It seeds skill_configs + starter pending tasks + an immediate
- * daily-vault-review task, then clears the flag. Idempotent.
+ * After C-INBOX-1, it seeds an enrichment skill_config + one immediate
+ * enrichment task (+ any starter pending tasks the registry defines for
+ * enrichment), then clears the flag. Idempotent.
  *
  * Tests run against a real per-vault state.db (migrations applied) and a
  * real control db (grove.db) — no mocks. The scheduler integration test
@@ -148,16 +149,17 @@ describe("bootstrapFirstRun (P23-2)", () => {
     resetDb();
   });
 
-  it("inserts skill_configs row for daily-vault-review with daily cadence + next_run_at in the future", async () => {
+  it("inserts skill_configs row for enrichment with weekly cadence + next_run_at in the future", async () => {
     const vault = seedVault({ bootstrapPending: 1 });
 
     await bootstrapFirstRun(vault);
 
     const configs = selectSkillConfigs();
     expect(configs).toHaveLength(1);
-    expect(configs[0].skill_slug).toBe("daily-vault-review");
+    expect(configs[0].skill_slug).toBe("enrichment");
     expect(configs[0].enabled).toBe(1);
-    expect(configs[0].cadence).toBe("daily");
+    // enrichment's registry defaultCadence is 'weekly' post-C-INBOX-1.
+    expect(configs[0].cadence).toBe("weekly");
     expect(configs[0].next_run_at).not.toBeNull();
 
     // next_run_at must be in the future and within the next ~30 hours
@@ -167,29 +169,28 @@ describe("bootstrapFirstRun (P23-2)", () => {
     expect(nextRun).toBeLessThan(Date.now() + 30 * 3600 * 1000);
   });
 
-  it("inserts starter pending tasks from the registry + one immediate daily-vault-review task", async () => {
+  it("inserts one immediate enrichment task (+ any registry starter tasks)", async () => {
     const vault = seedVault({ bootstrapPending: 1 });
 
     await bootstrapFirstRun(vault);
 
     const tasks = selectTasks();
-    // 3 starter rows from daily-vault-review.starterPendingTasks + 1
-    // immediate daily-vault-review row = 4.
-    expect(tasks.length).toBeGreaterThanOrEqual(4);
+    // Enrichment registry has no starterPendingTasks today, so the
+    // floor is 1 (the immediate enrichment task). The bootstrap still
+    // walks `starterPendingTasks` so future starters drop in for free
+    // — leave headroom in the upper bound.
+    expect(tasks.length).toBeGreaterThanOrEqual(1);
     expect(tasks.length).toBeLessThanOrEqual(6);
 
-    const dvrTasks = tasks.filter((t) => t.skill_slug === "daily-vault-review");
-    expect(dvrTasks.length).toBe(tasks.length);
+    const enrichmentTasks = tasks.filter((t) => t.skill_slug === "enrichment");
+    expect(enrichmentTasks.length).toBe(tasks.length);
     for (const t of tasks) {
       expect(t.state).toBe("pending");
     }
 
     const immediate = tasks.filter((t) => t.scheduled_for !== null);
     expect(immediate).toHaveLength(1);
-    expect(immediate[0].title).toBe("Daily Vault Review");
-
-    const starters = tasks.filter((t) => t.scheduled_for === null);
-    expect(starters.length).toBeGreaterThanOrEqual(3);
+    expect(immediate[0].title).toBe("Enrichment first-run");
   });
 
   it("clears vaults.bootstrap_pending=0 after running", async () => {
@@ -227,7 +228,7 @@ describe("bootstrapFirstRun (P23-2)", () => {
     expect(readBootstrapPending()).toBe(0);
 
     const tasks = selectTasks();
-    expect(tasks.length).toBeGreaterThanOrEqual(4);
+    expect(tasks.length).toBeGreaterThanOrEqual(1);
     expect(tasks.some((t) => t.scheduled_for !== null)).toBe(true);
   });
 

@@ -1,5 +1,5 @@
 /**
- * S-INBOX-8 — Enrichment suggestion skill (rewrite of daily-vault-review).
+ * S-INBOX-8 — Enrichment suggestion skill (the first review-emitting skill in Inbox v2).
  *
  * Identifies thin Concept notes — `Resources/Concepts/*.md` whose body
  * (sans frontmatter) is shorter than `THIN_BODY_THRESHOLD` AND that have
@@ -13,7 +13,8 @@
  * byte-for-byte.
  *
  * This is the only suggestion class in Inbox v2 that calls the LLM. The
- * cost-ceiling integration mirrors `daily-vault-review` exactly:
+ * cost-ceiling integration is the prototypical hard-fail shape used by
+ * other skill classes:
  *   - `estimateRunCost` is called BEFORE any LLM call
  *   - on `exceededCeiling`, the skill returns ZERO decisions and a
  *     `ceilingHit: true` summary — no LLM call is attempted
@@ -73,7 +74,7 @@ const THIN_BODY_THRESHOLD = 200;
 const MIN_BACKLINKS = 3;
 /** Per-run cap. Enrichment is the most expensive class — keep volume tight. */
 const DEFAULT_MAX_DECISIONS = 5;
-/** Default token ceiling per run — mirrors daily-vault-review default. */
+/** Default token ceiling per run — same default used by other LLM-touching skills. */
 const DEFAULT_TOKEN_CEILING = 12_000;
 /** Slice of backlinking-note prose fed to the model per source. */
 const BACKLINK_CONTEXT_CHARS = 200;
@@ -88,7 +89,7 @@ export interface EnrichmentRunOptions {
   mode?: EnrichmentMode;
   /** Cap per-run. Default 5. Tightest of the three classes — each call is real tokens. */
   maxDecisions?: number;
-  /** Per-run token ceiling. Default 12_000. Mirrors daily-vault-review. */
+  /** Per-run token ceiling. Default 12_000. */
   tokenCeiling?: number;
 }
 
@@ -479,7 +480,8 @@ function buildDecision(
  *
  * When the per-run token-cost estimate exceeds `tokenCeiling`, the skill
  * returns ZERO decisions with `ceilingHit: true` and never calls the
- * LLM — mirroring `daily-vault-review`'s hard-fail-on-ceiling shape.
+ * LLM — the standard hard-fail-on-ceiling shape used across the
+ * LLM-touching skill classes.
  */
 export async function runEnrichment(
   vault: VaultContext,
@@ -506,9 +508,9 @@ export async function runEnrichment(
   }
 
   // Estimate cost before any LLM call. Each candidate is one Haiku call,
-  // fed the Concept body + backlink snippets. We re-use the daily-vault-
-  // review cost-ceiling helper by mapping concept count to flagsCount and
-  // total backlink count to discoveryCount — same per-row weights apply.
+  // fed the Concept body + backlink snippets. We re-use the shared
+  // cost-ceiling helper by mapping concept count to flagsCount and total
+  // backlink count to discoveryCount — same per-row weights apply.
   const totalBacklinks = candidates.reduce(
     (acc, c) => acc + c.backlinks.length,
     0,
@@ -521,7 +523,7 @@ export async function runEnrichment(
 
   if (exceededCeiling(estimate, tokenCeiling)) {
     // Hard fail. No LLM call, no decisions, no file writes. Same shape
-    // as daily-vault-review's ceiling path.
+    // as other skills' ceiling paths.
     return {
       decisions: [],
       scanned: { concepts: conceptsScanned, thin: allCandidates.length },

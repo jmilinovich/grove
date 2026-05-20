@@ -17,11 +17,11 @@
  * explaining the vault is too large for this tick.
  *
  * The token weights are conservative per-row estimates tuned to the
- * daily-vault-review prompt shape; future executors that read different
- * row shapes pass their own weights.
+ * enrichment-class prompt shape; executors that read different row
+ * shapes pass their own weights.
  */
 
-/** Default per-row weights for the daily-vault-review style prompt. */
+/** Default per-row weights for the enrichment-style prompt. */
 export const DEFAULT_TOKENS_PER_FLAG = 280;
 export const DEFAULT_TOKENS_PER_DISCOVERY = 220;
 export const DEFAULT_TOKENS_PROMPT_OVERHEAD = 800;

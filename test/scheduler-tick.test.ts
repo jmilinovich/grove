@@ -111,7 +111,7 @@ describe("scheduler cron tick (P23-1)", () => {
 
   it("enqueues one pending task per due skill_configs row", () => {
     upsertSkillConfig({
-      slug: "daily-vault-review",
+      slug: "enrichment",
       enabled: 1,
       cadence: "daily",
       nextRunAt: "2020-01-01 00:00:00", // far past
@@ -122,14 +122,14 @@ describe("scheduler cron tick (P23-1)", () => {
 
     const tasks = selectTasks();
     expect(tasks).toHaveLength(1);
-    expect(tasks[0].skill_slug).toBe("daily-vault-review");
+    expect(tasks[0].skill_slug).toBe("enrichment");
     expect(tasks[0].state).toBe("pending");
     expect(tasks[0].scheduled_for).not.toBeNull();
   });
 
   it("advances next_run_at by +1 day for daily cadence", () => {
     upsertSkillConfig({
-      slug: "daily-vault-review",
+      slug: "enrichment",
       enabled: 1,
       cadence: "daily",
       nextRunAt: "2020-01-01 00:00:00",
@@ -141,7 +141,7 @@ describe("scheduler cron tick (P23-1)", () => {
       .prepare(
         "SELECT next_run_at, last_run_at FROM skill_configs WHERE skill_slug = ?",
       )
-      .get("daily-vault-review") as {
+      .get("enrichment") as {
       next_run_at: string;
       last_run_at: string;
     };
@@ -174,7 +174,7 @@ describe("scheduler cron tick (P23-1)", () => {
 
   it("skips on-demand and on-trigger cadences (never auto-enqueues)", () => {
     upsertSkillConfig({
-      slug: "daily-vault-review",
+      slug: "enrichment",
       enabled: 1,
       cadence: "on-demand",
       nextRunAt: null,
@@ -200,7 +200,7 @@ describe("scheduler cron tick (P23-1)", () => {
 
   it("skips disabled rows even if next_run_at is in the past", () => {
     upsertSkillConfig({
-      slug: "daily-vault-review",
+      slug: "enrichment",
       enabled: 0,
       cadence: "daily",
       nextRunAt: "2020-01-01 00:00:00",
@@ -212,7 +212,7 @@ describe("scheduler cron tick (P23-1)", () => {
 
   it("skips rows whose next_run_at is in the future", () => {
     upsertSkillConfig({
-      slug: "daily-vault-review",
+      slug: "enrichment",
       enabled: 1,
       cadence: "daily",
       nextRunAt: "2099-01-01 00:00:00",
@@ -224,7 +224,7 @@ describe("scheduler cron tick (P23-1)", () => {
 
   it("is idempotent within a tick window — a second tick enqueues nothing", () => {
     upsertSkillConfig({
-      slug: "daily-vault-review",
+      slug: "enrichment",
       enabled: 1,
       cadence: "daily",
       nextRunAt: "2020-01-01 00:00:00",
@@ -239,7 +239,7 @@ describe("scheduler cron tick (P23-1)", () => {
 
   it("uses the registry display name as the task title", () => {
     upsertSkillConfig({
-      slug: "daily-vault-review",
+      slug: "enrichment",
       enabled: 1,
       cadence: "daily",
       nextRunAt: "2020-01-01 00:00:00",
@@ -250,6 +250,6 @@ describe("scheduler cron tick (P23-1)", () => {
     const row = getVaultDb(VAULT_ID)
       .prepare("SELECT title FROM tasks LIMIT 1")
       .get() as { title: string };
-    expect(row.title).toBe("Daily Vault Review");
+    expect(row.title).toBe("Enrichment");
   });
 });

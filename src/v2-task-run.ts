@@ -64,7 +64,7 @@ export type SkillExecutor = (
 ) => Promise<ExecutorResult>;
 
 /**
- * Stub executor used until P22-5 lands the real `daily-vault-review`.
+ * Stub executor used when a skill has no wired `run` export yet.
  *
  * Returns a surface artifact pointing at the originating skill so the
  * dashboard renders something rather than spinning forever. Marked
@@ -97,7 +97,7 @@ async function stubExecutor(
  *
  * Per PLAN.md Phase 22 revision: "Skill executor invoked via dynamic
  * import from src/skills/<slug>.ts inside the worker loop; for P22-1 a
- * stub executor is acceptable (P22-5 lands the real daily-vault-review)."
+ * stub executor is acceptable (P22-5 lands the first real executor)."
  *
  * We attempt a dynamic import; if the module is missing or doesn't
  * export a `run` function with the right shape, fall back to the stub

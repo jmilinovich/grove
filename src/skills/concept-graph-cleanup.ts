@@ -40,8 +40,8 @@
  *   keep the prompt cost predictable. The cost ceiling is gated
  *   BEFORE any Anthropic calls; an oversized vault returns a
  *   `surface` artifact with `reason: "cost_ceiling_exceeded"` and
- *   makes zero API calls (Scope Cop SHRINK #1, same shape as
- *   daily-vault-review and dup-people-detection).
+ *   makes zero API calls (Scope Cop SHRINK #1, same shape as the
+ *   enrichment class and dup-people-detection).
  *
  * ── Embeddings ────────────────────────────────────────────────────────
  *

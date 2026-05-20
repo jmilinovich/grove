@@ -31,11 +31,7 @@ import { bridgeDecisionsToTasks } from "./decision-writer.js";
 import { SKILL_REGISTRY, type SkillMetadata } from "./skills/registry.js";
 import { dispatchTaskRun } from "./v2-task-run.js";
 import {
-  dispatchTaskReview,
   dispatchTaskReviewV2,
-  isReviewAction,
-  type LegacyReviewAction,
-  type ReviewAction,
   type ReviewActionV2,
 } from "./v2-task-review.js";
 import { ensureControlAttached } from "./v2-task-detail.js";
@@ -628,37 +624,23 @@ export async function handleV2TaskDefer(
   sendJson(res, 200, updated);
 }
 
-// ─── P22-3 / S-INBOX-10: review disposition ──────────────────────────────
-
-interface LegacyReviewBody {
-  shape: "legacy";
-  action: LegacyReviewAction;
-  refinement?: string;
-}
-
-interface V2ReviewBody {
-  shape: "v2";
-  action: ReviewActionV2;
-}
-
-type ParsedReviewBody = LegacyReviewBody | V2ReviewBody;
+// ─── S-INBOX-10: review disposition ──────────────────────────────────────
 
 /**
- * S-INBOX-10 — accepts BOTH the legacy ReviewAction shape (PR #71's
- * grove-www UI) AND the new V2 shape so this server can ship before
- * W-INBOX-1/2/3 cut grove-www over.
+ * S-INBOX-10 — accepts ONLY the V2 ReviewAction shape introduced in
+ * S-INBOX-10. The legacy string-action shape was retired in C-INBOX-1
+ * once `grove-www` stopped sending it.
  *
- *   Legacy: `{action: "confirm-durable"|"refine"|"dismiss"|"mark-stale", refinement?}`
  *   V2:     `{kind: "apply", option_id}` |
  *           `{kind: "refine", refinement}` |
  *           `{kind: "dismiss"}`
  *
- * The discriminator is whether `kind` is a recognized V2 verb; if not,
- * we fall through to the legacy parser. An object that's neither shape
- * returns `{error: "invalid_action"}` to match the pre-S-INBOX-10 wire
- * contract.
+ * Anything that doesn't match the V2 shape returns 400. The error
+ * codes (`invalid_json`, `invalid_body`, `option_id_required`,
+ * `refinement_required`, `invalid_action`) are preserved from the
+ * dual-shape parser so existing clients see the same surface.
  */
-function parseReviewBody(raw: string): ParsedReviewBody | { error: string } {
+function parseReviewBody(raw: string): ReviewActionV2 | { error: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -670,55 +652,38 @@ function parseReviewBody(raw: string): ParsedReviewBody | { error: string } {
   }
   const obj = parsed as Record<string, unknown>;
 
-  // V2 shape — discriminated by `kind`.
-  if (typeof obj.kind === "string") {
-    if (obj.kind === "apply") {
-      if (typeof obj.option_id !== "string" || obj.option_id.length === 0) {
-        return { error: "option_id_required" };
-      }
-      return {
-        shape: "v2",
-        action: { kind: "apply", option_id: obj.option_id },
-      };
-    }
-    if (obj.kind === "refine") {
-      if (typeof obj.refinement !== "string" || obj.refinement.length === 0) {
-        return { error: "refinement_required" };
-      }
-      return {
-        shape: "v2",
-        action: { kind: "refine", refinement: obj.refinement },
-      };
-    }
-    if (obj.kind === "dismiss") {
-      return { shape: "v2", action: { kind: "dismiss" } };
-    }
+  if (typeof obj.kind !== "string") {
     return { error: "invalid_action" };
   }
-
-  // Legacy shape — `action` must be one of the four legacy verbs.
-  if (!isReviewAction(obj.action)) {
-    return { error: "invalid_action" };
-  }
-  const result: LegacyReviewBody = { shape: "legacy", action: obj.action };
-  if (obj.refinement !== undefined) {
-    if (typeof obj.refinement !== "string") {
-      return { error: "invalid_refinement" };
+  if (obj.kind === "apply") {
+    if (typeof obj.option_id !== "string" || obj.option_id.length === 0) {
+      return { error: "option_id_required" };
     }
-    result.refinement = obj.refinement;
+    return { kind: "apply", option_id: obj.option_id };
   }
-  return result;
+  if (obj.kind === "refine") {
+    if (typeof obj.refinement !== "string" || obj.refinement.length === 0) {
+      return { error: "refinement_required" };
+    }
+    return { kind: "refine", refinement: obj.refinement };
+  }
+  if (obj.kind === "dismiss") {
+    return { kind: "dismiss" };
+  }
+  return { error: "invalid_action" };
 }
 
 /**
  * `POST /v/<slug>/v1/tasks/<id>/review` — disposition a review-state task.
  *
- * Body shape: `{action, refinement?}` where action is one of
- * `confirm-durable | refine | dismiss | mark-stale`. See
- * `v2-task-review.ts` for per-action semantics.
+ * Body: V2 shape only — `{kind: "apply", option_id}` |
+ * `{kind: "refine", refinement}` | `{kind: "dismiss"}`. See
+ * `v2-task-review.ts` for per-kind semantics.
  *
- * `userId` comes from the proxy's auth resolution — the API key's
- * `user_id` is stamped as `Provenance-By` on confirm-durable commits.
+ * `userId` comes from the proxy's auth resolution — it's threaded into
+ * the dispatcher for any downstream provenance writes (today, the V2
+ * apply path delegates to compensateDecision, which composes its own
+ * trailers; userId is reserved for future per-action provenance needs).
  */
 export async function handleV2TaskReview(
   req: IncomingMessage,
@@ -740,26 +705,11 @@ export async function handleV2TaskReview(
     return;
   }
 
-  if (parsed.shape === "v2") {
-    const { status, body } = await dispatchTaskReviewV2({
-      vault,
-      taskId,
-      userId,
-      action: parsed.action,
-    });
-    sendJson(res, status, body);
-    return;
-  }
-
-  // Legacy shape — dispatchTaskReview translates to V2 internally when
-  // the task has a backing Decision, or falls through to the original
-  // P22-3 path when it has a note-change artifact and no Decision.
-  const { status, body } = await dispatchTaskReview({
+  const { status, body } = await dispatchTaskReviewV2({
     vault,
     taskId,
     userId,
-    action: parsed.action,
-    refinement: parsed.refinement,
+    action: parsed,
   });
   sendJson(res, status, body);
 }

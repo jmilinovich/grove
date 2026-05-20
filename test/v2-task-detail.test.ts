@@ -152,7 +152,7 @@ describe("handleV2TaskDetail (P21-4)", () => {
     db.prepare(
       `INSERT INTO tasks (id, skill_slug, state, title, body, estimated_minutes)
        VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run("t_pending", "daily-vault-review", "pending", "Review your inbox", "ten unprocessed captures", 5);
+    ).run("t_pending", "enrichment", "pending", "Review your inbox", "ten unprocessed captures", 5);
 
     const cap = makeRes();
     handleV2TaskDetail(req, cap.res, ctx("vault_detail", "personal"), "t_pending");
@@ -160,7 +160,7 @@ describe("handleV2TaskDetail (P21-4)", () => {
     expect(cap.status).toBe(200);
     const body = cap.body as Record<string, unknown>;
     expect(body.id).toBe("t_pending");
-    expect(body.skillId).toBe("daily-vault-review");
+    expect(body.skillId).toBe("enrichment");
     expect(body.title).toBe("Review your inbox");
     expect(body.description).toBe("ten unprocessed captures");
     expect(body.state).toBe("pending");
@@ -174,7 +174,7 @@ describe("handleV2TaskDetail (P21-4)", () => {
     db.prepare(
       `INSERT INTO tasks (id, skill_slug, state, title)
        VALUES (?, ?, ?, ?)`,
-    ).run("t_done", "daily-vault-review", "done", "Surface a perishable note");
+    ).run("t_done", "enrichment", "done", "Surface a perishable note");
     db.prepare(
       `INSERT INTO task_results (task_id, artifact_json, provenance_json)
        VALUES (?, ?, ?)`,
@@ -211,7 +211,7 @@ describe("handleV2TaskDetail (P21-4)", () => {
     const db = getVaultDb("vault_detail");
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?)",
-    ).run("t_legacy", "daily-vault-review", "done", "Pre-provenance task");
+    ).run("t_legacy", "enrichment", "done", "Pre-provenance task");
     db.prepare(
       "INSERT INTO task_results (task_id, artifact_json) VALUES (?, ?)",
     ).run("t_legacy", JSON.stringify({ type: "surface" }));

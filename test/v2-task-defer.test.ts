@@ -136,7 +136,7 @@ describe("handleV2TaskDefer (P22-2)", () => {
     db.prepare(
       `INSERT INTO tasks (id, skill_slug, state, title)
        VALUES (?, ?, ?, ?)`,
-    ).run("t_pending", "daily-vault-review", "pending", "Process inbox");
+    ).run("t_pending", "enrichment", "pending", "Process inbox");
 
     const cap = makeRes();
     const req = makeReq(JSON.stringify({ until: "2026-06-01T09:00:00Z" }));
@@ -158,7 +158,7 @@ describe("handleV2TaskDefer (P22-2)", () => {
     const db = getVaultDb("vault_defer");
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?)",
-    ).run("t_review", "daily-vault-review", "review", "Confirm taste-graph edit");
+    ).run("t_review", "enrichment", "review", "Confirm taste-graph edit");
 
     const cap = makeRes();
     const req = makeReq(JSON.stringify({ until: "2026-07-15T12:00:00Z" }));
@@ -174,7 +174,7 @@ describe("handleV2TaskDefer (P22-2)", () => {
     const db = getVaultDb("vault_defer");
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?)",
-    ).run("t_done", "daily-vault-review", "done", "Already cleared");
+    ).run("t_done", "enrichment", "done", "Already cleared");
 
     const cap = makeRes();
     const req = makeReq(JSON.stringify({ until: "2026-06-01T09:00:00Z" }));
@@ -189,8 +189,8 @@ describe("handleV2TaskDefer (P22-2)", () => {
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
     ).run(
-      "t_dismissed", "daily-vault-review", "dismissed", "Dropped",
-      "t_failed", "daily-vault-review", "failed", "Errored",
+      "t_dismissed", "enrichment", "dismissed", "Dropped",
+      "t_failed", "enrichment", "failed", "Errored",
     );
 
     for (const id of ["t_dismissed", "t_failed"]) {
@@ -214,7 +214,7 @@ describe("handleV2TaskDefer (P22-2)", () => {
     const db = getVaultDb("vault_defer");
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?)",
-    ).run("t_pending", "daily-vault-review", "pending", "Process inbox");
+    ).run("t_pending", "enrichment", "pending", "Process inbox");
 
     const cap = makeRes();
     const req = makeReq(JSON.stringify({}));
@@ -228,7 +228,7 @@ describe("handleV2TaskDefer (P22-2)", () => {
     const db = getVaultDb("vault_defer");
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?)",
-    ).run("t_pending", "daily-vault-review", "pending", "Process inbox");
+    ).run("t_pending", "enrichment", "pending", "Process inbox");
 
     const cap = makeRes();
     const req = makeReq(JSON.stringify({ until: "not-a-date" }));

@@ -146,7 +146,7 @@ describe("handleV2TaskDismiss (P22-2)", () => {
     const db = getVaultDb("vault_dismiss");
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?)",
-    ).run("t1", "daily-vault-review", "pending", "Drop this");
+    ).run("t1", "enrichment", "pending", "Drop this");
 
     const cap = makeRes();
     await handleV2TaskDismiss(makeReq(), cap.res, ctx("vault_dismiss", "personal"), "t1");
@@ -166,7 +166,7 @@ describe("handleV2TaskDismiss (P22-2)", () => {
     const db = getVaultDb("vault_dismiss");
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title, updated_at) VALUES (?, ?, ?, ?, ?)",
-    ).run("t1", "daily-vault-review", "dismissed", "Already dropped", "2026-01-01 00:00:00");
+    ).run("t1", "enrichment", "dismissed", "Already dropped", "2026-01-01 00:00:00");
 
     const cap = makeRes();
     await handleV2TaskDismiss(makeReq(), cap.res, ctx("vault_dismiss", "personal"), "t1");
@@ -197,7 +197,7 @@ describe("handleV2TaskDismiss (P22-2)", () => {
     db.prepare(
       `INSERT INTO tasks (id, skill_slug, state, title, source_flag_id)
        VALUES (?, ?, ?, ?, ?)`,
-    ).run("t_from_flag", "daily-vault-review", "review", "An orphan node", "flag_orphan_1");
+    ).run("t_from_flag", "enrichment", "review", "An orphan node", "flag_orphan_1");
 
     // Pre-state: flag is unresolved.
     const before = getDb()
@@ -231,7 +231,7 @@ describe("handleV2TaskDismiss (P22-2)", () => {
     const db = getVaultDb("vault_dismiss");
     db.prepare(
       "INSERT INTO tasks (id, skill_slug, state, title) VALUES (?, ?, ?, ?)",
-    ).run("t_plain", "daily-vault-review", "pending", "Not flag-derived");
+    ).run("t_plain", "enrichment", "pending", "Not flag-derived");
 
     const cap = makeRes();
     await handleV2TaskDismiss(makeReq(), cap.res, ctx("vault_dismiss", "personal"), "t_plain");
@@ -257,7 +257,7 @@ describe("handleV2TaskDismiss (P22-2)", () => {
     db.prepare(
       `INSERT INTO tasks (id, skill_slug, state, title, source_flag_id)
        VALUES (?, ?, ?, ?, ?)`,
-    ).run("t_late", "daily-vault-review", "review", "Late dismiss", "flag_prev_resolved");
+    ).run("t_late", "enrichment", "review", "Late dismiss", "flag_prev_resolved");
 
     const cap = makeRes();
     await handleV2TaskDismiss(makeReq(), cap.res, ctx("vault_dismiss", "personal"), "t_late");

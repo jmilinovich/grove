@@ -26,7 +26,7 @@
  *
  * Deterministic + no LLM: scoring and tie-breaking are pure functions of
  * the vault on disk; this skill never calls Anthropic. The cost-ceiling
- * machinery used by `daily-vault-review` is therefore not wired in here.
+ * machinery used by the enrichment class is therefore not wired in here.
  *
  * Per-run cap (`maxDecisions`, default 10) — prevents an inbox flood the
  * first time the skill runs on a large vault. The cap is a hard stop, not
@@ -34,7 +34,7 @@
  * looking at the remaining Journal entries (deterministic walk order so
  * the next run picks up where this one left off).
  *
- * Two exports mirror `daily-vault-review`:
+ * Two exports mirror the suggestion-skill shape:
  *   - `runDisambiguation(vault, options)` — high-level runner, returns
  *     decisions + scan stats. Used directly by tests.
  *   - `run(vault, task)` — `SkillExecutor` adapter (worker contract).

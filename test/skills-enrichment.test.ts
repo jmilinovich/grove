@@ -30,11 +30,10 @@
  *      `payload.prior_content` BYTE-FOR-BYTE. This is the load-bearing
  *      test for the spec's "restore on rollback" contract.
  *
- * Mock pattern mirrors `test/skills-daily-vault-review.test.ts`: a
- * single `setClientForTesting(...)` injection of a vi.fn-backed
- * `messages.create` returning a structured `tool_use` payload. The git
- * vault is initialized end-to-end so the `writes-allowed` path can call
- * `commitSkillRun` without mocking git.
+ * Mock pattern: a single `setClientForTesting(...)` injection of a
+ * vi.fn-backed `messages.create` returning a structured `tool_use`
+ * payload. The git vault is initialized end-to-end so the
+ * `writes-allowed` path can call `commitSkillRun` without mocking git.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
