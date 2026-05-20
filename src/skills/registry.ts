@@ -130,6 +130,23 @@ export const SKILL_REGISTRY: readonly SkillMetadata[] = [
     defaultCadence: "weekly",
     defaultArtifactType: "note-link",
   },
+  {
+    id: "skill-links-suggestion",
+    slug: "links-suggestion",
+    name: "Links Suggestion",
+    domain: "knowledge",
+    author: "builtin",
+    description:
+      "Sweeps Resources/** and Journal/** for raw surface mentions of entities (Person/Concept/Company) whose notes exist but aren't wikilinked. Applies a provisional [[link]] when EXACTLY ONE candidate matches; defers ambiguous (2+ candidate) cases to Disambiguation.",
+    sampleTasks: [
+      "raw mentions of entities that already have notes",
+      "missing wikilinks in today's journal entry",
+      "single-candidate provisional links awaiting confirmation",
+    ],
+    cadenceOptions: ["weekly", "on-demand"],
+    defaultCadence: "weekly",
+    defaultArtifactType: "note-link",
+  },
 ];
 
 /** Lookup by slug; returns undefined if the slug isn't a registered builtin. */
@@ -159,6 +176,8 @@ export async function loadSkillModule(slug: string): Promise<unknown | null> {
       return await import("./concept-graph-cleanup.js");
     case "disambiguation":
       return await import("./disambiguation.js");
+    case "links-suggestion":
+      return await import("./links-suggestion.js");
     default:
       return null;
   }
