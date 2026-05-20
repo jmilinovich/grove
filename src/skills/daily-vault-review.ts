@@ -60,6 +60,16 @@ const MAX_OUTPUT_TASKS = 5;
 const MAX_OUTPUT_TOKENS = 1024;
 const DEFAULT_TOKEN_CEILING = 12_000;
 const SKILL_SLUG = "daily-vault-review";
+/**
+ * Stop proposing new child tasks once this many `daily-vault-review`
+ * tasks are already open (pending or review) for the vault. Without
+ * this guard the LLM emits 3–5 paraphrased reminders every daily tick
+ * and the user's review queue compounds (we observed 63 rows for one
+ * vault in 12 days). Matched-title dedup in `insertChildTasks` catches
+ * literal repeats; this guard catches LLM paraphrases by short-circuiting
+ * the whole run before the model is called.
+ */
+const OPEN_TASK_THRESHOLD = 5;
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -324,6 +334,22 @@ function enforceMode(
 
 // ── Child task insertion ──────────────────────────────────────────────
 
+/**
+ * Count open (pending or review) tasks for this skill in the vault.
+ * Used by the open-task threshold guard to short-circuit the whole run
+ * when the user already has a backlog they haven't dispositioned.
+ */
+function countOpenTasksForSkill(vault: VaultContext): number {
+  const row = getVaultDb(vault.vaultId)
+    .prepare(
+      `SELECT COUNT(*) AS n FROM tasks
+        WHERE skill_slug = ?
+          AND state IN ('pending', 'review')`,
+    )
+    .get(SKILL_SLUG) as { n: number } | undefined;
+  return row?.n ?? 0;
+}
+
 function insertChildTasks(
   vault: VaultContext,
   tasks: ProposedTask[],
@@ -338,10 +364,22 @@ function insertChildTasks(
     `INSERT INTO task_results (task_id, artifact_json, note_change_json, provenance_json)
      VALUES (?, ?, ?, ?)`,
   );
+  // Per-title dedup. Titles are LLM-generated and the model paraphrases,
+  // so a UNIQUE constraint on (skill_slug, title) would miss most
+  // repeats — but literal duplicates ("Write today's journal entry")
+  // are the most common shape, and this catches them.
+  const existsByTitle = db.prepare(
+    `SELECT 1 FROM tasks
+      WHERE skill_slug = ?
+        AND lower(title) = lower(?)
+        AND state IN ('pending', 'review')
+      LIMIT 1`,
+  );
 
   const ids: string[] = [];
   const tx = db.transaction(() => {
     for (const t of tasks) {
+      if (existsByTitle.get(SKILL_SLUG, t.title)) continue;
       const id = `task_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
       insertTask.run(
         id,
@@ -392,6 +430,29 @@ export async function runDailyVaultReview(
 ): Promise<TaskResult> {
   const { mode } = options;
   const tokenCeiling = options.tokenCeiling ?? DEFAULT_TOKEN_CEILING;
+
+  // Open-task threshold guard — skip the LLM call entirely if the user
+  // already has a backlog they haven't dispositioned. Without this the
+  // skill compounds 3–5 new rows per tick into a queue the user can
+  // never catch up on (we observed 63 rows for one vault in 12 days).
+  const openCount = countOpenTasksForSkill(vault);
+  if (openCount >= OPEN_TASK_THRESHOLD) {
+    return {
+      artifact: {
+        type: "surface",
+        surfaceText:
+          `${openCount} daily-vault-review tasks are already pending ` +
+          `review. Disposition them first; the next daily tick will ` +
+          `propose new tasks once the queue drains below ${OPEN_TASK_THRESHOLD}.`,
+      },
+      provenance: {
+        voice: "perishable",
+        by: "system",
+        writtenAt: new Date().toISOString(),
+        reason: "open_task_threshold_exceeded",
+      },
+    };
+  }
 
   const flags = readFlags(vault.vaultId);
   const discovery = readDiscovery(vault.vaultId);

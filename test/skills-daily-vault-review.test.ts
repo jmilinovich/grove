@@ -441,4 +441,101 @@ describe("runDailyVaultReview (P22-5)", () => {
     expect(userBlocks).not.toContain("disc_other");
     expect(userBlocks).toContain(ourFlag);
   });
+
+  describe("open-task threshold + per-title dedup", () => {
+    function seedOpenReviewTasks(count: number, titlePrefix = "Write today's journal entry"): void {
+      const vdb = getVaultDb(VAULT_ID);
+      const stmt = vdb.prepare(
+        `INSERT INTO tasks (id, skill_slug, state, title, body)
+         VALUES (?, 'daily-vault-review', 'review', ?, ?)`,
+      );
+      for (let i = 0; i < count; i++) {
+        stmt.run(
+          `seeded_${i}_${Math.random().toString(36).slice(2, 8)}`,
+          i === 0 ? titlePrefix : `${titlePrefix} ${i}`,
+          ".",
+        );
+      }
+    }
+
+    it("short-circuits the LLM call when >=5 open tasks are already pending", async () => {
+      seedFlags(3);
+      seedOpenReviewTasks(5);
+
+      const create = vi.fn();
+      setClientForTesting({ messages: { create } } as never);
+
+      const result = await runDailyVaultReview(ctx(), {
+        mode: "surface-only",
+        tokenCeiling: 50_000,
+      });
+
+      expect(create).not.toHaveBeenCalled();
+      expect(result.artifact.type).toBe("surface");
+      expect(result.artifact.surfaceText).toMatch(/5 daily-vault-review tasks/);
+      expect(result.provenance.reason).toBe("open_task_threshold_exceeded");
+
+      const rows = getVaultDb(VAULT_ID)
+        .prepare(
+          `SELECT COUNT(*) AS n FROM tasks WHERE skill_slug = 'daily-vault-review'`,
+        )
+        .get() as { n: number };
+      expect(rows.n).toBe(5);
+    });
+
+    it("runs normally when the open-task count is below the threshold", async () => {
+      seedFlags(2);
+      seedOpenReviewTasks(4);
+
+      const { create } = mockAnthropic([
+        { title: "Fresh task A", body: ".", artifactType: "surface" },
+        { title: "Fresh task B", body: ".", artifactType: "surface" },
+        { title: "Fresh task C", body: ".", artifactType: "surface" },
+      ]);
+
+      await runDailyVaultReview(ctx(), {
+        mode: "surface-only",
+        tokenCeiling: 50_000,
+      });
+
+      expect(create).toHaveBeenCalledOnce();
+      const total = getVaultDb(VAULT_ID)
+        .prepare(
+          `SELECT COUNT(*) AS n FROM tasks WHERE skill_slug = 'daily-vault-review'`,
+        )
+        .get() as { n: number };
+      expect(total.n).toBe(7);
+    });
+
+    it("skips inserts when a proposed title matches an existing open task (case-insensitive)", async () => {
+      seedFlags(2);
+      const vdb = getVaultDb(VAULT_ID);
+      vdb.prepare(
+        `INSERT INTO tasks (id, skill_slug, state, title, body)
+         VALUES ('seeded_dup', 'daily-vault-review', 'review', ?, '.')`,
+      ).run("Process Inbox/");
+
+      mockAnthropic([
+        { title: "process inbox/", body: ".", artifactType: "surface" },
+        { title: "Revisit long-orphan concepts", body: ".", artifactType: "surface" },
+        { title: "Brand new title", body: ".", artifactType: "surface" },
+      ]);
+
+      await runDailyVaultReview(ctx(), {
+        mode: "surface-only",
+        tokenCeiling: 50_000,
+      });
+
+      const rows = getVaultDb(VAULT_ID)
+        .prepare(
+          `SELECT title FROM tasks WHERE skill_slug = 'daily-vault-review' ORDER BY title`,
+        )
+        .all() as Array<{ title: string }>;
+      const titles = rows.map((r) => r.title);
+      expect(titles).toContain("Process Inbox/");
+      expect(titles).toContain("Revisit long-orphan concepts");
+      expect(titles).toContain("Brand new title");
+      expect(titles.length).toBe(3);
+    });
+  });
 });
