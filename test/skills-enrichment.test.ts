@@ -460,6 +460,76 @@ describe("S-INBOX-8 — enrichment skill", () => {
     expect(rows.n).toBe(3);
   });
 
+  it("skips a malformed-frontmatter Concept and continues scanning", async () => {
+    // Prod incident 2026-05-19: a single note with malformed YAML
+    // (unquoted @-alias) crashed the whole scan because parseNote threw
+    // before any candidate was produced. Defensive wrap keeps the rest
+    // of the vault scannable.
+
+    // 1) Valid thin concept with 3 backlinks — should be enriched.
+    writeVaultFile(
+      "Resources/Concepts/Taste Graph.md",
+      "---\ntype: concept\n---\n\nProduct discovery primitive.\n",
+    );
+    writeVaultFile(
+      "Journal/2026-05-18.md",
+      "---\ntype: journal\n---\n\n[[Taste Graph]] notes.\n",
+    );
+    writeVaultFile(
+      "Journal/2026-05-19.md",
+      "---\ntype: journal\n---\n\n[[Taste Graph]] discussed.\n",
+    );
+    writeVaultFile(
+      "Journal/2026-05-20.md",
+      "---\ntype: journal\n---\n\n[[Taste Graph]] launched.\n",
+    );
+
+    // 2) Broken Concept — `@` is a reserved YAML indicator; throws on parse.
+    writeVaultFile(
+      "Resources/Concepts/Broken Concept.md",
+      "---\ntype: concept\naliases:\n  - @ericwilliamrea\n---\n\nMalformed concept.\n",
+    );
+
+    // 3) Thick concept — too long to qualify, but should also not crash.
+    const thickBody =
+      "This is a thick concept with plenty of body content. ".repeat(10);
+    writeVaultFile(
+      "Resources/Concepts/Thick Concept.md",
+      `---\ntype: concept\n---\n\n${thickBody}\n`,
+    );
+
+    await commitSeed("seed: valid thin + broken-YAML + thick concepts");
+
+    const { create } = mockAnthropic(
+      "Para 1.\n\nPara 2.\n\nPara 3.\n\nPara 4.",
+    );
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await runEnrichment(ctx(), { tokenCeiling: 50_000 });
+
+      // Scan continued — the valid thin concept still got enriched.
+      expect(create).toHaveBeenCalledOnce();
+      expect(result.ceilingHit).toBe(false);
+      expect(result.decisions).toHaveLength(1);
+      expect(result.decisions[0]!.payload).toMatchObject({
+        target_path: "Resources/Concepts/Taste Graph.md",
+      });
+      const updated = readVaultFile("Resources/Concepts/Taste Graph.md");
+      expect(updated).toContain("Para 1.");
+
+      // The broken note was logged + skipped.
+      const skipLogs = warnSpy.mock.calls.filter((args) =>
+        String(args[0]).includes(
+          "[enrichment] skipping Resources/Concepts/Broken Concept.md",
+        ),
+      );
+      expect(skipLogs).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("compensation round-trip restores the Concept file byte-for-byte to prior_content", async () => {
     writeVaultFile(
       "Resources/Concepts/Taste Graph.md",

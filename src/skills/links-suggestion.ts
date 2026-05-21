@@ -155,7 +155,20 @@ function buildEntityIndex(vaultPath: string): EntityCandidate[] {
       } catch {
         continue;
       }
-      const { frontmatter } = parseNote(raw);
+      // Defensive parse — one note with malformed YAML frontmatter must
+      // not crash the whole scan (see prod incident 2026-05-19). Skill
+      // is a read-scan; write paths still fail loudly on bad YAML.
+      let frontmatter: Record<string, unknown>;
+      try {
+        ({ frontmatter } = parseNote(raw));
+      } catch (err) {
+        console.warn(
+          `[${SKILL_SLUG}] skipping ${dir}/${file}: ${
+            (err as Error).message.split("\n")[0]
+          }`,
+        );
+        continue;
+      }
       const title = file.replace(/\.md$/, "");
       const aliases = Array.isArray(frontmatter.aliases)
         ? (frontmatter.aliases as unknown[]).filter(

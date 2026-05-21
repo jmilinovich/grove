@@ -213,7 +213,20 @@ function findThinConcepts(vaultPath: string): {
     } catch {
       continue;
     }
-    const { content } = parseNote(fullContent);
+    // Defensive parse — one note with malformed YAML frontmatter must
+    // not crash the whole scan (see prod incident 2026-05-19). Skill is
+    // a read-scan; write paths still fail loudly on bad YAML elsewhere.
+    let content: string;
+    try {
+      ({ content } = parseNote(fullContent));
+    } catch (err) {
+      console.warn(
+        `[${SKILL_SLUG}] skipping ${CONCEPTS_DIR}/${file}: ${
+          (err as Error).message.split("\n")[0]
+        }`,
+      );
+      continue;
+    }
     if (content.trim().length >= THIN_BODY_THRESHOLD) continue;
 
     const title = file.replace(/\.md$/, "");
@@ -263,7 +276,21 @@ function findThinConcepts(vaultPath: string): {
       // pair — multiple wikilinks to the same target from one file still
       // surface one snippet (otherwise long notes inflate the prompt).
       if (recorded) continue;
-      const { content } = parseNote(raw);
+      // Defensive parse — one note with malformed YAML frontmatter must
+      // not crash the whole scan (see prod incident 2026-05-19). Skill
+      // is a read-scan; write paths still fail loudly on bad YAML.
+      let content: string;
+      try {
+        ({ content } = parseNote(raw));
+      } catch (err) {
+        const relForLog = relative(vaultPath, abs).split("\\").join("/");
+        console.warn(
+          `[${SKILL_SLUG}] skipping ${relForLog}: ${
+            (err as Error).message.split("\n")[0]
+          }`,
+        );
+        break;
+      }
       const trimmed = content.trim();
       const snippet = trimmed.slice(0, BACKLINK_CONTEXT_CHARS);
       candidates.push({

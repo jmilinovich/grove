@@ -29,7 +29,7 @@
  * can call `commitSkillRun` end-to-end without mocking git.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   mkdtempSync,
   mkdirSync,
@@ -365,6 +365,50 @@ describe("S-INBOX-7 — links-suggestion skill", () => {
       const day = String(i).padStart(2, "0");
       const body = readVaultFile(`Journal/2026-04-${day}.md`);
       expect(body).not.toContain("[[Anna Chen]]");
+    }
+  });
+
+  it("skips a malformed-frontmatter entity note and continues scanning", async () => {
+    // Prod incident 2026-05-19: a single People note with malformed YAML
+    // (unquoted @-alias) crashed the whole scan because parseNote threw
+    // before any entity candidate was produced. Defensive wrap keeps the
+    // rest of the vault scannable.
+    writeVaultFile(
+      "Resources/People/Anna Chen.md",
+      "---\ntype: person\n---\n\nDesigner.\n",
+    );
+    // Broken People note — `@` is a reserved YAML indicator; throws on parse.
+    writeVaultFile(
+      "Resources/People/Broken Person.md",
+      "---\ntype: person\naliases:\n  - @ericwilliamrea\n---\n\nMalformed note.\n",
+    );
+    writeVaultFile(
+      "Journal/2026-05-20.md",
+      "---\ntype: journal\n---\n\nQuick chat with Anna Chen about the project.\n",
+    );
+    await commitSeed("seed: valid + broken-YAML + journal");
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await runLinksSuggestion(ctx());
+
+      // Scan continued — the valid Anna Chen still produced a link decision.
+      expect(result.decisions).toHaveLength(1);
+      const d = result.decisions[0]!;
+      expect(d.type).toBe("link");
+      expect(d.chosenOptionId).toBe("opt-1");
+      const updated = readVaultFile("Journal/2026-05-20.md");
+      expect(updated).toContain("[[Anna Chen]]");
+
+      // The broken note was logged + skipped.
+      const skipLogs = warnSpy.mock.calls.filter((args) =>
+        String(args[0]).includes(
+          "[links-suggestion] skipping Resources/People/Broken Person.md",
+        ),
+      );
+      expect(skipLogs).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
     }
   });
 
