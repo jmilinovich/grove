@@ -261,6 +261,61 @@ describe("handleImageUpload", () => {
     expect(enqueueDiscovery).toHaveBeenCalledWith(result.note_path, "write", expect.any(String));
   });
 
+  it("rejects upload when provenance is required but missing", async () => {
+    process.env.GROVE_REQUIRE_PROVENANCE = "true";
+    try {
+      const rest = await loadRest();
+      rest.setImageStoreResolver(() => ({
+        upload: async (key, data) => ({ url: `https://assets.grove.md/${key}`, size: data.length }),
+        delete: async () => {},
+        getUrl: (key) => `https://assets.grove.md/${key}`,
+      }));
+      rest.setAutoTagFn(async () => ({
+        description: "x", tags: [], concepts: [], ocr_text: "",
+      }));
+
+      const png = makePngHeader(10, 10);
+      await expect(
+        rest.handleImageUpload(defaultVaultContext(), {
+          file: png,
+          contentType: "image/png",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION" });
+    } finally {
+      delete process.env.GROVE_REQUIRE_PROVENANCE;
+    }
+  });
+
+  it("accepts upload when provenance is provided", async () => {
+    process.env.GROVE_REQUIRE_PROVENANCE = "true";
+    try {
+      const rest = await loadRest();
+      rest.setImageStoreResolver(() => ({
+        upload: async (key, data) => ({ url: `https://assets.grove.md/${key}`, size: data.length }),
+        delete: async () => {},
+        getUrl: (key) => `https://assets.grove.md/${key}`,
+      }));
+      rest.setAutoTagFn(async () => ({
+        description: "x", tags: [], concepts: [], ocr_text: "",
+      }));
+
+      const png = makePngHeader(10, 10);
+      const result = await rest.handleImageUpload(defaultVaultContext(), {
+        file: png,
+        contentType: "image/png",
+        provenance: {
+          voice: "perishable",
+          by: "claude-opus-4-7",
+          written_at: new Date().toISOString(),
+          reason: "test upload",
+        },
+      });
+      expect(result.note_path).toMatch(/^Resources\/Images\//);
+    } finally {
+      delete process.env.GROVE_REQUIRE_PROVENANCE;
+    }
+  });
+
   it("uses provided path when supplied", async () => {
     const rest = await loadRest();
     rest.setImageStoreResolver(() => ({

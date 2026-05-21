@@ -1826,6 +1826,7 @@ export interface ImageUploadInput {
   filename?: string;
   path?: string;
   tags?: string[];
+  provenance?: Provenance;
 }
 
 export interface ImageUploadResult {
@@ -2019,6 +2020,7 @@ export async function handleImageUpload(
     trail: options.trail,
     keyName: options.keyName,
     handle: options.handle,
+    provenance: input.provenance,
   });
 
   // Queue async enrichment (Vision description + tags + OCR → rewrite note)

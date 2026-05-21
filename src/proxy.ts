@@ -3179,8 +3179,20 @@ const server = createServer(async (req, res) => {
       }
       const pathField = fields.find((f) => f.name === "path");
       const tagsField = fields.find((f) => f.name === "tags");
+      const provenanceField = fields.find((f) => f.name === "provenance");
       const pathValue = pathField?.data.toString("utf-8").trim();
       const tagsValue = tagsField?.data.toString("utf-8").trim();
+      const provenanceRaw = provenanceField?.data.toString("utf-8").trim();
+      let provenanceValue: import("./provenance.js").Provenance | undefined;
+      if (provenanceRaw) {
+        try {
+          provenanceValue = JSON.parse(provenanceRaw);
+        } catch {
+          res.writeHead(400, restHeaders);
+          res.end(JSON.stringify({ error: "invalid provenance: not JSON" }));
+          return;
+        }
+      }
 
       structuredLog("info", "rest.image_upload", rid, {
         key_id: restKey.id,
@@ -3198,6 +3210,7 @@ const server = createServer(async (req, res) => {
             filename: fileField.filename,
             path: pathValue || undefined,
             tags: tagsValue ? tagsValue.split(",").map((t) => t.trim()).filter(Boolean) : undefined,
+            provenance: provenanceValue,
           },
           { trail: restTrail, keyName: restKey.name },
         );
