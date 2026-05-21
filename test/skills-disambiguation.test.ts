@@ -26,7 +26,7 @@
  * end without mocking git.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   mkdtempSync,
   mkdirSync,
@@ -317,6 +317,44 @@ describe("S-INBOX-6 — disambiguation skill", () => {
       .prepare("SELECT COUNT(*) AS n FROM decisions")
       .get() as { n: number };
     expect(rows.n).toBe(1);
+  });
+
+  it("skips a malformed-frontmatter Person note and continues scanning", async () => {
+    // Prod incident 2026-05-19: a single People note with malformed YAML
+    // (unquoted @-alias) crashed the whole scan because parseNote threw
+    // before any candidate was produced. Defensive wrap keeps the rest
+    // of the vault scannable.
+    seedTwoAnnas();
+    // A third Person note with broken YAML — the `@` indicator at the
+    // start of a YAML scalar is reserved and the `yaml` lib throws on it.
+    writeVaultFile(
+      "Resources/People/Broken Person.md",
+      "---\ntype: person\naliases:\n  - @ericwilliamrea\n---\n\nMalformed note.\n",
+    );
+    writeVaultFile(
+      "Journal/2026-05-20.md",
+      "---\ntype: journal\n---\n\nQuick chat with Anna about the project.\n",
+    );
+    await commitSeed("seed: two Annas + broken-YAML Person");
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await runDisambiguation(ctx());
+
+      // Scan continued — the two valid Annas still produced the ambiguity decision.
+      expect(result.decisions).toHaveLength(1);
+      const d = result.decisions[0]!;
+      expect(d.type).toBe("disambiguation");
+      expect(d.chosenOptionId).toBe("opt-1");
+
+      // The broken note was logged + skipped.
+      const skipLogs = warnSpy.mock.calls.filter((args) =>
+        String(args[0]).includes("[disambiguation] skipping Resources/People/Broken Person.md"),
+      );
+      expect(skipLogs).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("caps the run at maxDecisions=5 when 15 ambiguous mentions exist", async () => {
