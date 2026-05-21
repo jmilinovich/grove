@@ -37,7 +37,7 @@ process.env.GROVE_DISABLE_TASK_WORKER = "1";
 
 import { getDb, resetDb, createSchema } from "../src/db.js";
 import { getVaultDb, closeAllVaultDbs } from "../src/db-per-vault.js";
-import { parseArgs, run, main } from "./migrate-inbox-v2.js";
+import { parseArgs, run, runAll, main } from "./migrate-inbox-v2.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL_MIGRATIONS_DIR = join(HERE, "..", "src", "migrations", "vault");
@@ -143,6 +143,52 @@ function seedLegacyReviewTasks(n: number, titles?: string[]): void {
   }
 }
 
+/**
+ * Seed a second/third vault in the control db so --all-vaults has more than
+ * the default single fixture vault to iterate. Returns the per-vault db so
+ * the caller can insert tasks into it.
+ */
+function seedExtraVault(
+  vaultId: string,
+  vaultSlug: string,
+): ReturnType<typeof getVaultDb> {
+  const db = getDb();
+  db.prepare(
+    "INSERT OR IGNORE INTO users (id, username, email) VALUES (?, ?, ?)",
+  ).run("user_m1", "m1-tester", "m1@example.com");
+  db.prepare(
+    "INSERT OR IGNORE INTO vaults (id, owner_id, slug, display_name, git_repo_path) VALUES (?, ?, ?, ?, ?)",
+  ).run(
+    vaultId,
+    "user_m1",
+    vaultSlug,
+    vaultSlug,
+    join(TEST_DIR, "repos", vaultSlug),
+  );
+  return getVaultDb(vaultId);
+}
+
+/** Insert a legacy review task into a specific vault by id. */
+function insertLegacyTaskInto(
+  vaultId: string,
+  taskId: string,
+  title = `Legacy review in ${vaultId}`,
+): void {
+  const db = getVaultDb(vaultId);
+  db.prepare(
+    `INSERT INTO tasks (id, skill_slug, state, title, body, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    taskId,
+    "daily-vault-review",
+    "review",
+    title,
+    null,
+    "2026-04-15T12:00:00Z",
+    "2026-04-15T12:00:00Z",
+  );
+}
+
 describe("M-INBOX-1 — migrate-inbox-v2 script", () => {
   let logs: string[];
   let errs: string[];
@@ -182,9 +228,22 @@ describe("M-INBOX-1 — migrate-inbox-v2 script", () => {
         .toThrow(/mutually exclusive/);
     });
 
-    it("requires --vault", () => {
+    it("requires --vault or --all-vaults", () => {
       expect(() => parseArgs(["--apply", "--i-mean-it"]))
-        .toThrow(/--vault <slug> is required/);
+        .toThrow(/one of --vault <slug> or --all-vaults is required/);
+    });
+
+    it("rejects --vault + --all-vaults together", () => {
+      expect(() =>
+        parseArgs(["--vault", "foo", "--all-vaults"]),
+      ).toThrow(/mutually exclusive/);
+    });
+
+    it("accepts --all-vaults as the scope flag", () => {
+      const args = parseArgs(["--all-vaults"]);
+      expect(args.allVaults).toBe(true);
+      expect(args.vault).toBe("");
+      expect(args.dryRun).toBe(true);
     });
 
     it("accepts --vault=<slug> form", () => {
@@ -425,5 +484,159 @@ describe("M-INBOX-1 — migrate-inbox-v2 script", () => {
     const code = await main(["--vault", VAULT_SLUG]);
     expect(code).toBe(0);
     expect(logs.some((l) => l.includes("2 legacy review tasks"))).toBe(true);
+  });
+
+  // --- --all-vaults sub-tests ---
+
+  describe("--all-vaults", () => {
+    it("dry-run reports per-vault counts + aggregate, makes no writes", () => {
+      // Default fixture vault + 2 extras: 3 vaults total, 2 with legacy rows.
+      seedLegacyReviewTasks(2); // VAULT_SLUG → 2 legacy
+      seedExtraVault("vault_b", "bravo");
+      insertLegacyTaskInto("vault_b", "legacy_b_1");
+      insertLegacyTaskInto("vault_b", "legacy_b_2");
+      insertLegacyTaskInto("vault_b", "legacy_b_3");
+      seedExtraVault("vault_c", "charlie"); // clean — 0 legacy
+
+      const aggregate = runAll(parseArgs(["--all-vaults", "--dry-run"]));
+      expect(aggregate.vaults).toBe(3);
+      expect(aggregate.totalLegacy).toBe(5); // 2 + 3 + 0
+      expect(aggregate.totalDismissed).toBe(0);
+      expect(aggregate.failures).toEqual([]);
+      expect(aggregate.exitCode).toBe(0);
+
+      // Per-vault headers were printed (alphabetical order).
+      expect(logs.some((l) => l.includes("=== bravo ==="))).toBe(true);
+      expect(logs.some((l) => l.includes("=== charlie ==="))).toBe(true);
+      expect(logs.some((l) => l.includes(`=== ${VAULT_SLUG} ===`))).toBe(true);
+
+      // Aggregate summary line printed.
+      expect(
+        logs.some(
+          (l) =>
+            l.includes("total: 5 legacy tasks across 3 vaults") &&
+            l.includes("dismissed 0") &&
+            l.includes("failed 0"),
+        ),
+      ).toBe(true);
+
+      // No vault was mutated.
+      for (const [vaultId] of [
+        [VAULT_ID],
+        ["vault_b"],
+        ["vault_c"],
+      ] as const) {
+        const dismissed = getVaultDb(vaultId)
+          .prepare("SELECT COUNT(*) as n FROM tasks WHERE state = 'dismissed'")
+          .get() as { n: number };
+        expect(dismissed.n).toBe(0);
+      }
+    });
+
+    it("--apply --i-mean-it dismisses across every vault; aggregate summary correct", () => {
+      seedLegacyReviewTasks(2);
+      seedExtraVault("vault_b", "bravo");
+      insertLegacyTaskInto("vault_b", "legacy_b_1");
+      insertLegacyTaskInto("vault_b", "legacy_b_2");
+      insertLegacyTaskInto("vault_b", "legacy_b_3");
+      seedExtraVault("vault_c", "charlie"); // 0 legacy
+
+      const aggregate = runAll(
+        parseArgs(["--all-vaults", "--apply", "--i-mean-it"]),
+      );
+      expect(aggregate.vaults).toBe(3);
+      expect(aggregate.totalLegacy).toBe(5);
+      expect(aggregate.totalDismissed).toBe(5);
+      expect(aggregate.failures).toEqual([]);
+      expect(aggregate.exitCode).toBe(0);
+
+      const dismissedA = getVaultDb(VAULT_ID)
+        .prepare("SELECT COUNT(*) as n FROM tasks WHERE state = 'dismissed'")
+        .get() as { n: number };
+      const dismissedB = getVaultDb("vault_b")
+        .prepare("SELECT COUNT(*) as n FROM tasks WHERE state = 'dismissed'")
+        .get() as { n: number };
+      const dismissedC = getVaultDb("vault_c")
+        .prepare("SELECT COUNT(*) as n FROM tasks WHERE state = 'dismissed'")
+        .get() as { n: number };
+      expect(dismissedA.n).toBe(2);
+      expect(dismissedB.n).toBe(3);
+      expect(dismissedC.n).toBe(0);
+
+      expect(
+        logs.some(
+          (l) =>
+            l.includes("total: 5 legacy tasks across 3 vaults") &&
+            l.includes("dismissed 5"),
+        ),
+      ).toBe(true);
+    });
+
+    it("per-vault failure is isolated; other vaults still complete", () => {
+      // Three vaults; we will corrupt vault_b after seeding so resolving its
+      // per-vault db fails. The other two should still be processed.
+      seedLegacyReviewTasks(2); // VAULT_SLUG: 2 legacy
+      seedExtraVault("vault_b", "bravo");
+      insertLegacyTaskInto("vault_b", "legacy_b_1");
+      seedExtraVault("vault_c", "charlie");
+      insertLegacyTaskInto("vault_c", "legacy_c_1");
+
+      // Force-close all open per-vault dbs so we can replace the file
+      // backing vault_b (slug "bravo") with garbage. better-sqlite3 will
+      // throw on the next open attempt (db-per-vault keys path by slug,
+      // not by vault id).
+      closeAllVaultDbs();
+      const bravoPath = join(
+        process.env.GROVE_VAULT_STATE_ROOT!,
+        "bravo",
+        "state.db",
+      );
+      // Overwrite + remove sidecar wal/shm so the open path is unambiguous.
+      writeFileSync(bravoPath, "not a sqlite database\n");
+      rmSync(`${bravoPath}-wal`, { force: true });
+      rmSync(`${bravoPath}-shm`, { force: true });
+
+      const aggregate = runAll(
+        parseArgs(["--all-vaults", "--apply", "--i-mean-it"]),
+      );
+
+      expect(aggregate.vaults).toBe(3);
+      expect(aggregate.failures).toHaveLength(1);
+      expect(aggregate.failures[0]!.vaultSlug).toBe("bravo");
+      expect(aggregate.exitCode).toBe(1);
+
+      // Other vaults still applied successfully.
+      const dismissedA = getVaultDb(VAULT_ID)
+        .prepare("SELECT COUNT(*) as n FROM tasks WHERE state = 'dismissed'")
+        .get() as { n: number };
+      const dismissedC = getVaultDb("vault_c")
+        .prepare("SELECT COUNT(*) as n FROM tasks WHERE state = 'dismissed'")
+        .get() as { n: number };
+      expect(dismissedA.n).toBe(2);
+      expect(dismissedC.n).toBe(1);
+
+      // Aggregate line mentions the failure.
+      expect(
+        logs.some(
+          (l) => l.includes("failed 1") && l.includes("3 vaults"),
+        ),
+      ).toBe(true);
+    });
+
+    it("main() routes --all-vaults through runAll and returns aggregate exitCode", async () => {
+      seedLegacyReviewTasks(1);
+      seedExtraVault("vault_b", "bravo");
+      insertLegacyTaskInto("vault_b", "legacy_b_1");
+
+      const code = await main(["--all-vaults"]);
+      expect(code).toBe(0);
+      // Two per-vault sections appeared.
+      expect(logs.some((l) => l.includes(`=== ${VAULT_SLUG} ===`))).toBe(true);
+      expect(logs.some((l) => l.includes("=== bravo ==="))).toBe(true);
+      // Aggregate printed.
+      expect(
+        logs.some((l) => l.includes("total: 2 legacy tasks across 2 vaults")),
+      ).toBe(true);
+    });
   });
 });

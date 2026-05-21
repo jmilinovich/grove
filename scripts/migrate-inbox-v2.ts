@@ -21,19 +21,30 @@
  * treatment. Future one-shots that write to tasks.state should follow the
  * same pattern.
  *
+ * Vault scoping: choose exactly one of `--vault <slug>` or `--all-vaults`.
+ * `--all-vaults` enumerates every vault in the control db and iterates the
+ * per-vault migration over each. Per-vault failures are isolated — one
+ * vault's broken state.db will not prevent the others from completing —
+ * and an aggregate summary is printed at the end. All safety rails
+ * (`--apply --i-mean-it`, `--force`) are evaluated per vault. We added
+ * `--all-vaults` after the M-INBOX-1 prod run was scoped to `personal` and
+ * the remaining 36 unmigrated rows in `echo` rendered with no UI affordance
+ * (looked broken). Single-vault scoping is the failure mode.
+ *
  * Idempotent: re-running after a successful --apply finds 0 legacy rows
  * and exits 0 with no writes.
  *
  * Usage:
- *   node --import tsx scripts/migrate-inbox-v2.ts --vault <slug> [--dry-run | --apply [--i-mean-it] [--force]] [--verbose]
+ *   node --import tsx scripts/migrate-inbox-v2.ts (--vault <slug> | --all-vaults) \
+ *     [--dry-run | --apply [--i-mean-it] [--force]] [--verbose]
  *
  * Examples:
- *   # safe summary (default):
+ *   # safe summary (default), one vault:
  *   node --import tsx scripts/migrate-inbox-v2.ts --vault personal
- *   # safe summary (explicit):
- *   node --import tsx scripts/migrate-inbox-v2.ts --vault personal --dry-run
- *   # actual write:
- *   node --import tsx scripts/migrate-inbox-v2.ts --vault personal --apply --i-mean-it
+ *   # safe summary (default), every vault:
+ *   node --import tsx scripts/migrate-inbox-v2.ts --all-vaults
+ *   # actual write, every vault:
+ *   node --import tsx scripts/migrate-inbox-v2.ts --all-vaults --apply --i-mean-it
  */
 
 import { getDb } from "../src/db.js";
@@ -45,6 +56,7 @@ const MIGRATION_ID = "M-INBOX-1";
 
 interface CliArgs {
   vault: string;
+  allVaults: boolean;
   dryRun: boolean;
   apply: boolean;
   iMeanIt: boolean;
@@ -70,15 +82,31 @@ interface RunResult {
   exitCode: number;
 }
 
+interface AggregateResult {
+  vaults: number;
+  totalLegacy: number;
+  totalDismissed: number;
+  failures: Array<{ vaultSlug: string; error: string }>;
+  exitCode: number;
+  perVault: RunResult[];
+}
+
 class UsageError extends Error {}
 
 /**
  * Parse argv. Throws UsageError on conflicting/missing flags so the caller
  * (main) can print the message + exit 2 (usage error) consistently.
+ *
+ * `--vault <slug>` and `--all-vaults` are mutually exclusive; exactly one
+ * is required. We do not auto-default to `--all-vaults` when neither is
+ * given — explicit beats implicit. The cost of asking the operator to
+ * spell out the scope is one flag; the cost of guessing wrong is a partial
+ * production migration.
  */
 export function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     vault: "",
+    allVaults: false,
     dryRun: false,
     apply: false,
     iMeanIt: false,
@@ -91,6 +119,8 @@ export function parseArgs(argv: string[]): CliArgs {
       args.vault = argv[++i] ?? "";
     } else if (a.startsWith("--vault=")) {
       args.vault = a.slice("--vault=".length);
+    } else if (a === "--all-vaults") {
+      args.allVaults = true;
     } else if (a === "--dry-run") {
       args.dryRun = true;
     } else if (a === "--apply") {
@@ -107,8 +137,15 @@ export function parseArgs(argv: string[]): CliArgs {
       throw new UsageError(`unknown flag: ${a}`);
     }
   }
-  if (!args.vault) {
-    throw new UsageError("--vault <slug> is required");
+  if (args.vault && args.allVaults) {
+    throw new UsageError(
+      "--vault and --all-vaults are mutually exclusive (pick one)",
+    );
+  }
+  if (!args.vault && !args.allVaults) {
+    throw new UsageError(
+      "one of --vault <slug> or --all-vaults is required",
+    );
   }
   if (args.dryRun && args.apply) {
     throw new UsageError("--dry-run and --apply are mutually exclusive");
@@ -119,6 +156,21 @@ export function parseArgs(argv: string[]): CliArgs {
     args.dryRun = true;
   }
   return args;
+}
+
+/**
+ * Enumerate vault slugs from the control db. Mirrors the read pattern in
+ * `cmdRebuildProjection` (src/cli.ts): a `SELECT ... FROM vaults` against
+ * the shared control db at `GROVE_DB_PATH` (or `~/.grove/grove.db`).
+ *
+ * Returned in deterministic alphabetical order so per-vault log output is
+ * stable across runs — easier to diff a dry-run vs an apply.
+ */
+export function enumerateVaults(): string[] {
+  const rows = getDb()
+    .prepare("SELECT slug FROM vaults ORDER BY slug ASC")
+    .all() as Array<{ slug: string }>;
+  return rows.map((r) => r.slug);
 }
 
 /**
@@ -202,13 +254,30 @@ function printSummary(
 }
 
 /**
- * Run the migration. Returns RunResult including exitCode so the caller can
- * `process.exit(result.exitCode)`. Throws only on programmer error
- * (unresolved vault slug, DB open failure) — flag-shape problems exit with
- * a clear message via UsageError handled in main().
+ * Run the migration against a single vault. The same per-vault logic is
+ * used whether the caller passed `--vault <slug>` (one call) or
+ * `--all-vaults` (one call per enumerated slug). Returns RunResult
+ * including exitCode so the caller can `process.exit(result.exitCode)`.
+ * Throws only on programmer error (unresolved vault slug, DB open
+ * failure) — flag-shape problems exit with a clear message via UsageError
+ * handled in main().
  */
 export function run(args: CliArgs): RunResult {
-  const vault = resolveVaultIdBySlug(args.vault);
+  if (!args.vault) {
+    throw new Error(
+      "[migrate-inbox-v2] run() requires a single vault slug — call runAll() for --all-vaults",
+    );
+  }
+  return runOneVault(args, args.vault);
+}
+
+/**
+ * Per-vault migration body. Extracted from `run()` so `runAll()` can call
+ * it once per enumerated slug without re-parsing argv. The CliArgs.vault
+ * field is overridden by the explicit `vaultSlug` argument.
+ */
+function runOneVault(args: CliArgs, vaultSlug: string): RunResult {
+  const vault = resolveVaultIdBySlug(vaultSlug);
   const db = getVaultDb(vault.id);
 
   // Sanity-check the table exists (covers a freshly-created vault that
@@ -335,18 +404,92 @@ export function run(args: CliArgs): RunResult {
   return { ...baseResult, applied: true, dismissedIds, exitCode: 0 };
 }
 
+/**
+ * Run the migration against every vault enumerated from the control db.
+ * Per-vault failures are caught and recorded — they do NOT abort the
+ * remaining vaults. Safety rails (`--apply --i-mean-it`, `--force`) are
+ * evaluated per vault: each vault's row count is independently compared
+ * against `SANITY_CEILING`. An aggregate summary is printed at the end.
+ *
+ * Exit code: 0 if every vault succeeded (including legitimate REFUSE on
+ * ceiling), 1 if any vault failed with an exception. A REFUSE that
+ * propagates per-vault `exitCode === 2` is treated as a per-vault non-zero
+ * and reflected in `aggregate.exitCode`.
+ */
+export function runAll(args: CliArgs): AggregateResult {
+  const slugs = enumerateVaults();
+  const perVault: RunResult[] = [];
+  const failures: AggregateResult["failures"] = [];
+
+  for (const slug of slugs) {
+    console.log("");
+    console.log(`=== ${slug} ===`);
+    try {
+      const result = runOneVault(args, slug);
+      perVault.push(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[${MIGRATION_ID}] vault ${slug} failed: ${msg}`);
+      failures.push({ vaultSlug: slug, error: msg });
+      perVault.push({
+        vaultSlug: slug,
+        legacyCount: 0,
+        oldest: null,
+        newest: null,
+        distinctTitles: [],
+        applied: false,
+        dismissedIds: [],
+        exitCode: 1,
+      });
+    }
+  }
+
+  const totalLegacy = perVault.reduce((sum, r) => sum + r.legacyCount, 0);
+  const totalDismissed = perVault.reduce(
+    (sum, r) => sum + r.dismissedIds.length,
+    0,
+  );
+  const aggregateExit =
+    failures.length > 0 || perVault.some((r) => r.exitCode !== 0) ? 1 : 0;
+
+  console.log("");
+  console.log(`=== aggregate ===`);
+  console.log(
+    `[${MIGRATION_ID}] total: ${totalLegacy} legacy tasks across ${slugs.length} vaults; ` +
+      `dismissed ${totalDismissed} (in --apply mode); failed ${failures.length}`,
+  );
+  if (failures.length > 0) {
+    console.log(`[${MIGRATION_ID}] failures:`);
+    for (const f of failures) {
+      console.log(`  - ${f.vaultSlug}: ${f.error}`);
+    }
+  }
+
+  return {
+    vaults: slugs.length,
+    totalLegacy,
+    totalDismissed,
+    failures,
+    exitCode: aggregateExit,
+    perVault,
+  };
+}
+
 const USAGE = `
 M-INBOX-1 — one-shot migration: dismiss legacy review-state tasks.
 
 Usage:
-  node --import tsx scripts/migrate-inbox-v2.ts --vault <slug> [flags]
+  node --import tsx scripts/migrate-inbox-v2.ts (--vault <slug> | --all-vaults) [flags]
+
+Scope (exactly one required):
+  --vault <slug>   Vault slug from control db
+  --all-vaults     Iterate every vault enumerated from control db
 
 Flags:
-  --vault <slug>   Vault slug from control db (REQUIRED)
   --dry-run        Print summary, no writes (DEFAULT)
   --apply          Intent to mutate (requires --i-mean-it)
   --i-mean-it      Explicit confirmation of --apply
-  --force          Required when legacy-row count > ${SANITY_CEILING}
+  --force          Required per-vault when legacy-row count > ${SANITY_CEILING}
   --verbose, -v    Print every legacy row
   --help, -h       Print this message
 `.trim();
@@ -367,6 +510,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   }
 
   try {
+    if (args.allVaults) {
+      const aggregate = runAll(args);
+      return aggregate.exitCode;
+    }
     const result = run(args);
     return result.exitCode;
   } catch (err) {
