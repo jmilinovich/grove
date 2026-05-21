@@ -3,9 +3,11 @@
  *
  * `bootstrapFirstRun(vault)` is the out-of-band first-run choreography
  * triggered by the per-vault scheduler when `vaults.bootstrap_pending=1`.
- * After C-INBOX-1, it seeds an enrichment skill_config + one immediate
- * enrichment task (+ any starter pending tasks the registry defines for
- * enrichment), then clears the flag. Idempotent.
+ * Per the Inbox v2 follow-up, it seeds skill_configs for ALL three
+ * default suggestion skills (enrichment, disambiguation, links-suggestion)
+ * + one immediate task per skill (+ any starter pending tasks the registry
+ * defines for each), then clears the flag. Cadences come from the registry,
+ * not hardcoded. Idempotent.
  *
  * Tests run against a real per-vault state.db (migrations applied) and a
  * real control db (grove.db) — no mocks. The scheduler integration test
@@ -36,7 +38,9 @@ import {
   bootstrapFirstRun,
   nextSixAmPacificUtcIso,
   FIRST_RUN_TOKEN_CEILING,
+  FIRST_RUN_SKILL_SLUGS,
 } from "../src/skills/first-run.js";
+import { SKILL_REGISTRY } from "../src/skills/registry.js";
 import { checkAndRunBootstrap } from "../src/scheduler.js";
 import type { VaultContext } from "../src/vault-router.js";
 
@@ -149,48 +153,67 @@ describe("bootstrapFirstRun (P23-2)", () => {
     resetDb();
   });
 
-  it("inserts skill_configs row for enrichment with weekly cadence + next_run_at in the future", async () => {
+  it("inserts skill_configs rows for all 3 default suggestion skills with registry cadences + next_run_at in the future", async () => {
     const vault = seedVault({ bootstrapPending: 1 });
 
     await bootstrapFirstRun(vault);
 
     const configs = selectSkillConfigs();
-    expect(configs).toHaveLength(1);
-    expect(configs[0].skill_slug).toBe("enrichment");
-    expect(configs[0].enabled).toBe(1);
-    // enrichment's registry defaultCadence is 'weekly' post-C-INBOX-1.
-    expect(configs[0].cadence).toBe("weekly");
-    expect(configs[0].next_run_at).not.toBeNull();
+    // 3 skill_configs — enrichment, disambiguation, links-suggestion.
+    expect(configs).toHaveLength(3);
 
-    // next_run_at must be in the future and within the next ~30 hours
-    // (covers DST edge cases on either side of the boundary).
-    const nextRun = new Date(configs[0].next_run_at!).getTime();
-    expect(nextRun).toBeGreaterThan(Date.now());
-    expect(nextRun).toBeLessThan(Date.now() + 30 * 3600 * 1000);
+    const bySlug = new Map(configs.map((c) => [c.skill_slug, c]));
+    for (const slug of FIRST_RUN_SKILL_SLUGS) {
+      const row = bySlug.get(slug);
+      expect(row, `expected skill_configs row for ${slug}`).toBeDefined();
+      expect(row!.enabled).toBe(1);
+
+      // Cadence must match the registry default — not a hardcoded literal.
+      const registryEntry = SKILL_REGISTRY.find((s) => s.slug === slug);
+      expect(registryEntry, `${slug} must be in SKILL_REGISTRY`).toBeDefined();
+      expect(row!.cadence).toBe(registryEntry!.defaultCadence ?? "weekly");
+
+      expect(row!.next_run_at).not.toBeNull();
+      // next_run_at must be in the future and within the next ~30 hours
+      // (covers DST edge cases on either side of the boundary).
+      const nextRun = new Date(row!.next_run_at!).getTime();
+      expect(nextRun).toBeGreaterThan(Date.now());
+      expect(nextRun).toBeLessThan(Date.now() + 30 * 3600 * 1000);
+    }
   });
 
-  it("inserts one immediate enrichment task (+ any registry starter tasks)", async () => {
+  it("inserts one immediate task per default skill (+ any registry starter tasks)", async () => {
     const vault = seedVault({ bootstrapPending: 1 });
 
     await bootstrapFirstRun(vault);
 
     const tasks = selectTasks();
-    // Enrichment registry has no starterPendingTasks today, so the
-    // floor is 1 (the immediate enrichment task). The bootstrap still
-    // walks `starterPendingTasks` so future starters drop in for free
-    // — leave headroom in the upper bound.
-    expect(tasks.length).toBeGreaterThanOrEqual(1);
-    expect(tasks.length).toBeLessThanOrEqual(6);
+    // Floor is 3 (one immediate task per default skill). The bootstrap
+    // still walks `starterPendingTasks` so future starters drop in for
+    // free — leave headroom in the upper bound.
+    expect(tasks.length).toBeGreaterThanOrEqual(3);
+    expect(tasks.length).toBeLessThanOrEqual(20);
 
-    const enrichmentTasks = tasks.filter((t) => t.skill_slug === "enrichment");
-    expect(enrichmentTasks.length).toBe(tasks.length);
     for (const t of tasks) {
       expect(t.state).toBe("pending");
+      // Every task belongs to one of the seeded skills.
+      expect(FIRST_RUN_SKILL_SLUGS).toContain(
+        t.skill_slug as (typeof FIRST_RUN_SKILL_SLUGS)[number],
+      );
     }
 
+    // Exactly one immediate (scheduled_for != NULL) task per seeded skill.
     const immediate = tasks.filter((t) => t.scheduled_for !== null);
-    expect(immediate).toHaveLength(1);
-    expect(immediate[0].title).toBe("Enrichment first-run");
+    expect(immediate).toHaveLength(FIRST_RUN_SKILL_SLUGS.length);
+
+    const immediateBySlug = new Map(immediate.map((t) => [t.skill_slug, t]));
+    expect(immediateBySlug.get("enrichment")?.title).toBe("Enrichment first-run");
+    expect(immediateBySlug.get("disambiguation")?.title).toBe(
+      "Disambiguation first-run",
+    );
+    expect(immediateBySlug.get("links-suggestion")?.title).toBe(
+      "Links first-run",
+    );
   });
 
   it("clears vaults.bootstrap_pending=0 after running", async () => {
@@ -227,9 +250,12 @@ describe("bootstrapFirstRun (P23-2)", () => {
     expect(ran).toBe(true);
     expect(readBootstrapPending()).toBe(0);
 
+    // Bootstrap path goes through the same code: 3 skill_configs + at
+    // least 3 immediate (scheduled_for != NULL) tasks land.
+    expect(selectSkillConfigs()).toHaveLength(FIRST_RUN_SKILL_SLUGS.length);
     const tasks = selectTasks();
-    expect(tasks.length).toBeGreaterThanOrEqual(1);
-    expect(tasks.some((t) => t.scheduled_for !== null)).toBe(true);
+    const immediate = tasks.filter((t) => t.scheduled_for !== null);
+    expect(immediate.length).toBe(FIRST_RUN_SKILL_SLUGS.length);
   });
 
   it("scheduler.checkAndRunBootstrap is a no-op when the flag is already 0", async () => {

@@ -4,8 +4,8 @@
  * Called out-of-band by the per-vault grove-scheduler when it sees
  * `vaults.bootstrap_pending = 1` (set by `vault-provision.ts` at the end
  * of provisioning). The scheduler's worker drain then processes the
- * immediate review task this function enqueues, so the user sees a real
- * `state='running'`/`state='review'` task within ~60s of vault create.
+ * immediate review tasks this function enqueues, so the user sees real
+ * `state='running'`/`state='review'` tasks within ~60s of vault create.
  *
  * Per the Phase 23 revision (PLAN.md §P23 revision note #2), this
  * function MUST NOT make a synchronous LLM call. The earlier inline
@@ -13,11 +13,11 @@
  * vault provisioning latency to Claude API latency. The new contract:
  * we enqueue rows, the scheduler's worker loop drains them.
  *
- * Idempotency: if `skill_configs` already has an `enrichment` row for
- * this vault, the function is a no-op (still clears the flag). That
- * handles the case where the scheduler boot pass and the next tick
- * both observe `bootstrap_pending=1` before the boot pass clears it —
- * only the winner inserts; the loser short-circuits.
+ * Idempotency: if `skill_configs` already has any of the default
+ * suggestion-skill rows for this vault, the function is a no-op (still
+ * clears the flag). That handles the case where the scheduler boot pass
+ * and the next tick both observe `bootstrap_pending=1` before the boot
+ * pass clears it — only the winner inserts; the loser short-circuits.
  *
  * Slow-vault UX: there is NO inline timeout here. The worker may take
  * longer than 25s to drain the immediate task. The dashboard renders
@@ -30,10 +30,14 @@
  * intent for the first-run task and seeds the spec for the per-task
  * ceiling plumbing in a future phase (mirror P7 cost pattern).
  *
- * C-INBOX-1 cutover: the legacy review skill was retired and replaced
- * by `enrichment` (S-INBOX-8). First-run now seeds an enrichment
- * skill_config + one immediate enrichment task; enrichment's registry
- * default cadence is `weekly`, which the bootstrap honors.
+ * Inbox v2 follow-up: enabling Grove already implies consent for
+ * autonomous work, so first-run seeds ALL THREE default suggestion
+ * skills — `enrichment`, `disambiguation`, `links-suggestion` — each
+ * with one immediate task. On vaults with existing content this gives
+ * the inbox concrete, varied work to show within ~60s. On empty/sparse
+ * vaults the immediate tasks find nothing to do and the inbox stays
+ * near-empty (which is V2's spec'd default). Cadences are read from
+ * `SKILL_REGISTRY` so registry tweaks don't need a touch here.
  */
 
 import { randomUUID } from "node:crypto";
@@ -51,12 +55,46 @@ import type { VaultContext } from "../vault-router.js";
 export const FIRST_RUN_TOKEN_CEILING = 50_000;
 
 /**
- * Slug of the skill enqueued on first-run. After C-INBOX-1, that's
- * `enrichment` (which replaced the original first-run skill). The
- * registry default cadence for enrichment is `weekly`, which the
- * bootstrap honors.
+ * Slugs of the default suggestion skills seeded on first-run. All three
+ * are enabled together — the user opted into Grove (= consent for
+ * autonomous work) when they provisioned the vault, and showing concrete
+ * varied work in the inbox on first open is the V2 default.
+ *
+ * Cadences are read from `SKILL_REGISTRY` at bootstrap time so we don't
+ * drift if a registry default changes.
  */
-const FIRST_RUN_SKILL_SLUG = "enrichment";
+export const FIRST_RUN_SKILL_SLUGS = [
+  "enrichment",
+  "disambiguation",
+  "links-suggestion",
+] as const;
+
+/**
+ * Per-skill title for the immediate `state='pending'` task spawned
+ * alongside the skill_config row. Picked up by the worker drain on
+ * the next 1s tick so the user sees real review items within ~60s of
+ * vault create.
+ */
+const FIRST_RUN_TASK_TITLES: Record<(typeof FIRST_RUN_SKILL_SLUGS)[number], string> = {
+  enrichment: "Enrichment first-run",
+  disambiguation: "Disambiguation first-run",
+  "links-suggestion": "Links first-run",
+};
+
+/**
+ * Per-skill body for the immediate `state='pending'` task. Short prose
+ * that names what the worker will look for, mirroring the registry
+ * description so the dashboard can render context before the executor
+ * lands.
+ */
+const FIRST_RUN_TASK_BODIES: Record<(typeof FIRST_RUN_SKILL_SLUGS)[number], string> = {
+  enrichment:
+    "First-run enrichment — surfaces thin Concept notes worth expanding.",
+  disambiguation:
+    "First-run disambiguation — surfaces Journal mentions matching multiple People notes.",
+  "links-suggestion":
+    "First-run links suggestion — surfaces raw mentions of entities whose notes exist but aren't wikilinked.",
+};
 
 function newTaskId(): string {
   return `task_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
@@ -123,47 +161,54 @@ export function nextSixAmPacificUtcIso(now: Date = new Date()): string {
 /**
  * Bootstrap a freshly-provisioned vault's v2 dashboard state.
  *
- * Idempotent on the enrichment skill_configs row. The function always
- * clears `vaults.bootstrap_pending=0` before returning so the scheduler
- * doesn't re-enter on the next tick.
+ * Idempotent on the presence of ANY first-run skill_configs row. The
+ * function always clears `vaults.bootstrap_pending=0` before returning
+ * so the scheduler doesn't re-enter on the next tick.
  *
  * Steps (all wrapped in a single transaction on the per-vault state.db
  * so a crash mid-bootstrap doesn't leave half the rows in place):
- *   1. INSERT skill_configs row for `enrichment`:
- *      enabled=1, cadence=<registry default, 'weekly'>, next_run_at = next 6am LA in UTC.
- *   2. INSERT starter pending tasks (any from the enabled skill's
- *      `starterPendingTasks` registry field).
- *   3. INSERT one immediate `enrichment` pending task with
- *      `scheduled_for=now()` so the worker drain claims it on the next
- *      1s tick.
+ *   1. For each slug in `FIRST_RUN_SKILL_SLUGS`, INSERT a skill_configs
+ *      row: enabled=1, cadence=<registry default>, next_run_at = next
+ *      6am LA in UTC. Cadences come from `SKILL_REGISTRY`, not hardcoded.
+ *   2. INSERT starter pending tasks for each enabled skill (any from its
+ *      `starterPendingTasks` registry field). scheduled_for=NULL so they
+ *      don't stampede the worker.
+ *   3. INSERT one immediate pending task per enabled skill with
+ *      `scheduled_for=now()` so the worker drain claims them on the
+ *      next 1s tick.
  *
  * On no-op (already bootstrapped), only the flag clear runs.
  */
 export async function bootstrapFirstRun(vault: VaultContext): Promise<void> {
   const db = getVaultDb(vault.vaultId);
 
+  const slugPlaceholders = FIRST_RUN_SKILL_SLUGS.map(() => "?").join(",");
   const existing = db
-    .prepare("SELECT 1 FROM skill_configs WHERE skill_slug = ?")
-    .get(FIRST_RUN_SKILL_SLUG);
+    .prepare(
+      `SELECT 1 FROM skill_configs WHERE skill_slug IN (${slugPlaceholders}) LIMIT 1`,
+    )
+    .get(...FIRST_RUN_SKILL_SLUGS);
 
   if (existing) {
     clearBootstrapFlag(vault.vaultId);
     return;
   }
 
-  const skill = SKILL_REGISTRY.find((s) => s.slug === FIRST_RUN_SKILL_SLUG);
-  if (!skill) {
-    // Registry drift — log loudly and clear the flag so the scheduler
-    // doesn't loop. This should be impossible: if it happens, deploy is
-    // broken and we want the next request to surface it.
-    clearBootstrapFlag(vault.vaultId);
-    throw new Error(
-      `bootstrapFirstRun: skill '${FIRST_RUN_SKILL_SLUG}' not in SKILL_REGISTRY`,
-    );
-  }
-  const cadence = skill.defaultCadence ?? "weekly";
+  // Resolve each slug to its registry entry up front so a drift surfaces
+  // before we open the transaction.
+  const skills = FIRST_RUN_SKILL_SLUGS.map((slug) => {
+    const entry = SKILL_REGISTRY.find((s) => s.slug === slug);
+    if (!entry) {
+      clearBootstrapFlag(vault.vaultId);
+      throw new Error(
+        `bootstrapFirstRun: skill '${slug}' not in SKILL_REGISTRY`,
+      );
+    }
+    return entry;
+  });
 
   const nextRunAt = nextSixAmPacificUtcIso();
+  const scheduledFor = new Date().toISOString();
 
   const insertSkillConfig = db.prepare(
     `INSERT INTO skill_configs (skill_slug, enabled, cadence, next_run_at)
@@ -176,28 +221,34 @@ export async function bootstrapFirstRun(vault: VaultContext): Promise<void> {
   );
 
   const tx = db.transaction(() => {
-    insertSkillConfig.run(FIRST_RUN_SKILL_SLUG, cadence, nextRunAt);
+    for (const skill of skills) {
+      // Cadence comes from the registry default; fall back to 'weekly'
+      // only if the entry was registered with a null default (which
+      // shouldn't happen for any suggestion skill, but keeps us safe).
+      const cadence = skill.defaultCadence ?? "weekly";
+      insertSkillConfig.run(skill.slug, cadence, nextRunAt);
 
-    // Starter pending tasks — one row per `starterPendingTasks` entry on
-    // the first-run skill (today: enrichment has none, but the loop
-    // stays so future skills' starters drop in for free).
-    const starters = skill.starterPendingTasks ?? [];
-    for (const title of starters) {
-      // scheduled_for=NULL so these don't all stampede the worker on
-      // the next 1s tick — the user kicks them with /run.
-      insertTask.run(newTaskId(), skill.slug, title, null, null);
+      // Starter pending tasks — one row per `starterPendingTasks` entry
+      // on the enabled skill. scheduled_for=NULL so these don't all
+      // stampede the worker on the next 1s tick — the user kicks them
+      // with /run.
+      const starters = skill.starterPendingTasks ?? [];
+      for (const title of starters) {
+        insertTask.run(newTaskId(), skill.slug, title, null, null);
+      }
+
+      // Immediate first-run task — the worker drains this on its next
+      // 1s tick and the user sees a real review item per skill within
+      // ~60s of vault create.
+      const slugKey = skill.slug as (typeof FIRST_RUN_SKILL_SLUGS)[number];
+      insertTask.run(
+        newTaskId(),
+        skill.slug,
+        FIRST_RUN_TASK_TITLES[slugKey],
+        FIRST_RUN_TASK_BODIES[slugKey],
+        scheduledFor,
+      );
     }
-
-    // Immediate enrichment task — the worker drains this on its next
-    // 1s tick and the user sees a real review item within ~60s of
-    // vault create.
-    insertTask.run(
-      newTaskId(),
-      FIRST_RUN_SKILL_SLUG,
-      "Enrichment first-run",
-      "First-run enrichment — surfaces thin Concept notes worth expanding.",
-      new Date().toISOString(),
-    );
   });
   tx();
 
