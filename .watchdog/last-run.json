@@ -1,14 +1,15 @@
 {
-  "ran_at": "2026-05-20T15:11:28Z",
+  "ran_at": "2026-05-22T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "06d59907edb97f6b0de0aa62f388231934cdd8d0",
+  "main_sha": "9db6fe0d9c19544a31c238cc3f4b4ff8cc66f115",
   "green": [
-    "pattern-B (scheduler timer .unref): no matches",
-    "stale-prs: 1 open PR (#194, dependabot, 2 days old — not stale)"
+    "pattern-B (scheduler timer .unref): no matches — clean",
+    "stale-prs: 2 open PRs — #194 (dependabot, 4 days old) and #217 (image-upload-provenance, 1 day old) — neither stale"
   ],
   "flagged": [
-    "health: api.grove.md /health → HTTP 403 'Host not in allowlist' — persistent egress gateway block in watchdog env (same as #187, open since 2026-05-18; #198 opened then closed as duplicate). Prod status unknown — verify manually.",
-    "pattern-A: false-positive — grep matched 'createSchema()' in a code comment (scheduler-bin.ts line 21); actual code already calls runMigration(). No fix needed.",
+    "health: api.grove.md /health → HTTP 403 'Host not in allowlist' — persistent sandbox egress block in watchdog env (same condition as prior runs; issue #187 filed 2026-05-18, #198 closed as duplicate). Prod reachability unknown — verify manually.",
+    "prod/main drift: prod_sha unknown (health unreachable); 16 schema-clean commits on main since last run (2026-05-20). No issue opened — schema-clean and prod status unverifiable from this env.",
+    "pattern-A: false-positive — grep matched 'createSchema()' in a comment (scheduler-bin.ts line 21); actual code calls runMigration(). No fix needed.",
     "pattern-C: false-positive — grep matched 'npx tsx' in a comment (ecosystem-gen.ts line 79); actual code already uses node_modules/.bin/tsx path. No fix needed."
   ],
   "prs_opened": [],
