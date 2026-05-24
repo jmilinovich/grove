@@ -37,6 +37,8 @@ function vaultMigrationsDir(): string {
 export interface VaultRow {
   id: string;
   slug: string;
+  /** On-disk git checkout path (vaults.git_repo_path). Needed by skill executors. */
+  git_repo_path: string;
 }
 
 const pool = new Map<string, Database.Database>();
@@ -89,7 +91,7 @@ export function forEachVaultDb(
   fn: (db: Database.Database, vault: VaultRow) => void,
 ): void {
   const vaults = getDb()
-    .prepare("SELECT id, slug FROM vaults ORDER BY created_at ASC")
+    .prepare("SELECT id, slug, git_repo_path FROM vaults ORDER BY created_at ASC")
     .all() as VaultRow[];
   for (const vault of vaults) {
     const db = getVaultDb(vault.id);

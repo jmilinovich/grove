@@ -422,10 +422,7 @@ function findNextRunnableTask(
         vault: {
           vaultId: vaultRow.id,
           vaultSlug: vaultRow.slug,
-          // Worker-only context — vaultPath isn't needed by the stub
-          // executor. Real executors (P22-5+) will resolve git_repo_path
-          // from the vault row when they need it.
-          vaultPath: "",
+          vaultPath: vaultRow.git_repo_path,
         },
         taskId: row.id,
       };
