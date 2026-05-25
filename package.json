@@ -41,10 +41,10 @@
     "ship": "tsx scripts/ship.ts"
   },
   "devDependencies": {
-    "@types/node": "^25.9.0",
-    "tsx": "^4.22.2",
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.3",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.7"
   },
   "engines": {
     "node": ">=22.0.0"
