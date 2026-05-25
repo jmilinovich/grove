@@ -58,28 +58,6 @@ export interface SkillMetadata {
 
 export const SKILL_REGISTRY: readonly SkillMetadata[] = [
   {
-    id: "skill-daily-vault-review",
-    slug: "daily-vault-review",
-    name: "Daily Vault Review",
-    domain: "system",
-    author: "builtin",
-    description:
-      "Surfaces today's noteworthy patterns, dormant threads, and perishable claims approaching staleness. Surface-only — never writes.",
-    sampleTasks: [
-      "today's patterns from your journal",
-      "concepts that haven't been touched in 30 days",
-      "perishable claims older than 14 days",
-    ],
-    cadenceOptions: ["daily", "on-demand"],
-    defaultCadence: "daily",
-    defaultArtifactType: "surface",
-    starterPendingTasks: [
-      "Surface today's patterns from your journal",
-      "Flag perishable claims older than 14 days",
-      "Highlight concepts not touched in 30 days",
-    ],
-  },
-  {
     id: "skill-concept-graph-cleanup",
     slug: "concept-graph-cleanup",
     name: "Concept Graph Cleanup",
@@ -113,6 +91,77 @@ export const SKILL_REGISTRY: readonly SkillMetadata[] = [
     defaultCadence: "weekly",
     defaultArtifactType: "concept-merge",
   },
+  {
+    id: "skill-disambiguation",
+    slug: "disambiguation",
+    name: "Disambiguation",
+    domain: "knowledge",
+    author: "builtin",
+    description:
+      "Scans Journal entries for ambiguous Person mentions (e.g., \"Anna\" matching two People notes), picks a best-guess candidate by backlink + recency score, applies a provisional [[link]], and records a Decision for review.",
+    sampleTasks: [
+      "Journal mentions matching 2+ People notes",
+      "ambiguous first-name references in today's entry",
+      "provisional Person links awaiting confirmation",
+    ],
+    cadenceOptions: ["weekly", "on-demand"],
+    defaultCadence: "weekly",
+    defaultArtifactType: "note-link",
+  },
+  {
+    id: "skill-links-suggestion",
+    slug: "links-suggestion",
+    name: "Links Suggestion",
+    domain: "knowledge",
+    author: "builtin",
+    description:
+      "Sweeps Resources/** and Journal/** for raw surface mentions of entities (Person/Concept/Company) whose notes exist but aren't wikilinked. Applies a provisional [[link]] when EXACTLY ONE candidate matches; defers ambiguous (2+ candidate) cases to Disambiguation.",
+    sampleTasks: [
+      "raw mentions of entities that already have notes",
+      "missing wikilinks in today's journal entry",
+      "single-candidate provisional links awaiting confirmation",
+    ],
+    cadenceOptions: ["weekly", "on-demand"],
+    defaultCadence: "weekly",
+    defaultArtifactType: "note-link",
+  },
+  {
+    id: "skill-enrichment",
+    slug: "enrichment",
+    name: "Enrichment",
+    domain: "knowledge",
+    author: "builtin",
+    description:
+      "Identifies thin Concept notes (body under 200 chars with 3+ backlinks) and drafts a four-paragraph expansion grounded in backlink context via Claude Haiku. Records a provisional Decision with prior_content captured byte-for-byte for compensation on rollback. The first-run review skill in Inbox v2.",
+    sampleTasks: [
+      "thin Concept notes with rich backlink context",
+      "Concepts mentioned often but undefined",
+      "provisional enrichments awaiting confirmation",
+    ],
+    cadenceOptions: ["weekly", "on-demand"],
+    defaultCadence: "weekly",
+    defaultArtifactType: "note-change",
+  },
+  {
+    // S-INBOX-10: stub executor for `/review {kind:"refine"}` tasks.
+    // Spawned by dispatchTaskReviewV2, NEVER scheduled on a cadence
+    // (defaultCadence=null, cadenceOptions=["on-demand"]). Today it
+    // just logs the refinement and completes; real execution lands
+    // when a follow-up PR replaces the stub.
+    id: "skill-refine-handler",
+    slug: "refine-handler",
+    name: "Refinement Handler",
+    domain: "system",
+    author: "builtin",
+    description:
+      "Executes refinement tasks spawned when an operator picks 'refine' on an inbox item. Today logs the refinement instruction as a surface artifact; a future PR will regenerate the original suggestion with the instruction folded in.",
+    sampleTasks: [
+      "refinement instructions awaiting execution",
+    ],
+    cadenceOptions: ["on-demand"],
+    defaultCadence: null,
+    defaultArtifactType: "surface",
+  },
 ];
 
 /** Lookup by slug; returns undefined if the slug isn't a registered builtin. */
@@ -126,9 +175,7 @@ export function getSkillBySlug(slug: string): SkillMetadata | undefined {
  * doesn't bake any one skill's path into its dispatch logic.
  *
  * Returns the imported module namespace (callers introspect for a `run`
- * export) or null when the slug has no executor wired yet — e.g., the
- * `concept-graph-cleanup` entry is still waiting on P23-3 for its
- * executor.
+ * export) or null when the slug has no executor wired yet.
  *
  * Lazy `await import` avoids loading the Anthropic SDK and per-skill
  * dependencies at module-eval time (the registry is hot — it's read on
@@ -136,11 +183,18 @@ export function getSkillBySlug(slug: string): SkillMetadata | undefined {
  */
 export async function loadSkillModule(slug: string): Promise<unknown | null> {
   switch (slug) {
-    case "daily-vault-review":
-      return await import("./daily-vault-review.js");
     case "dup-people-detection":
       return await import("./dup-people-detection.js");
-    // P23-3 wires concept-graph-cleanup.
+    case "concept-graph-cleanup":
+      return await import("./concept-graph-cleanup.js");
+    case "disambiguation":
+      return await import("./disambiguation.js");
+    case "links-suggestion":
+      return await import("./links-suggestion.js");
+    case "enrichment":
+      return await import("./enrichment.js");
+    case "refine-handler":
+      return await import("./refine-handler.js");
     default:
       return null;
   }

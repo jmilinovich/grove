@@ -584,6 +584,7 @@ function applyProvenanceReweight(
   query: string,
   referenceTime: Date = new Date(),
   manualVoicePreference?: VoicePreference,
+  vaultId?: string,
 ): HybridResult[] {
   if (!PROV_RANKING_ENABLED) return fused;
   if (fused.length === 0) return fused;
@@ -600,7 +601,7 @@ function applyProvenanceReweight(
   );
 
   const lookupStart = Date.now();
-  const provMap = getNoteVoicesAndAges(fused.map((r) => r.vault_path));
+  const provMap = getNoteVoicesAndAges(fused.map((r) => r.vault_path), vaultId);
   searchQualityMetrics.recordProvenanceLookupLatency(Date.now() - lookupStart);
 
   const preTop5 = fused.slice(0, 5).map((r) => ({
@@ -731,6 +732,7 @@ export async function hybridSearch(
   limit: number = 10,
   collection?: string,
   mode: SearchMode = "hybrid",
+  vaultId?: string,
 ): Promise<HybridResult[]> {
   assertUnlocked();
   const searchStart = Date.now();
@@ -836,7 +838,7 @@ export async function hybridSearch(
   // pulls (voice, written_at) from note_blame via batch read, applies
   // piecewise age curve + voice factor + voice_preference modulation,
   // re-sorts, and surfaces voice/written_at/usage_directive on the envelope.
-  const reweighted = applyProvenanceReweight(fused, query);
+  const reweighted = applyProvenanceReweight(fused, query, new Date(), undefined, vaultId);
 
   const finalResults = reweighted.slice(0, limit);
   searchMetrics.recordSearch(query, finalResults.length, Date.now() - searchStart);

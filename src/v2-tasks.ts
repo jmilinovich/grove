@@ -27,16 +27,17 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getDb } from "./db.js";
 import { getVaultDb } from "./db-per-vault.js";
+import { bridgeDecisionsToTasks } from "./decision-writer.js";
 import { SKILL_REGISTRY, type SkillMetadata } from "./skills/registry.js";
 import { dispatchTaskRun } from "./v2-task-run.js";
 import {
-  dispatchTaskReview,
-  isReviewAction,
-  type ReviewAction,
+  dispatchTaskReviewV2,
+  type ReviewActionV2,
 } from "./v2-task-review.js";
 import { ensureControlAttached } from "./v2-task-detail.js";
 import type { VaultContext } from "./vault-router.js";
 import type { Cadence, TaskState } from "./db-types.js";
+import type { ReviewOption, SuggestionType } from "./v2-decisions.js";
 
 // ─── Shared types — mirror grove-www/src/lib/grove-api.v2.types.ts ───────
 
@@ -80,6 +81,12 @@ export interface Task {
   needsReviewReason?: string;
   sourceNotes?: string[];
   errorMessage?: string;
+  // Inbox v2 (S-INBOX-1). Optional + additive — populated for tasks
+  // emitted by a suggestion-class skill once S-INBOX-9 wires
+  // buildBacklogPayload to JOIN the decisions table. Legacy tasks
+  // without a linked decision leave both undefined.
+  itemType?: SuggestionType;
+  options?: ReviewOption[];
 }
 
 export interface Skill {
@@ -133,6 +140,18 @@ interface TaskRowAliased {
   provenanceJson: string | null;
 }
 
+/**
+ * Review-state row shape: TaskRowAliased + two columns from the JOINed
+ * `decisions` table. `decisionType` and `decisionOptionsJson` are null
+ * for legacy review tasks with no backing decision; the DTO mapper
+ * leaves `itemType`/`options` undefined in that case (UI handles
+ * gracefully).
+ */
+interface ReviewRowAliased extends TaskRowAliased {
+  decisionType: SuggestionType | null;
+  decisionOptionsJson: string | null;
+}
+
 // LEFT JOIN task_results so we can shape `Task.result` in a single
 // round-trip; `result` is null when no row exists. Column aliases match
 // grove-www's camelCase field names exactly so rows pass through as the
@@ -183,6 +202,30 @@ function rowToTask(row: TaskRowAliased): Task {
     result,
   };
   if (row.sourceNotePath) task.sourceNotes = [row.sourceNotePath];
+  return task;
+}
+
+/**
+ * S-INBOX-9 — same as rowToTask but hydrates `itemType` + `options` from
+ * the JOINed decisions row when present. Legacy review tasks (no
+ * matching decision) leave both undefined; the UI must handle that.
+ */
+function reviewRowToTask(row: ReviewRowAliased): Task {
+  const task = rowToTask(row);
+  if (row.decisionType !== null) {
+    task.itemType = row.decisionType;
+    if (row.decisionOptionsJson) {
+      try {
+        task.options = JSON.parse(row.decisionOptionsJson) as ReviewOption[];
+      } catch (err) {
+        console.error(
+          "[v2-tasks] failed to parse decision options_json for task",
+          row.id,
+          err,
+        );
+      }
+    }
+  }
   return task;
 }
 
@@ -323,18 +366,62 @@ function buildSkillsForVault(vaultId: string): Skill[] {
 export function buildBacklogPayload(vaultId: string): BacklogPayload {
   const vaultDb = getVaultDb(vaultId);
 
+  // S-INBOX-9 — lazily bridge any provisional Decision without a
+  // task_id into a review-state Task. Without this, decisions recorded
+  // by the suggestion skills (S-INBOX-6/7/8) are invisible to the
+  // inbox UI. Idempotent: bridged Decisions have non-null task_id and
+  // are skipped on subsequent calls. Tolerates a missing decisions
+  // table (returns {created: 0}) — see decision-writer.ts.
+  bridgeDecisionsToTasks(vaultId);
+
+  // Detect whether the decisions table exists in this vault's
+  // state.db. Production always has it (migration 003); fixture
+  // databases that copy only 001/002 don't. The presence flag picks
+  // between two equivalent review queries — JOINed (with itemType/
+  // options hydration) vs unjoined (legacy fallback). Avoids forcing
+  // every test fixture to copy migration 003.
+  const hasDecisionsTable =
+    vaultDb
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='decisions'",
+      )
+      .get() !== undefined;
+
   // review: oldest-disposition-first would invert the user's intuition;
   // newest review items go to the top of the list (matches the mock
   // implementation, SPEC §4).
-  const reviewRows = vaultDb
-    .prepare(
-      `SELECT ${TASK_SELECT_COLUMNS}
-         FROM tasks t
-         LEFT JOIN task_results r ON r.task_id = t.id
-        WHERE t.state = 'review'
-        ORDER BY t.created_at DESC`,
-    )
-    .all() as TaskRowAliased[];
+  //
+  // LEFT JOIN decisions ON decisions.task_id = t.id hydrates `itemType`
+  // and `options` on review-state Task DTOs (S-INBOX-9). Legacy review
+  // tasks with no backing decision return null for both columns and
+  // surface with itemType + options undefined.
+  const reviewRows = hasDecisionsTable
+    ? (vaultDb
+        .prepare(
+          `SELECT ${TASK_SELECT_COLUMNS},
+                  d.type         AS decisionType,
+                  d.options_json AS decisionOptionsJson
+             FROM tasks t
+             LEFT JOIN task_results r ON r.task_id = t.id
+             LEFT JOIN decisions d    ON d.task_id = t.id
+            WHERE t.state = 'review'
+            ORDER BY t.created_at DESC`,
+        )
+        .all() as ReviewRowAliased[])
+    : (vaultDb
+        .prepare(
+          `SELECT ${TASK_SELECT_COLUMNS}
+             FROM tasks t
+             LEFT JOIN task_results r ON r.task_id = t.id
+            WHERE t.state = 'review'
+            ORDER BY t.created_at DESC`,
+        )
+        .all() as TaskRowAliased[]
+      ).map((r) => ({
+        ...r,
+        decisionType: null,
+        decisionOptionsJson: null,
+      })) as ReviewRowAliased[];
 
   // pending+running: scheduled items first by scheduled_for ASC; unscheduled
   // fall to the bottom; ties break by most-recently-created. SQLite sorts
@@ -364,7 +451,7 @@ export function buildBacklogPayload(vaultId: string): BacklogPayload {
     .all() as TaskRowAliased[];
 
   return {
-    reviewTasks: reviewRows.map(rowToTask),
+    reviewTasks: reviewRows.map(reviewRowToTask),
     pendingTasks: pendingRows.map(rowToTask),
     clearedTasks: clearedRows.map(rowToTask),
     throughput: computeThroughput(vaultId),
@@ -537,14 +624,23 @@ export async function handleV2TaskDefer(
   sendJson(res, 200, updated);
 }
 
-// ─── P22-3: review disposition ───────────────────────────────────────────
+// ─── S-INBOX-10: review disposition ──────────────────────────────────────
 
-interface ReviewBody {
-  action: ReviewAction;
-  refinement?: string;
-}
-
-function parseReviewBody(raw: string): ReviewBody | { error: string } {
+/**
+ * S-INBOX-10 — accepts ONLY the V2 ReviewAction shape introduced in
+ * S-INBOX-10. The legacy string-action shape was retired in C-INBOX-1
+ * once `grove-www` stopped sending it.
+ *
+ *   V2:     `{kind: "apply", option_id}` |
+ *           `{kind: "refine", refinement}` |
+ *           `{kind: "dismiss"}`
+ *
+ * Anything that doesn't match the V2 shape returns 400. The error
+ * codes (`invalid_json`, `invalid_body`, `option_id_required`,
+ * `refinement_required`, `invalid_action`) are preserved from the
+ * dual-shape parser so existing clients see the same surface.
+ */
+function parseReviewBody(raw: string): ReviewActionV2 | { error: string } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -555,28 +651,39 @@ function parseReviewBody(raw: string): ReviewBody | { error: string } {
     return { error: "invalid_body" };
   }
   const obj = parsed as Record<string, unknown>;
-  if (!isReviewAction(obj.action)) {
+
+  if (typeof obj.kind !== "string") {
     return { error: "invalid_action" };
   }
-  const result: ReviewBody = { action: obj.action };
-  if (obj.refinement !== undefined) {
-    if (typeof obj.refinement !== "string") {
-      return { error: "invalid_refinement" };
+  if (obj.kind === "apply") {
+    if (typeof obj.option_id !== "string" || obj.option_id.length === 0) {
+      return { error: "option_id_required" };
     }
-    result.refinement = obj.refinement;
+    return { kind: "apply", option_id: obj.option_id };
   }
-  return result;
+  if (obj.kind === "refine") {
+    if (typeof obj.refinement !== "string" || obj.refinement.length === 0) {
+      return { error: "refinement_required" };
+    }
+    return { kind: "refine", refinement: obj.refinement };
+  }
+  if (obj.kind === "dismiss") {
+    return { kind: "dismiss" };
+  }
+  return { error: "invalid_action" };
 }
 
 /**
  * `POST /v/<slug>/v1/tasks/<id>/review` — disposition a review-state task.
  *
- * Body shape: `{action, refinement?}` where action is one of
- * `confirm-durable | refine | dismiss | mark-stale`. See
- * `v2-task-review.ts` for per-action semantics.
+ * Body: V2 shape only — `{kind: "apply", option_id}` |
+ * `{kind: "refine", refinement}` | `{kind: "dismiss"}`. See
+ * `v2-task-review.ts` for per-kind semantics.
  *
- * `userId` comes from the proxy's auth resolution — the API key's
- * `user_id` is stamped as `Provenance-By` on confirm-durable commits.
+ * `userId` comes from the proxy's auth resolution — it's threaded into
+ * the dispatcher for any downstream provenance writes (today, the V2
+ * apply path delegates to compensateDecision, which composes its own
+ * trailers; userId is reserved for future per-action provenance needs).
  */
 export async function handleV2TaskReview(
   req: IncomingMessage,
@@ -598,12 +705,11 @@ export async function handleV2TaskReview(
     return;
   }
 
-  const { status, body } = await dispatchTaskReview({
+  const { status, body } = await dispatchTaskReviewV2({
     vault,
     taskId,
     userId,
-    action: parsed.action,
-    refinement: parsed.refinement,
+    action: parsed,
   });
   sendJson(res, status, body);
 }

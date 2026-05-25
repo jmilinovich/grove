@@ -56,3 +56,41 @@ export interface SkillConfigRow {
   created_at: string;
   updated_at: string;
 }
+
+/**
+ * Row shape for the per-vault `decisions` table (S-INBOX-1).
+ *
+ * JSON columns are stored as TEXT and parsed at the API boundary into
+ * the domain shapes from `src/v2-decisions.ts` (`DecisionPayload`,
+ * `ReviewOption[]`, `string[]`). See `docs/inbox-v2-spec.md` for the
+ * design; see `src/migrations/vault/003_decisions.sql` for the DDL.
+ */
+export interface DecisionRow {
+  id: string;
+  type: string;
+  skill_run_id: string;
+  task_id: string | null;
+  created_at: string;
+  status: string;
+  payload_json: string;
+  options_json: string;
+  chosen_option_id: string;
+  affected_paths_json: string;
+  compensated_by: string | null;
+}
+
+/**
+ * Row shape for the per-vault `suppressions` table (S-INBOX-1).
+ *
+ * Soft-dismiss memory keyed by `(suggestion_type, entity_key)` —
+ * UNIQUE in the schema, so re-dismissing an item updates the existing
+ * row rather than stacking. See `docs/inbox-v2-spec.md` § "Dismiss =
+ * soft suppress".
+ */
+export interface SuppressionRow {
+  id: string;
+  suggestion_type: string;
+  entity_key: string;
+  suppressed_at: string;
+  until: string;
+}

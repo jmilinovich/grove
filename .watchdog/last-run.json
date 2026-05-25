@@ -1,16 +1,17 @@
 {
-  "ran_at": "2026-05-18T15:00:00Z",
+  "ran_at": "2026-05-24T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "4dc21511cac6861daab5321f456a5b3f3e3f2ca7",
+  "main_sha": "9db6fe0d9c19544a31c238cc3f4b4ff8cc66f115",
   "green": [
-    "pattern_b_unref: clean — no .unref() matches in src/scheduler.ts",
-    "pattern_a_createSchema: false positive — grep matched comment text in scheduler-bin.ts:21 ('raw createSchema() races…'); live code calls runMigration() at line 24. No actual bug present.",
-    "pattern_c_npx_tsx: false positive — grep matched explanatory comment on ecosystem-gen.ts:79; live code uses node_modules/.bin/tsx via tsxBin at line 85. No actual bug present.",
-    "stale_prs: no open PRs"
+    "pattern-B (scheduler timer .unref): no matches — clean",
+    "stale-prs: 3 open PRs — #194 (dependabot, 6d), #217 (image-upload, 3d), #219 (watchdog-2026-05-23, 1d) — none stale (threshold: 7d)"
   ],
   "flagged": [
-    "prod_health: curl https://api.grove.md/health returned HTTP 403 ('Host not in allowlist'). TLS handshake succeeded (server reachable), cert issuer 'CN=Egress Gateway Subordinate CA' indicates egress policy block in watchdog env. Likely persistent environment limitation, not confirmed prod outage. Issue #187 opened."
+    "health: api.grove.md /health → HTTP 403 — persistent sandbox egress block (same as prior runs). Issue #220 opened.",
+    "prod/main drift: prod_sha unknown (health unreachable); main at 9db6fe0. Cannot confirm drift without /health.",
+    "pattern-A: false-positive — grep matched 'createSchema()' in comment at scheduler-bin.ts:21; actual code calls runMigration(). No fix applied.",
+    "pattern-C: false-positive — grep matched 'npx tsx' in comment at ecosystem-gen.ts:79; actual code already uses node_modules/.bin/tsx. No fix applied."
   ],
   "prs_opened": [],
-  "issues_opened": [187]
+  "issues_opened": [220]
 }

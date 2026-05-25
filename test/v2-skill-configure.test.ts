@@ -139,12 +139,12 @@ describe("handleV2SkillConfigure (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_cfg", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(200);
     const body = cap.body as { slug: string; installState: string };
-    expect(body.slug).toBe("daily-vault-review");
+    expect(body.slug).toBe("enrichment");
     // No prior /enable → row exists with enabled=0 → installState='available'.
     expect(body.installState).toBe("available");
 
@@ -152,7 +152,7 @@ describe("handleV2SkillConfigure (P22-4)", () => {
       .prepare(
         "SELECT enabled, cadence FROM skill_configs WHERE skill_slug = ?",
       )
-      .get("daily-vault-review") as { enabled: number; cadence: string };
+      .get("enrichment") as { enabled: number; cadence: string };
     expect(row).toEqual({ enabled: 0, cadence: "weekly" });
   });
 
@@ -161,7 +161,7 @@ describe("handleV2SkillConfigure (P22-4)", () => {
     // Pre-existing enabled row at cadence='daily'.
     db.prepare(
       "INSERT INTO skill_configs (skill_slug, enabled, cadence) VALUES (?, ?, ?)",
-    ).run("daily-vault-review", 1, "daily");
+    ).run("enrichment", 1, "daily");
 
     const cap = makeRes();
     const req = makeReq(JSON.stringify({ cadence: "on-demand" }));
@@ -169,7 +169,7 @@ describe("handleV2SkillConfigure (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_cfg", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(200);
@@ -179,7 +179,7 @@ describe("handleV2SkillConfigure (P22-4)", () => {
 
     const row = db
       .prepare("SELECT enabled, cadence FROM skill_configs WHERE skill_slug = ?")
-      .get("daily-vault-review") as { enabled: number; cadence: string };
+      .get("enrichment") as { enabled: number; cadence: string };
     expect(row).toEqual({ enabled: 1, cadence: "on-demand" });
   });
 
@@ -191,12 +191,12 @@ describe("handleV2SkillConfigure (P22-4)", () => {
         req,
         cap.res,
         ctx("vault_cfg", "personal"),
-        "daily-vault-review",
+        "enrichment",
       );
       expect(cap.status).toBe(200);
       const row = getVaultDb("vault_cfg")
         .prepare("SELECT cadence FROM skill_configs WHERE skill_slug = ?")
-        .get("daily-vault-review") as { cadence: string };
+        .get("enrichment") as { cadence: string };
       expect(row.cadence).toBe(cadence);
     }
   });
@@ -228,7 +228,7 @@ describe("handleV2SkillConfigure (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_cfg", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(400);
@@ -242,7 +242,7 @@ describe("handleV2SkillConfigure (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_cfg", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(400);
@@ -256,7 +256,7 @@ describe("handleV2SkillConfigure (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_cfg", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
 
     expect(cap.status).toBe(400);
@@ -298,7 +298,7 @@ describe("handleV2SkillConfigure (P22-4)", () => {
       req,
       cap.res,
       ctx("vault_cfg", "personal"),
-      "daily-vault-review",
+      "enrichment",
     );
     expect(cap.status).toBe(200);
 

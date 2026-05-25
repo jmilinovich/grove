@@ -16,6 +16,9 @@ Grove is a TypeScript API server that wraps a git-tracked Obsidian vault and exp
 **Live:** Phases 0-5 complete, security hardened, observable, magic link auth, persistent sessions, S3 backups, cross-domain auth with grove.md
 **Next:** Phase 20 (dashboard IA: Home + Access, supersedes Phase 4b visuals + Phase 4d) → Multi-user (Phase 9a) → Discovery (Phase 7)
 
+**Active feature plans (cross-cutting):**
+- **Inbox v2** — `docs/inbox-v2-spec.md` (design) + `docs/inbox-v2-plan.md` (work items). Server items prefixed `S-INBOX-*`. Critical path: 10 hops, peak parallelism: 5 agents at W3.
+
 ---
 
 ## Architecture
@@ -1780,7 +1783,7 @@ Hook into existing `vault-provision.ts`. After a vault is created, auto-install 
 - Re-calling `bootstrapFirstRun` is a no-op.
 - Slow-vault timeout produces a `running` task that the dashboard renders as the "still working" state.
 
-#### P23-3: `concept-graph-cleanup` executor (`src/skills/concept-graph-cleanup.ts`)
+#### P23-3: `concept-graph-cleanup` executor (`src/skills/concept-graph-cleanup.ts`) ✅ COMPLETE 2026-05-18 (8fb75c2)
 
 Second skill executor. Finds thin concepts (<100 words, no outbound links), orphans, suggests merges. Produces `note-change` artifacts requiring confirm-durable.
 

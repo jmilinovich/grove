@@ -20,7 +20,7 @@
  *
  * Cost ceiling: `estimateRunCost` lives in `cost-ceiling.ts`. Exceeded →
  * surface artifact, no embeddings call, no LLM call. Same hard-fail
- * shape as `daily-vault-review` per Scope Cop SHRINK #1.
+ * shape as the enrichment class per Scope Cop SHRINK #1.
  *
  * Two exports:
  *   - `runDupPeopleDetection(vault, options): Promise<TaskResult>` — high-

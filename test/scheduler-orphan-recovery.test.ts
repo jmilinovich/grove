@@ -61,7 +61,7 @@ function insertRunningTask(id: string, startedAt: string): void {
   getVaultDb(VAULT_ID)
     .prepare(
       `INSERT INTO tasks (id, skill_slug, state, title, started_at)
-       VALUES (?, 'daily-vault-review', 'running', ?, ?)`,
+       VALUES (?, 'enrichment', 'running', ?, ?)`,
     )
     .run(id, `Task ${id}`, startedAt);
 }
@@ -139,7 +139,7 @@ describe("scheduler orphan recovery (P23-1)", () => {
     getVaultDb(VAULT_ID)
       .prepare(
         `INSERT INTO tasks (id, skill_slug, state, title, started_at)
-         VALUES (?, 'daily-vault-review', 'review', ?, ?)`,
+         VALUES (?, 'enrichment', 'review', ?, ?)`,
       )
       .run("task_review", "Already reviewed", "2020-01-01 00:00:00");
 
