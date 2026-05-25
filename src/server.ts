@@ -511,7 +511,10 @@ PROVENANCE: Snippets are surface-level. To check provenance for a result you int
       try {
         // Pass VAULT_COLLECTION so the shared QMD index doesn't return
         // results from sibling vaults under the same physical SQLite file.
-        results = await hybridSearch(queryText, fetchLimit, VAULT_COLLECTION, searchMode);
+        // Pass SERVER_VAULT_CONTEXT.vaultId so provenance reweight scopes
+        // note_blame lookups to this vault — prevents cross-vault blame bleed
+        // when two vaults share the same relative note path.
+        results = await hybridSearch(queryText, fetchLimit, VAULT_COLLECTION, searchMode, SERVER_VAULT_CONTEXT.vaultId);
       } catch (err) {
         if (err instanceof VaultLockedError) {
           return { content: [{ type: "text" as const, text: err.message }], isError: true };

@@ -2152,6 +2152,7 @@ export function deleteNoteBlame(path: string): void {
  */
 export function getNoteVoicesAndAges(
   paths: string[],
+  vaultId?: string,
 ): Map<string, { voice: "durable" | "perishable" | "legacy-unknown"; written_at: string }> {
   const out = new Map<
     string,
@@ -2170,6 +2171,18 @@ export function getNoteVoicesAndAges(
   const querySlugs = paths.map((p) => p.toLowerCase());
   const placeholders = querySlugs.map(() => "?").join(",");
 
+  // When a vaultId is supplied, restrict both the inner aggregation and the
+  // outer join to rows tagged with that vault. This prevents cross-vault
+  // provenance bleed when two vaults share the same note path (e.g.
+  // `Resources/People/Alice.md` exists in both vault A and vault B — without
+  // scoping, vault A's search would return vault B's blame metadata).
+  const vaultClause = vaultId ? " AND vault_id = ?" : "";
+  // innerArgs: [slug1, slug2, ..., vaultId?] for the sub-query placeholders
+  const innerArgs: unknown[] = vaultId ? [...querySlugs, vaultId] : querySlugs;
+  // outerArgs: inner args repeated, plus the same vaultId for the outer join clause
+  const outerArgs: unknown[] = vaultId ? [...innerArgs, vaultId] : innerArgs;
+  const outerVaultClause = vaultId ? " AND b.vault_id = ?" : "";
+
   const rows = database
     .prepare(
       `SELECT b.path, b.blame_json
@@ -2177,11 +2190,11 @@ export function getNoteVoicesAndAges(
        INNER JOIN (
          SELECT path, MAX(computed_at) AS max_at
          FROM note_blame
-         WHERE LOWER(REPLACE(path, ' ', '-')) IN (${placeholders})
+         WHERE LOWER(REPLACE(path, ' ', '-')) IN (${placeholders})${vaultClause}
          GROUP BY path
-       ) latest ON latest.path = b.path AND latest.max_at = b.computed_at`,
+       ) latest ON latest.path = b.path AND latest.max_at = b.computed_at${outerVaultClause}`,
     )
-    .all(...querySlugs) as { path: string; blame_json: string }[];
+    .all(...outerArgs) as { path: string; blame_json: string }[];
 
   // Build the inverse map: slug → original-query-path so callers can
   // index back by their input form rather than the filesystem casing.
