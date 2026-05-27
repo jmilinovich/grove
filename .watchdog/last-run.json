@@ -1,16 +1,16 @@
 {
-  "ran_at": "2026-05-26T15:00:00Z",
-  "prod_sha": "unknown",
-  "main_sha": "91bdb5764c8dc3d82c29646df6778193e74cce0b",
+  "ran_at": "2026-05-27T15:00:00Z",
+  "prod_sha": null,
+  "main_sha": "315ca32cf0a531898bf2bccd1c0fa557e07c0f22",
   "green": [
-    "health: api.grove.md /health → HTTP 403 — persistent sandbox egress block (watchdog IP not in grove allowlist). Issue #220 opened and closed by owner 2026-05-24 after SSH triage confirmed prod is healthy. Not reopening.",
-    "prod/main drift: prod SHA unknowable from sandbox; main advanced 3 commits since yesterday (91bdb57, 1289555, 202b80e — two deps bumps + watchdog commit). No schema touches in new commits.",
-    "stale-prs: 1 open PR — #217 (fix/image-upload-provenance, updated 2026-05-21, 5 days ago). Under 7-day threshold.",
-    "pattern-A (createSchema in worker entrypoints): grep matched comment at scheduler-bin.ts:18,21; actual call at line 24 is runMigration(). False-positive.",
-    "pattern-B (scheduler .unref() on timers): no matches",
-    "pattern-C (npx tsx in ecosystem-gen): grep matched comment at ecosystem-gen.ts:79; actual code uses node_modules/.bin/tsx. False-positive."
+    "pattern-A (createSchema in worker entrypoints): false positive — scheduler-bin.ts already uses runMigration(), grep matched comment text only",
+    "pattern-B (.unref() on scheduler timers): clean — no matches",
+    "pattern-C (npx tsx in ecosystem-gen): false positive — ecosystem-gen.ts already uses node_modules/.bin/tsx, grep matched comment text only",
+    "stale-prs: 1 open PR (#217 fix/image-upload-provenance, ~6d old) — not yet stale"
   ],
-  "flagged": [],
+  "flagged": [
+    "health: api.grove.md /health → HTTP 403 'Host not in allowlist' — persistent egress gateway block in watchdog sandbox env (tracked in #187). Prod status unknown from this env — verify manually if needed."
+  ],
   "prs_opened": [],
   "issues_opened": []
 }
