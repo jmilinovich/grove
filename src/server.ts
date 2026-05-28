@@ -1,12 +1,19 @@
 #!/usr/bin/env tsx
 /**
- * Grove MCP Server — registers 6 tools for the knowledge API.
+ * Grove MCP server — six tools over a single git-backed Obsidian vault.
  *
  * Tools: query, get, multi_get, write_note, list_notes, vault_status
- * Proxy forwards authenticated MCP requests here.
  *
  * Usage:
- *   GROVE_VAULT=/path/to/vault GROVE_SERVER_PORT=8190 npx tsx src/server.ts
+ *   GROVE_VAULT=/path/to/vault npx tsx src/server.ts
+ *
+ * Auth model: a single bearer token in the Authorization header. The token is
+ * read from `$GROVE_API_KEY` at startup. Set `GROVE_AUTH=none` to disable
+ * authentication entirely (only safe on localhost / personal machine).
+ *
+ * The HTTP transport is the MCP `StreamableHTTPServerTransport`. It speaks
+ * the same protocol as claude.ai's custom-connector, so pointing claude.ai
+ * at `http://localhost:<port>/mcp` with the bearer token "just works".
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -19,13 +26,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 
 import { hybridSearch, formatResults, bm25Search, type SearchMode } from "./hybrid-search.js";
-import { VaultLockedError } from "./index-crypto.js";
-import { noteUrl, vaultOwnerHandle } from "./url.js";
-
+import { noteUrl } from "./url.js";
 import { gitLog, startupRecovery, listNotes } from "./vault-ops.js";
-import { parseNote, contentHash, inferTags } from "./notes-validate.js";
+import { parseNote, contentHash } from "./notes-validate.js";
 import { PERISHABLE_USAGE_DIRECTIVE, type Provenance } from "./provenance.js";
-import { computeProvenanceFields, provenanceEnabled } from "./blame.js";
+import { computeProvenanceFields } from "./blame.js";
 import { postSyncWarmup, type PostSyncWarmupResult } from "./blame-warmup.js";
 import {
   handleWriteNote,
@@ -35,13 +40,13 @@ import {
   handleStatusPerf,
   flushWriteQueue,
   type BatchOperation,
+  type VaultContext,
 } from "./rest.js";
 import { analyzeGraph, computeDigest } from "./vault-graph.js";
 import { getStats, startStatsTimer, warmStatsFromDisk } from "./vault-stats.js";
 import { RateLimiter, IdempotencyCache } from "./rate-limit.js";
-import { log as structuredLog, auditRead } from "./logger.js";
+import { auditRead } from "./logger.js";
 import { installCrashHandlers } from "./crash-handlers.js";
-import { filterByTrail, logTrailAccess, type TrailConfig, type NoteMetadata } from "./trails.js";
 import {
   loadVaultConfig,
   entityPath,
@@ -62,8 +67,6 @@ import {
 installCrashHandlers("grove-server");
 
 // ── Path traversal guard ─────────────────────────────────────────
-// Resolves a relative path against the vault and rejects any attempt
-// to escape outside the vault via ".." or symlinks.
 function sanitizePath(vaultRoot: string, filePath: string): string | null {
   const root = resolve(vaultRoot);
   const normalized = resolve(root, filePath);
@@ -73,45 +76,21 @@ function sanitizePath(vaultRoot: string, filePath: string): string | null {
     const stat = lstatSync(normalized);
     if (stat.isSymbolicLink()) return null;
   } catch {
-    // File doesn't exist yet — that's fine for reads (will get "not found")
+    // File doesn't exist yet — fine for reads.
   }
   return normalized;
 }
 
 const VAULT_PATH = process.env.GROVE_VAULT ?? join(homedir(), "life");
-const PORT = Number(process.env.GROVE_SERVER_PORT ?? 8190);
+const PORT = Number(process.env.GROVE_PORT ?? 8420);
 const VAULT_CONFIG: VaultConfig = loadVaultConfig(VAULT_PATH);
-
-// QMD indexes every vault into one shared SQLite file
-// (~/.cache/qmd/index.sqlite). Each vault's documents live under a
-// `collection` keyed by the vault's on-disk basename. Search calls in
-// this process MUST filter by this collection — without it, a query
-// against vault A's MCP server returns notes from every other vault
-// on the box. This was the 2026-04-29 cross-vault leak: Sumon's
-// sharpshoot vector queries returned John's `Areas/Business/Legacy
-// Holdings/...` notes with sharpshoot URLs minted on top.
-// Mirrors the derivation in rest.ts:handleSearch and vault-stats.ts.
 const VAULT_COLLECTION = VAULT_PATH.split("/").filter(Boolean).pop() ?? "";
-
-// grove-server is pinned to one vault per PM2 process. Build the
-// VaultContext once from env so every rest.ts handler call reuses the
-// same identity. The slug is best-effort — proxy already enforces
-// `X-Grove-Vault-Id` matching, so a missing slug here is a logging-only
-// concern, not a correctness one.
-import type { VaultContext } from "./vault-router.js";
-const SERVER_VAULT_CONTEXT: VaultContext = {
-  vaultPath: VAULT_PATH,
-  vaultId: process.env.GROVE_VAULT_ID ?? "vault_00000000",
-  vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",
-};
+const SERVER_CTX: VaultContext = { vaultPath: VAULT_PATH };
 
 const rateLimiter = new RateLimiter({ reads: 120, writes: 20, windowMs: 60_000 });
 const idempotencyCache = new IdempotencyCache(1000, 3_600_000);
 
 // ── Provenance schema (shared across single + batch write_note ops) ──
-// Trailer format and validation live in src/provenance.ts. Voice values:
-// callers pass `durable` or `perishable`; `legacy-unknown` is server-only
-// (surfaces on commits without trailers via the read path).
 const PROVENANCE_SCHEMA = z.object({
   voice: z.enum(["durable", "perishable"]).describe("durable: this note's content is intended as standing fact (human, extract from human, or cited research). perishable: moment-in-time synthesis or prediction — Claude reading this later MUST treat it as a quoted historical artifact, not a standing claim."),
   by: z.string().min(1).describe("Who wrote this commit's content — model id like 'claude-opus-4-7', 'claude-sonnet-4-6', or 'human' when John typed it."),
@@ -124,10 +103,7 @@ const PROVENANCE_SCHEMA = z.object({
 const PROVENANCE_FIELD_DESCRIPTION =
   "Provenance for this commit. Required for any AI-written content; encode as voice='perishable' for moment-in-time synthesis, 'durable' for content the user is asserting as standing fact. The server writes Provenance-* trailers into the commit message, which the read path surfaces as per-line voice via git blame so future readers can tell what's standing fact vs what's a snapshot.";
 
-// ── write_note dispatch (tested in server.test.ts) ─────────────────
-// Routes the action parameter to the right rest.ts handler. Exported
-// separately so tests can exercise the routing without spinning up
-// an MCP server + transport.
+// ── write_note dispatch ──────────────────────────────────────────────
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -138,30 +114,15 @@ export interface WriteNoteInput {
   content?: string;
   if_hash?: string;
   move_to?: string;
-  /**
-   * Batch mode: an array of write ops executed in one mutex acquisition.
-   * When present, this shape takes precedence over the single-op fields.
-   * Each entry passes its own path, frontmatter, content, and optionally
-   * if_hash or if_hash_from_op (reference an earlier op's source_hash).
-   */
   operations?: Array<{
     path: string;
-    /** YAML frontmatter as a JSON string (matching the single-op shape). */
     frontmatter: string;
     content: string;
     if_hash?: string;
     if_hash_from_op?: number;
     provenance?: Provenance;
   }>;
-  /**
-   * With operations[] present: atomic=true rolls back all ops if any fail
-   * (git reset to the pre-batch SHA + provenance restored). Default false.
-   */
   atomic?: boolean;
-  /**
-   * Single-op provenance. Required from Claude callers going forward; the
-   * read side surfaces this as `provenance_blame` per line via git trailers.
-   */
   provenance?: Provenance;
 }
 
@@ -170,18 +131,12 @@ export interface WriteNoteDeps {
   handleDeleteNote: typeof handleDeleteNote;
   handleMoveNote: typeof handleMoveNote;
   handleWriteBatch: typeof handleWriteBatch;
-  trail?: TrailConfig | null;
 }
 
 export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDeps): Promise<ToolResult> {
   const act = input.action ?? "write";
-  const trail = deps.trail ?? null;
 
-  // Batch path: operations[] present takes precedence over single-op fields.
   if (input.operations && input.operations.length > 0) {
-    // Hard cap: each op acquires the write mutex and creates a git commit.
-    // An unbounded batch is a DoS multiplier — one rate-limit tick could
-    // trigger 1,000 disk writes + git commits + discovery enqueues.
     const MAX_BATCH_OPS = 50;
     if (input.operations.length > MAX_BATCH_OPS) {
       return {
@@ -213,14 +168,13 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
       });
     }
     try {
-      const result = await deps.handleWriteBatch(SERVER_VAULT_CONTEXT, parsedOps, { atomic: input.atomic, trail });
+      const result = await deps.handleWriteBatch(SERVER_CTX, parsedOps, { atomic: input.atomic });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err: any) {
       return { content: [{ type: "text", text: err.message }], isError: true };
     }
   }
 
-  // Single-op path: `path` is required once operations[] is absent.
   if (!input.path) {
     return { content: [{ type: "text", text: "path is required (or use operations[] for batch)" }], isError: true };
   }
@@ -228,10 +182,9 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
 
   if (act === "delete" || act === "hard_delete") {
     try {
-      const result = await deps.handleDeleteNote(SERVER_VAULT_CONTEXT, notePath, {
+      const result = await deps.handleDeleteNote(SERVER_CTX, notePath, {
         hard: act === "hard_delete",
         ifHash: input.if_hash,
-        trail,
       });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err: any) {
@@ -244,9 +197,8 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
       return { content: [{ type: "text", text: "move_to is required when action is 'move'" }], isError: true };
     }
     try {
-      const result = await deps.handleMoveNote(SERVER_VAULT_CONTEXT, notePath, input.move_to, {
+      const result = await deps.handleMoveNote(SERVER_CTX, notePath, input.move_to, {
         ifHash: input.if_hash,
-        trail,
       });
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err: any) {
@@ -265,9 +217,8 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
   }
 
   try {
-    const result = await deps.handleWriteNote(SERVER_VAULT_CONTEXT, notePath, frontmatter, input.content, {
+    const result = await deps.handleWriteNote(SERVER_CTX, notePath, frontmatter, input.content, {
       ifHash: input.if_hash,
-      trail,
       provenance: input.provenance,
     });
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -276,25 +227,7 @@ export async function dispatchWriteNote(input: WriteNoteInput, deps: WriteNoteDe
   }
 }
 
-// ── /internal/post-sync-warmup endpoint plumbing ───────────────────
-//
-// V3 §C wiring (closes the TODO in blame-warmup.ts). Cron's
-// `post-sync-discover.sh` curls this endpoint once per sync after the
-// per-path discovery loop, with the pre/post HEAD SHAs captured around
-// `git pull --ff-only`. The endpoint resolves the changed paths via
-// `postSyncWarmup` and pre-computes their `note_blame` rows so the next
-// user query hits a warm cache.
-//
-// Auth: bearer-token gated against GROVE_INTERNAL_TOKEN. Localhost-only
-// by intent (the cron runs on the same box), but the bearer check is
-// still the gate — defense-in-depth, and it lets the discovery-trigger
-// (which trusts localhost via the X-Grove-Vault-Id bypass on /internal/)
-// keep its existing contract while warmup uses an explicit credential.
-//
-// Body validation: from_sha/to_sha must be either 40-char hex SHAs or
-// `HEAD~N` style refs. Permissive on parsing — we log invalid shapes
-// rather than 400, since git ultimately resolves the ref anyway and a
-// malformed ref will surface as an empty diff rather than a crash.
+// ── /internal/post-sync-warmup helpers (still used by tests) ─────────
 
 const SHA_OR_REF = /^([0-9a-fA-F]{7,40}|HEAD(~\d+)?|[A-Za-z0-9_./-]+)$/;
 
@@ -302,15 +235,6 @@ export type WarmupAuthOutcome =
   | { ok: true }
   | { ok: false; status: 401; reason: string };
 
-/**
- * Check the bearer-token for /internal/post-sync-warmup. Pure decision
- * — no I/O — so the test exercises the same path the handler does.
- *
- * Returns ok when the configured GROVE_INTERNAL_TOKEN matches the value
- * in the `Authorization: Bearer <token>` header. Returns 401 otherwise,
- * including when the env var is unset (we'd rather refuse all warmup
- * traffic than silently no-op auth).
- */
 export function checkInternalBearer(
   authHeader: string | undefined,
   configuredToken: string | undefined,
@@ -326,17 +250,10 @@ export function checkInternalBearer(
     return { ok: false, status: 401, reason: "Authorization header is not a Bearer token" };
   }
   const presented = match[1]!.trim();
-  // timingSafeEqual requires equal-length buffers; pad the shorter side
-  // (with a constant) to keep the compare timing-independent on the
-  // length signal. Mismatched lengths still fail the equality check.
   const a = Buffer.from(presented);
   const b = Buffer.from(configuredToken);
-  if (a.length !== b.length) {
-    return { ok: false, status: 401, reason: "bearer token mismatch" };
-  }
-  if (!timingSafeEqual(a, b)) {
-    return { ok: false, status: 401, reason: "bearer token mismatch" };
-  }
+  if (a.length !== b.length) return { ok: false, status: 401, reason: "bearer token mismatch" };
+  if (!timingSafeEqual(a, b)) return { ok: false, status: 401, reason: "bearer token mismatch" };
   return { ok: true };
 }
 
@@ -344,10 +261,6 @@ export type WarmupBodyOutcome =
   | { ok: true; fromSha: string; toSha: string }
   | { ok: false; status: 400; reason: string };
 
-/**
- * Validate the JSON body of a /internal/post-sync-warmup request.
- * Permissive on ref shape — see SHA_OR_REF above.
- */
 export function parseWarmupBody(raw: string): WarmupBodyOutcome {
   let parsed: unknown;
   try {
@@ -361,26 +274,13 @@ export function parseWarmupBody(raw: string): WarmupBodyOutcome {
   const obj = parsed as Record<string, unknown>;
   const fromSha = obj.from_sha;
   const toSha = obj.to_sha;
-  if (typeof fromSha !== "string" || !fromSha) {
-    return { ok: false, status: 400, reason: "from_sha is required" };
-  }
-  if (typeof toSha !== "string" || !toSha) {
-    return { ok: false, status: 400, reason: "to_sha is required" };
-  }
-  if (!SHA_OR_REF.test(fromSha)) {
-    console.warn(`[grove] warmup: from_sha shape looks invalid: ${fromSha}`);
-  }
-  if (!SHA_OR_REF.test(toSha)) {
-    console.warn(`[grove] warmup: to_sha shape looks invalid: ${toSha}`);
-  }
+  if (typeof fromSha !== "string" || !fromSha) return { ok: false, status: 400, reason: "from_sha is required" };
+  if (typeof toSha !== "string" || !toSha) return { ok: false, status: 400, reason: "to_sha is required" };
+  if (!SHA_OR_REF.test(fromSha)) console.warn(`[grove] warmup: from_sha shape looks invalid: ${fromSha}`);
+  if (!SHA_OR_REF.test(toSha)) console.warn(`[grove] warmup: to_sha shape looks invalid: ${toSha}`);
   return { ok: true, fromSha, toSha };
 }
 
-/**
- * Format a successful warmup result as the JSON shape the shell hook
- * (and any future operator tooling) expects: snake_case counts +
- * duration_ms. Kept separate from the http handler so tests can pin it.
- */
 export function formatWarmupResponse(r: PostSyncWarmupResult) {
   return {
     paths_total: r.pathsTotal,
@@ -391,14 +291,13 @@ export function formatWarmupResponse(r: PostSyncWarmupResult) {
   };
 }
 
-// ── Server instructions (what Claude.ai sees) ─────────────────────
+// ── Server instructions ──────────────────────────────────────────────
 
 function formatVaultStructure(config: VaultConfig): string {
   const lines: string[] = [];
   const typePaths = config.structure.type_paths;
   const entities = config.structure.entities;
 
-  // Type → path mapping (from type_paths, or fallback to entities)
   const pairs = new Map<string, string>();
   for (const [type, path] of Object.entries(typePaths)) pairs.set(type, path);
   for (const [type, path] of Object.entries(entities)) {
@@ -430,7 +329,7 @@ Searching: Use query with a searches array — e.g. searches=[{type:"lex", query
 
 Writing: Use write_note with proper frontmatter (type + tags required). Use if_hash for safe updates to existing notes.
 
-URLs: Every tool response includes a url field. ALWAYS show it to the user as a clickable link — especially after writes. This is the primary way the user accesses their notes.`;
+URLs: Every tool response includes a url field. Show it to the user as a clickable link after writes.`;
 }
 
 const INSTRUCTIONS = buildInstructions(VAULT_CONFIG);
@@ -453,17 +352,12 @@ function formatWriteStructure(config: VaultConfig): string {
   return lines.join("\n");
 }
 
-// ── Create MCP server with all 6 tools ────────────────────────────
+// ── Create MCP server with all 6 tools ───────────────────────────────
 
 function createGroveServer(): McpServer {
-  // Trail capabilities in initialize handshake — serverInfo includes trail context
-  const trailInitialize = activeTrail
-    ? `\n\nThis connection is scoped to trail "${activeTrail.name}" (${activeTrail.id}). Only notes matching the trail's topic boundaries are visible.`
-    : "";
-  const serverInfo = activeTrail ? { name: "grove", version: "1.0.0", trail: { id: activeTrail.id, name: activeTrail.name } } : { name: "grove", version: "1.0.0" };
   const server = new McpServer(
-    serverInfo as { name: string; version: string },
-    { instructions: INSTRUCTIONS + trailInitialize },
+    { name: "grove", version: "1.0.0" },
+    { instructions: INSTRUCTIONS },
   );
 
   // ── Tool 1: query ───────────────────────────────────────────────
@@ -492,14 +386,10 @@ PROVENANCE: Snippets are surface-level. To check provenance for a result you int
     },
     async ({ searches, limit }) => {
       const queryText = searches.map((s) => s.query).join(" ");
-      // Fetch more results if trail filtering is active (pre-filter reduction)
-      const fetchLimit = activeTrail ? (limit ?? 10) * 3 : (limit ?? 10);
+      const fetchLimit = limit ?? 10;
 
       // Honour the caller's declared search type(s). If all sub-queries share
       // the same type, use it directly; mixed types → hybrid (default).
-      // This was previously ignored — every searches[] call ran full hybrid
-      // regardless of type, which caused pure-lex queries to surface
-      // vector-nearest-neighbor results that didn't contain the literal term.
       const types = new Set(searches.map((s) => s.type));
       let searchMode: SearchMode = "hybrid";
       if (types.size === 1) {
@@ -507,22 +397,9 @@ PROVENANCE: Snippets are surface-level. To check provenance for a result you int
         if (t === "lex" || t === "vec" || t === "hyde") searchMode = t;
       }
 
-      let results;
-      try {
-        // Pass VAULT_COLLECTION so the shared QMD index doesn't return
-        // results from sibling vaults under the same physical SQLite file.
-        results = await hybridSearch(queryText, fetchLimit, VAULT_COLLECTION, searchMode);
-      } catch (err) {
-        if (err instanceof VaultLockedError) {
-          return { content: [{ type: "text" as const, text: err.message }], isError: true };
-        }
-        throw err;
-      }
-      const totalFound = results.length;
+      const results = await hybridSearch(queryText, fetchLimit, VAULT_COLLECTION, searchMode);
 
       // Resolve QMD lowercase-kebab paths to real filesystem paths.
-      // QMD index stores e.g. "resources/concepts/meditation-mindfulness.md"
-      // but the filesystem has "Resources/Concepts/Meditation & Mindfulness.md".
       const allNotes = listNotes(VAULT_PATH, "*");
       const resolveRealPath = (vaultPath: string, title: string): string => {
         const vp = vaultPath.toLowerCase();
@@ -530,30 +407,8 @@ PROVENANCE: Snippets are surface-level. To check provenance for a result you int
         return note?.path ?? vaultPath;
       };
 
-      // Trail prefilter
-      let filtered = results;
-      if (activeTrail) {
-        filtered = results.filter((r) => {
-          const vp = r.vault_path.toLowerCase();
-          const note = allNotes.find((n: { path: string; name: string }) => n.path.toLowerCase() === vp || n.name === r.title);
-          if (!note) return false;
-          const absPath = join(VAULT_PATH, note.path);
-          try {
-            const raw = readFileSync(absPath, "utf-8");
-            const { frontmatter } = parseNote(raw);
-            const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
-              typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
-            const meta: NoteMetadata = { path: note.path, type: frontmatter.type as string, tags, private: frontmatter.private === true };
-            return filterByTrail(activeTrail!, meta);
-          } catch {
-            return filterByTrail(activeTrail!, { path: note.path });
-          }
-        }).slice(0, limit ?? 10);
-        logTrailAccess("query", activeTrail.id, activeTrail.name, "query", totalFound, filtered.length);
-      }
-
-      // Enrich image notes with thumbnail_url from frontmatter (P14-3)
-      for (const r of filtered) {
+      // Enrich image notes with thumbnail_url from frontmatter (when present)
+      for (const r of results) {
         const vp = r.vault_path.toLowerCase();
         const note = allNotes.find((n: { path: string; name: string }) => n.path.toLowerCase() === vp || n.name === r.title);
         if (!note) continue;
@@ -568,15 +423,8 @@ PROVENANCE: Snippets are surface-level. To check provenance for a result you int
         }
       }
 
-      const handle = vaultOwnerHandle(SERVER_VAULT_CONTEXT);
-      const formatted = formatResults(
-        filtered,
-        resolveRealPath,
-        handle,
-        SERVER_VAULT_CONTEXT.vaultSlug,
-      );
-      const filteredCount = activeTrail ? `\n\n[filtered_count: ${filtered.length}/${totalFound}]` : "";
-      return { content: [{ type: "text" as const, text: (formatted || "No results found.") + filteredCount }] };
+      const formatted = formatResults(results, resolveRealPath);
+      return { content: [{ type: "text" as const, text: formatted || "No results found." }] };
     },
   );
 
@@ -599,24 +447,12 @@ When \`has_perishable_segments\` is true: ${PERISHABLE_USAGE_DIRECTIVE}`,
       },
     },
     async ({ file }) => {
-      // Helper: read and return a note given absolute + relative paths
       const readNote = async (abs: string, rel: string, resolvedFrom?: string) => {
         const raw = readFileSync(abs, "utf-8");
         const { frontmatter, content } = parseNote(raw);
-
-        // Trail filter: if note not visible under trail, return 404 (not 403 — don't leak existence)
-        if (activeTrail) {
-          const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
-            typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
-          const meta: NoteMetadata = { path: rel, type: frontmatter.type as string, tags, private: frontmatter.private === true };
-          if (!filterByTrail(activeTrail, meta)) {
-            return { content: [{ type: "text" as const, text: `Note not found: ${file}` }] };
-          }
-        }
-
         const hash = contentHash(raw);
         const sourceHash = getSourceHash(rel) ?? hash;
-        const url = noteUrl(SERVER_VAULT_CONTEXT, rel);
+        const url = noteUrl(rel);
         const provFields = await computeProvenanceFields(VAULT_PATH, rel, sourceHash);
         const result: Record<string, unknown> = {
           path: rel,
@@ -640,14 +476,13 @@ When \`has_perishable_segments\` is true: ${PERISHABLE_USAGE_DIRECTIVE}`,
       if (!abs) return { content: [{ type: "text" as const, text: `Path rejected: traversal outside vault not allowed` }] };
       if (existsSync(abs)) return readNote(abs, filePath);
 
-      // 3. Extract the basename for searching (e.g., "Taste Graph" from "Resources/Concepts/Taste Graph.md")
+      // 3. Extract the basename for searching
       const searchTerm = filePath.replace(/\.md$/, "").split("/").pop() ?? file;
 
       // 4. For date-like basenames (YYYY-MM-DD), try Journal paths directly
       const dateMatch = searchTerm.match(/^(\d{4})-\d{2}-\d{2}$/);
       if (dateMatch) {
         const year = dateMatch[1];
-        // Try current year folder and the year from the date
         for (const y of [year, String(new Date().getFullYear())]) {
           const journalPath = `Journal/${y}/${searchTerm}.md`;
           const journalAbs = join(VAULT_PATH, journalPath);
@@ -675,13 +510,9 @@ When \`has_perishable_segments\` is true: ${PERISHABLE_USAGE_DIRECTIVE}`,
       }
 
       // 7. Fall back to BM25 search for partial/fuzzy matches.
-      // Scope to this vault's collection — defense-in-depth alongside
-      // the existsSync check below, and avoids picking a foreign-vault
-      // path as the top ranker when this vault has no match.
       try {
         const results = await bm25Search(searchTerm, 3, VAULT_COLLECTION);
         if (results.length > 0) {
-          // The vault_path from QMD may be lowercased; find the real path via listNotes
           const resolvedLower = results[0].vault_path.toLowerCase();
           const realNote = allNotes.find((n) => n.path.toLowerCase() === resolvedLower);
           const realPath = realNote?.path ?? results[0].vault_path;
@@ -689,7 +520,7 @@ When \`has_perishable_segments\` is true: ${PERISHABLE_USAGE_DIRECTIVE}`,
           if (existsSync(resolvedAbs)) return readNote(resolvedAbs, realPath, file);
         }
       } catch {
-        // BM25 search unavailable or errored — fall through to "not found"
+        // BM25 unavailable
       }
 
       return { content: [{ type: "text" as const, text: `Note not found: ${file}` }] };
@@ -731,17 +562,7 @@ When \`has_perishable_segments\` is true on any result: ${PERISHABLE_USAGE_DIREC
         }
         const raw = readFileSync(abs, "utf-8");
         const { frontmatter, content } = parseNote(raw);
-        // Trail filter: hidden notes return 404 (not 403)
-        if (activeTrail) {
-          const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags as string[] :
-            typeof frontmatter.tags === "string" ? [frontmatter.tags] : [];
-          const meta: NoteMetadata = { path: entry.path, type: frontmatter.type as string, tags, private: frontmatter.private === true };
-          if (!filterByTrail(activeTrail, meta)) {
-            results.push({ path: entry.path, error: "not found" });
-            continue;
-          }
-        }
-        const url = noteUrl(SERVER_VAULT_CONTEXT, entry.path);
+        const url = noteUrl(entry.path);
         const diskHash = contentHash(raw);
         const sourceHash = getSourceHash(entry.path) ?? diskHash;
         const provFields = await computeProvenanceFields(VAULT_PATH, entry.path, sourceHash);
@@ -822,15 +643,15 @@ After writing, present the url field from the response to the user.`,
           content: z.string(),
           if_hash: z.string().optional(),
           if_hash_from_op: z.number().int().nonnegative().optional().describe("Reference the source_hash of an earlier op in this batch (0-based)"),
-          provenance: PROVENANCE_SCHEMA.optional().describe("Per-op provenance — each batch op gets its own commit and trailer set, so ops can mix human + claude voices."),
-        })).optional().describe("Batch mode: array of write ops executed in one mutex acquisition. Use instead of path/frontmatter/content for multi-note workflows."),
-        atomic: z.boolean().optional().describe("When operations[] is set, atomic=true rolls back the whole batch on any failure. Default false (ops that succeed stay committed)."),
+          provenance: PROVENANCE_SCHEMA.optional().describe("Per-op provenance — each batch op gets its own commit and trailer set."),
+        })).optional().describe("Batch mode: array of write ops executed in one mutex acquisition."),
+        atomic: z.boolean().optional().describe("With operations[]: atomic=true rolls back all ops on any failure. Default false."),
       },
     },
     async ({ action, path: notePath, frontmatter: fmInput, content, if_hash, move_to, provenance, operations, atomic }) => {
       return await dispatchWriteNote(
         { action, path: notePath, frontmatter: fmInput, content, if_hash, move_to, provenance, operations, atomic },
-        { handleWriteNote, handleDeleteNote, handleMoveNote, handleWriteBatch, trail: activeTrail },
+        { handleWriteNote, handleDeleteNote, handleMoveNote, handleWriteBatch },
       );
     },
   );
@@ -854,16 +675,7 @@ PROVENANCE: list_notes returns metadata only (no body). To check provenance for 
       },
     },
     async ({ pattern, include_aliases }) => {
-      let entries = listNotes(VAULT_PATH, pattern, { includeAliases: include_aliases ?? false });
-      // Trail filter: only return trail-visible notes in list
-      if (activeTrail) {
-        const totalCount = entries.length;
-        entries = entries.filter((e) => {
-          const meta: NoteMetadata = { path: e.path, type: e.type ?? undefined, tags: e.tags, private: e.private };
-          return filterByTrail(activeTrail!, meta);
-        });
-        logTrailAccess("list", activeTrail.id, activeTrail.name, "list_notes", totalCount, entries.length);
-      }
+      const entries = listNotes(VAULT_PATH, pattern, { includeAliases: include_aliases ?? false });
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ count: entries.length, notes: entries }, null, 2) }],
       };
@@ -895,44 +707,28 @@ Modes:
       if (mode === "health") {
         const stats = getStats(VAULT_PATH);
         if (stats) {
-          const statusResult: Record<string, unknown> = {
-            total_notes: stats.vault.total_notes,
-            vault_path: VAULT_PATH,
-            by_folder: stats.vault.by_folder,
-            by_type: stats.vault.by_type,
-            frontmatter_completeness: stats.vault.frontmatter_completeness,
-            freshness: stats.freshness,
-            lifecycle: stats.lifecycle,
-            computed_at: stats.computed_at,
-          };
-          // Trail: add scoped note to indicate these are vault-wide stats
-          if (activeTrail) {
-            statusResult.trail_note = "stats are vault-wide; use list_notes for trail-scoped counts";
-          }
           return {
-            content: [{ type: "text" as const, text: JSON.stringify(statusResult, null, 2) }],
+            content: [{ type: "text" as const, text: JSON.stringify({
+              total_notes: stats.vault.total_notes,
+              vault_path: VAULT_PATH,
+              by_folder: stats.vault.by_folder,
+              by_type: stats.vault.by_type,
+              frontmatter_completeness: stats.vault.frontmatter_completeness,
+              freshness: stats.freshness,
+              lifecycle: stats.lifecycle,
+              computed_at: stats.computed_at,
+            }, null, 2) }],
           };
         }
-        // Fallback: stats not yet computed, do the old way
         const notes = listNotes(VAULT_PATH, "*");
         const log = await gitLog(VAULT_PATH, { limit: 1 });
         const lastCommit = log[0] ?? null;
-        let totalNotes = notes.length;
-        const statusResult: Record<string, unknown> = {
-          total_notes: totalNotes,
-          last_commit: lastCommit ? { date: lastCommit.date, message: lastCommit.message } : null,
-          vault_path: VAULT_PATH,
-        };
-        if (activeTrail) {
-          const visibleNotes = notes.filter((n) => {
-            const meta: NoteMetadata = { path: n.path, type: n.type ?? undefined, tags: n.tags, private: n.private };
-            return filterByTrail(activeTrail!, meta);
-          });
-          statusResult.total_notes = visibleNotes.length;
-          statusResult.scoped_stats = { trail_id: activeTrail.id, trail_name: activeTrail.name, total_in_vault: totalNotes, visible: visibleNotes.length };
-        }
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(statusResult, null, 2) }],
+          content: [{ type: "text" as const, text: JSON.stringify({
+            total_notes: notes.length,
+            last_commit: lastCommit ? { date: lastCommit.date, message: lastCommit.message } : null,
+            vault_path: VAULT_PATH,
+          }, null, 2) }],
         };
       }
 
@@ -946,16 +742,11 @@ Modes:
         };
       }
 
-      if (mode === "diagnostics") {
-        return await runDiagnostics();
-      }
+      if (mode === "diagnostics") return await runDiagnostics();
 
       if (mode === "graph") {
         const stats = getStats(VAULT_PATH);
-        if (stats) {
-          return { content: [{ type: "text" as const, text: JSON.stringify(stats.graph, null, 2) }] };
-        }
-        // Fallback: compute directly
+        if (stats) return { content: [{ type: "text" as const, text: JSON.stringify(stats.graph, null, 2) }] };
         const graph = await analyzeGraph(VAULT_PATH);
         return { content: [{ type: "text" as const, text: JSON.stringify(graph, null, 2) }] };
       }
@@ -985,16 +776,10 @@ Modes:
     },
   );
 
-  // ── Resource: vault notes accessible as MCP resources ──────────
-  // The resource template is scoped to whichever vault this grove-server
-  // process is bound to (one process per vault under PM2). Hardcoding
-  // `life` here meant non-life per-vault servers (sharpshoot, etc.)
-  // advertised an incorrect URI scheme. Reuses SERVER_VAULT_CONTEXT
-  // rather than re-deriving the env-var default — see check-invariants
-  // no-new-tenant-default-strings rule (PR #66 history).
+  // ── Resource: vault notes accessible as MCP resources ───────────
   server.resource(
     "note",
-    new ResourceTemplate(`vault://${SERVER_VAULT_CONTEXT.vaultSlug}/{path}`, { list: undefined }),
+    new ResourceTemplate(`vault://grove/{path}`, { list: undefined }),
     async (uri, { path }) => ({
       contents: [{
         uri: uri.href,
@@ -1007,12 +792,10 @@ Modes:
   return server;
 }
 
-// ── Diagnostics: orphans, broken links, missing frontmatter ───────
+// ── Diagnostics ──────────────────────────────────────────────────────
 
 async function runDiagnostics() {
   const notes = listNotes(VAULT_PATH, "*", { includeAliases: true });
-  const noteNames = new Set(notes.map((n) => n.name.toLowerCase()));
-  const notePaths = new Set(notes.map((n) => n.path));
 
   const issues: { orphans: string[]; broken_links: string[]; missing_frontmatter: string[]; stale_inbox: string[] } = {
     orphans: [],
@@ -1026,23 +809,17 @@ async function runDiagnostics() {
   const isEntity = (p: string) => entityPaths.some((f) => p.startsWith(f));
   const isDefault = (p: string) => p.startsWith(defaultFolder);
 
-  // Build link graph
   const incomingLinks = new Map<string, number>();
   for (const note of notes) incomingLinks.set(note.path, 0);
 
   for (const note of notes) {
     const abs = join(VAULT_PATH, note.path);
     let raw: string;
-    try { raw = readFileSync(abs, "utf-8"); } catch {
-      // File may have been deleted between listing and reading — skip
-      continue;
-    }
+    try { raw = readFileSync(abs, "utf-8"); } catch { continue; }
 
-    // Extract wikilinks
     const links = [...raw.matchAll(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g)].map((m) => m[1]);
     for (const link of links) {
       const target = link.toLowerCase();
-      // Check if target exists
       const found = notes.find((n) => n.name.toLowerCase() === target || n.aliases?.some((a) => a.toLowerCase() === target));
       if (found) {
         incomingLinks.set(found.path, (incomingLinks.get(found.path) ?? 0) + 1);
@@ -1051,20 +828,17 @@ async function runDiagnostics() {
       }
     }
 
-    // Missing frontmatter (entity notes only)
     if (isEntity(note.path) && !note.type) {
       issues.missing_frontmatter.push(note.path);
     }
   }
 
-  // Orphans: entity notes with zero incoming links
   for (const note of notes) {
     if (isEntity(note.path) && (incomingLinks.get(note.path) ?? 0) === 0) {
       issues.orphans.push(note.path);
     }
   }
 
-  // Stale inbox: files in the default-capture folder older than 7 days
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   for (const note of notes) {
     if (isDefault(note.path) && new Date(note.modified_at).getTime() < sevenDaysAgo) {
@@ -1086,11 +860,30 @@ async function runDiagnostics() {
   };
 }
 
-// ── HTTP server with session management ───────────────────────────
+// ── Bearer-token auth ─────────────────────────────────────────────────
+
+const AUTH_MODE = process.env.GROVE_AUTH ?? "bearer";
+const API_KEY = process.env.GROVE_API_KEY ?? "";
+
+function checkAuth(req: IncomingMessage): { ok: true } | { ok: false; status: number; reason: string } {
+  if (AUTH_MODE === "none") return { ok: true };
+  if (!API_KEY) {
+    return { ok: false, status: 503, reason: "GROVE_API_KEY not set (or set GROVE_AUTH=none for local dev)" };
+  }
+  const auth = req.headers.authorization;
+  if (!auth) return { ok: false, status: 401, reason: "missing Authorization" };
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!m) return { ok: false, status: 401, reason: "Authorization must be Bearer <token>" };
+  const presented = Buffer.from(m[1]!.trim());
+  const configured = Buffer.from(API_KEY);
+  if (presented.length !== configured.length) return { ok: false, status: 401, reason: "invalid token" };
+  if (!timingSafeEqual(presented, configured)) return { ok: false, status: 401, reason: "invalid token" };
+  return { ok: true };
+}
+
+// ── HTTP server with session management ───────────────────────────────
 
 const sessions = new Map<string, StreamableHTTPServerTransport>();
-const sessionTrails = new Map<string, TrailConfig>(); // trail config per session
-let activeTrail: TrailConfig | null = null; // current request's trail (set before tool execution)
 
 async function createSession(): Promise<StreamableHTTPServerTransport> {
   const transport = new StreamableHTTPServerTransport({
@@ -1129,59 +922,26 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-// P8-A3: pinned vault id for this grove-server process. Set by PM2 from
-// the generated ecosystem.config.cjs. When unset, any X-Grove-Vault-Id
-// header is accepted (single-vault legacy mode); when set, the backend
-// refuses requests whose header doesn't match. Defense-in-depth alongside
-// the proxy's routing decision.
-const GROVE_VAULT_ID = process.env.GROVE_VAULT_ID ?? null;
-
 const httpServer = createServer(async (req, res) => {
-  // Read audit: log every request with correlation ID from proxy
   const requestId = req.headers["x-request-id"] as string | undefined;
   if (requestId) {
     auditRead(requestId, "server", "grove-server", req.method ?? "GET", { url: req.url });
   }
 
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id, x-request-id, x-grove-vault-id");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id, x-request-id");
   res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  // Health — unauthenticated, no vault_id enforcement (deploy workflow polls this)
+  // Health — unauthenticated.
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, server: "grove" }));
     return;
   }
 
-  // P8-A3: backend self-authentication. Pm2 spawns one grove-server per
-  // vault, each with GROVE_VAULT_ID pinned. If the proxy routes a request
-  // here whose token is bound to a different vault, reject with 403. The
-  // single-vault legacy setup doesn't set GROVE_VAULT_ID, so the check
-  // no-ops there.
-  if (GROVE_VAULT_ID) {
-    const headerVaultId = req.headers["x-grove-vault-id"] as string | undefined;
-    // /internal/* is discovery trigger from git post-commit hooks — we trust
-    // localhost callers there (same process group). Everything else must carry
-    // the header.
-    if (!req.url?.startsWith("/internal/")) {
-      if (!headerVaultId) {
-        res.writeHead(403, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "missing X-Grove-Vault-Id" }));
-        return;
-      }
-      if (headerVaultId !== GROVE_VAULT_ID) {
-        res.writeHead(403, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "vault mismatch" }));
-        return;
-      }
-    }
-  }
-
-  // Discovery trigger — called by git post-commit hook
+  // Discovery trigger — called by git post-commit hook (localhost only by convention).
   if (req.url?.startsWith("/internal/discovery-trigger")) {
     const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
     const path = url.searchParams.get("path");
@@ -1201,10 +961,7 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
-  // V3 §C: post-sync warm-up. Bearer-gated; called once per cron tick by
-  // post-sync-discover.sh after the per-path discovery loop. Pre-warms
-  // note_blame for the (file-changed ∪ stamp-touched) paths in the new
-  // commit range so the next user query hits a hot cache row.
+  // Post-sync warm-up. Bearer-gated via GROVE_INTERNAL_TOKEN.
   if (req.url === "/internal/post-sync-warmup" || req.url?.startsWith("/internal/post-sync-warmup?")) {
     if (req.method !== "POST") {
       res.writeHead(405, { "Content-Type": "application/json", "Allow": "POST" });
@@ -1243,10 +1000,6 @@ const httpServer = createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(formatWarmupResponse(result)));
     } catch (err) {
-      // postSyncWarmup is best-effort and never throws by contract, but
-      // belt-and-suspenders here so an upstream regression surfaces as
-      // a 500 (with the message echoed for ops debugging) instead of
-      // an unhandled rejection that crashes the worker.
       const message = (err as Error)?.message ?? String(err);
       console.error(`[grove] post-sync-warmup handler crashed: ${message}`);
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -1256,23 +1009,15 @@ const httpServer = createServer(async (req, res) => {
   }
 
   // MCP endpoint
-  if (req.url === "/" || req.url === "/mcp") {
+  if (req.url === "/" || req.url === "/mcp" || req.url?.startsWith("/mcp?")) {
+    const authCheck = checkAuth(req);
+    if (!authCheck.ok) {
+      res.writeHead(authCheck.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: authCheck.reason }));
+      return;
+    }
+
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-    // Set active trail from proxy headers (trail resolution happens per-request)
-    const trailConfigHeader = req.headers["x-trail-config"] as string | undefined;
-    if (trailConfigHeader) {
-      try { activeTrail = JSON.parse(trailConfigHeader); } catch { activeTrail = null; }
-    } else {
-      activeTrail = null;
-    }
-
-    // Store trail config per session for SSE reconnects
-    if (activeTrail && sessionId) {
-      sessionTrails.set(sessionId, activeTrail);
-    } else if (sessionId && sessionTrails.has(sessionId)) {
-      activeTrail = sessionTrails.get(sessionId)!;
-    }
 
     if (req.method === "POST") {
       const body = await readBody(req);
@@ -1284,7 +1029,6 @@ const httpServer = createServer(async (req, res) => {
       if (sessionId && sessions.has(sessionId)) {
         transport = sessions.get(sessionId)!;
       } else if (!sessionId) {
-        // New session — create transport + server
         transport = await createSession();
       } else {
         res.writeHead(400, { "Content-Type": "application/json" });
@@ -1292,13 +1036,11 @@ const httpServer = createServer(async (req, res) => {
         return;
       }
 
-      // StreamableHTTPServerTransport.handleRequest takes Node req/res directly
       await transport.handleRequest(req, res, parsed);
       return;
     }
 
     if (req.method === "GET") {
-      // SSE — pass to transport if session exists
       if (sessionId && sessions.has(sessionId)) {
         const transport = sessions.get(sessionId)!;
         await transport.handleRequest(req, res);
@@ -1321,12 +1063,11 @@ const httpServer = createServer(async (req, res) => {
   res.end("Not found");
 });
 
-// ── Startup ───────────────────────────────────────────────────────
+// ── Startup ───────────────────────────────────────────────────────────
 
 async function start() {
   console.log(`[grove] vault: ${VAULT_PATH}`);
 
-  // Initialize SQLite database and migrate from JSON if needed
   runMigration();
 
   try {
@@ -1335,35 +1076,24 @@ async function start() {
     console.warn("[grove] startup recovery failed:", (err as Error).message);
   }
 
-  // Warm the stats cache from disk so the MCP `vault_status` cold-path
-  // doesn't fall through to a live analyzeGraph() in the boot window
-  // before the first refresh completes.
   warmStatsFromDisk([VAULT_PATH]);
-
-  // Start background stats computation (every 5 min)
   startStatsTimer(VAULT_PATH);
   console.log("[grove] stats timer started (5 min interval)");
 
   httpServer.listen(PORT, "127.0.0.1", () => {
     console.log(`[grove] MCP server listening on http://127.0.0.1:${PORT}`);
     console.log(`[grove] 6 tools registered: query, get, multi_get, write_note, list_notes, vault_status`);
+    if (AUTH_MODE === "none") console.log("[grove] auth DISABLED (GROVE_AUTH=none)");
   });
 }
 
-start().catch(console.error);
+// Only auto-start when executed as the entry point (not when imported by tests).
+if (process.argv[1]?.endsWith("/server.ts") || process.argv[1]?.endsWith("/server.js")) {
+  start().catch(console.error);
+}
 
-// ── Graceful shutdown (P8-A5) ────────────────────────────────────
-//
-// Handle SIGTERM (pm2 stop), SIGUSR2 (pm2 reload), SIGINT (^C). Order:
-//   1. stop accepting new HTTP connections (existing requests continue)
-//   2. drain the write queue so no git mutation is left in flight
-//   3. verify git tree is clean post-drain
-//   4. exit 0 (or 1 on error / hard-timeout after 60s)
-//
-// 60s matches the deploy workflow's health-poll window (12 × 5s), which
-// is the longest the VPS is willing to wait before rolling back. If we
-// can't drain in that window something's stuck — exit 1 so pm2 fails
-// loudly rather than trapping the deploy.
+// ── Graceful shutdown ─────────────────────────────────────────────────
+
 let shuttingDown = false;
 
 async function gracefulShutdown(signal: string): Promise<void> {
@@ -1382,19 +1112,6 @@ async function gracefulShutdown(signal: string): Promise<void> {
       if (err) console.error(`[grove] httpServer.close: ${err.message}`);
     });
     await flushWriteQueue();
-
-    try {
-      const { execSync } = await import("node:child_process");
-      const status = execSync(`git status --porcelain`, {
-        cwd: VAULT_PATH,
-        encoding: "utf8",
-      });
-      if (status.trim()) {
-        console.warn(`[grove] git not clean at shutdown:\n${status}`);
-      }
-    } catch (err) {
-      console.warn(`[grove] git status check failed: ${(err as Error).message}`);
-    }
 
     clearTimeout(hardExit);
     console.log(`[grove] shutdown complete`);

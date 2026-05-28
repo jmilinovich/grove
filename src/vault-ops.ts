@@ -4,15 +4,8 @@
 
 import { execFile } from "node:child_process";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, relative, basename, resolve as resolvePath } from "node:path";
+import { join, relative, basename } from "node:path";
 import { parse as yamlParse } from "yaml";
-import {
-  decryptContent,
-  encryptContent,
-  getVaultKey,
-  isEncrypted,
-} from "./crypto.js";
-import { appendDecisionTrailers } from "./provenance.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -34,60 +27,19 @@ export interface NoteEntry {
   modified_at: string;
 }
 
-// ── Transparent encryption ──────────────────────────────────────────
-//
-// When a vault has an unlocked key in the crypto registry, all reads go
-// through `readNoteFile` (which decrypts) and all writes go through
-// `writeNoteFile` (which encrypts). Files with no matching key, or files on
-// disk that don't carry the encryption header, pass through as plaintext so
-// mixed vaults migrate one write at a time.
-
-/** Resolve the vault key for an arbitrary path inside the vault. */
-function vaultKeyForPath(absPath: string): Buffer | null {
-  const canonical = resolvePath(absPath);
-  for (const candidate of keyLookupCandidates(canonical)) {
-    const key = getVaultKey(candidate);
-    if (key) return key;
-  }
-  return null;
-}
-
-function* keyLookupCandidates(absPath: string): Generator<string> {
-  // Walk up the path; match the deepest registered vault root.
-  let current = absPath;
-  while (current && current !== "/" && current !== ".") {
-    yield current;
-    const next = current.slice(0, current.lastIndexOf("/"));
-    if (next === current) break;
-    current = next || "/";
-  }
-}
-
-/** Read a vault file, decrypting transparently if the file is encrypted. */
+/** Read a vault file. */
 export function readNoteFile(absPath: string): string {
-  const raw = readFileSync(absPath, "utf-8");
-  if (!isEncrypted(raw)) return raw;
-  const key = vaultKeyForPath(absPath);
-  if (!key) {
-    throw new Error(
-      `[vault-ops] cannot read ${absPath}: file is encrypted but vault is locked`,
-    );
-  }
-  return decryptContent(raw, key);
+  return readFileSync(absPath, "utf-8");
 }
 
-/** Write a vault file, encrypting transparently when a vault key is set. */
+/** Write a vault file. */
 export function writeNoteFile(absPath: string, content: string): void {
-  const key = vaultKeyForPath(absPath);
-  const payload = key ? encryptContent(content, key) : content;
-  writeFileSync(absPath, payload, "utf-8");
+  writeFileSync(absPath, content, "utf-8");
 }
 
 // ── Frontmatter cache ────────────────────────────────────────────────
-// Parsing frontmatter out of encrypted files means decrypting each file on
-// every `listNotes` call — expensive on large vaults. Cache the parsed
-// frontmatter keyed by absolute path + mtime, so listNotes only pays the
-// decryption cost for notes that changed since the last listing.
+// Cache the parsed frontmatter keyed by absolute path + mtime so listNotes
+// only pays the parse cost for notes that changed since the last listing.
 
 interface CachedFm {
   mtimeMs: number;
@@ -187,35 +139,24 @@ export async function gitCommit(
   vaultPath: string,
   filePath: string,
   message: string,
-  decisionIds: readonly string[] = [],
 ): Promise<string> {
   await exec("git", ["add", filePath], vaultPath);
-  const finalMessage = appendDecisionTrailers(message, decisionIds);
-  await exec("git", ["commit", "-m", finalMessage], vaultPath);
+  await exec("git", ["commit", "-m", message], vaultPath);
   const sha = await exec("git", ["rev-parse", "HEAD"], vaultPath);
   return sha.trim();
 }
 
-/**
- * Commit a set of already-staged-or-to-be-added paths in a single commit.
- *
- * `decisionIds` (S-INBOX-3): optional list of Inbox v2 decision ids whose
- * `Decision-Id:` trailers should land on this commit alongside the
- * provenance trailers in `message`. Defaults to empty so existing callers
- * are unaffected.
- */
+/** Commit a set of already-staged-or-to-be-added paths in a single commit. */
 export async function gitCommitPaths(
   vaultPath: string,
   paths: string[],
   message: string,
-  decisionIds: readonly string[] = [],
 ): Promise<string> {
   if (paths.length > 0) {
     // `git add` handles both new/modified files and deletions (via -A on the path).
     await exec("git", ["add", "-A", "--", ...paths], vaultPath);
   }
-  const finalMessage = appendDecisionTrailers(message, decisionIds);
-  await exec("git", ["commit", "-m", finalMessage], vaultPath);
+  await exec("git", ["commit", "-m", message], vaultPath);
   const sha = await exec("git", ["rev-parse", "HEAD"], vaultPath);
   return sha.trim();
 }
@@ -560,35 +501,11 @@ function getFrontmatter(absPath: string, stat: { mtimeMs: number; size: number }
     return cached.fm;
   }
 
-  // Encrypted files have no reliable "head slice" — base64-decode first.
-  const raw = readFileSync(absPath, "utf-8");
-  let head: string;
   // 16 KB is generous for frontmatter (even long ocr_text blocks fit) while
   // staying well short of the body so a stray `\n---` horizontal rule can't
-  // be mistaken for the closing delimiter. Older limit of 500 truncated
-  // frontmatters of image notes that include multi-line ocr_text fields.
+  // be mistaken for the closing delimiter.
   const HEAD_LIMIT = 16_384;
-  if (isEncrypted(raw)) {
-    const key = vaultKeyForPath(absPath);
-    if (!key) {
-      // Locked — can't parse frontmatter. Return empty so listing still works.
-      const fm: ParsedFrontmatter = { type: null };
-      frontmatterCache.set(absPath, { mtimeMs: stat.mtimeMs, size: stat.size, fm });
-      return fm;
-    }
-    try {
-      head = decryptContent(raw, key).slice(0, HEAD_LIMIT);
-    } catch {
-      // Wrong key (e.g. mixed-key test fixtures, or a file left over from a
-      // previous vault key). Don't fail the whole listing — just skip this
-      // note's metadata.
-      const fm: ParsedFrontmatter = { type: null };
-      frontmatterCache.set(absPath, { mtimeMs: stat.mtimeMs, size: stat.size, fm });
-      return fm;
-    }
-  } else {
-    head = raw.slice(0, HEAD_LIMIT);
-  }
+  const head = readFileSync(absPath, "utf-8").slice(0, HEAD_LIMIT);
   const fm = parseFrontmatter(head);
   frontmatterCache.set(absPath, { mtimeMs: stat.mtimeMs, size: stat.size, fm });
   return fm;

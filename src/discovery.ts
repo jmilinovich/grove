@@ -24,7 +24,6 @@ import {
 import { extractFromNote } from "./discovery-extract.js";
 import { wireLinks } from "./discovery-link.js";
 import { embedFile } from "./embed-single.js";
-import { enrichImageNote } from "./image-enrich.js";
 import {
   pollBatches,
   recoverStaleBatched,
@@ -34,8 +33,6 @@ import {
 const DEFAULT_POLL_MS = 2_000;
 /** Max attempts before an embed_retry entry is abandoned as errored. */
 const MAX_EMBED_RETRY_ATTEMPTS = 5;
-/** Max attempts before an image_enrich entry is abandoned. */
-const MAX_ENRICH_ATTEMPTS = 5;
 
 export type Processor = (entry: DiscoveryQueueEntry) => Promise<void>;
 
@@ -43,30 +40,12 @@ function getVaultPath(): string {
   return process.env.GROVE_VAULT ?? join(homedir(), "life");
 }
 
-/**
- * Each discovery worker is pinned to exactly one vault via PM2's per-vault
- * `GROVE_VAULT_ID`. We require the env var in the worker path because a
- * missing ID would cause the loop to drain another vault's queue — a
- * cross-vault data leak. Test harnesses can set the env var explicitly.
- */
-function getVaultId(): string {
-  return process.env.GROVE_VAULT_ID ?? "vault_00000000";
-}
-
 /** Default processor — extracts entities and wires wikilinks. */
 const defaultProcessor: Processor = async (entry) => {
   const vaultPath = getVaultPath();
-  // Build a per-process VaultContext for the rest.ts entry points the
-  // processor calls into. The discovery worker is pinned to one vault per
-  // PM2 process, so this context is stable for the worker's lifetime.
-  const ctx = {
-    vaultPath,
-    vaultId: getVaultId(),
-    vaultSlug: process.env.GROVE_VAULT_SLUG ?? "personal",
-  };
 
-  // Embed-retry entries skip entity extraction; they just re-run the
-  // embed step for a note whose fire-and-forget embed failed earlier.
+  // Embed-retry entries skip entity extraction; they just re-run the embed
+  // step for a note whose fire-and-forget embed failed earlier.
   if (entry.trigger === "embed_retry") {
     if (entry.attempts > MAX_EMBED_RETRY_ATTEMPTS) {
       throw new Error(
@@ -79,35 +58,9 @@ const defaultProcessor: Processor = async (entry) => {
     return;
   }
 
-  // Image enrichment: fetch the uploaded image from R2, run Claude Vision
-  // for description + tags + OCR, rewrite the stub note. Skips entity
-  // extraction since that runs again on the subsequent write's own
-  // 'write' queue entry.
-  if (entry.trigger === "image_enrich") {
-    if (entry.attempts > MAX_ENRICH_ATTEMPTS) {
-      throw new Error(
-        `image enrich abandoned after ${entry.attempts} attempts for ${entry.path}`,
-      );
-    }
-    console.log(`[discovery] image enrich (attempt ${entry.attempts}) for ${entry.path}`);
-    const result = await enrichImageNote(ctx, entry.path);
-    if (result.skipped) {
-      console.log(`[discovery] image enrich skipped (already enriched): ${entry.path}`);
-    } else {
-      console.log(
-        `[discovery] image enrich succeeded: +${result.tags_added} tags, ` +
-        `${result.description_length}ch description — ${entry.path}`,
-      );
-    }
-    return;
-  }
-
   console.log(`[discovery] processing ${entry.path}`);
 
-  // Extract entities via Claude API. `ctx.vaultId` is required so the
-  // content-hash cache scopes per-vault (cross-vault leak otherwise — two
-  // vaults sharing a note path + bytes would read each other's results).
-  const extraction = await extractFromNote(vaultPath, entry.path, ctx.vaultId);
+  const extraction = await extractFromNote(vaultPath, entry.path);
   console.log(
     `[discovery] extracted ${extraction.entities.length} entities, ` +
     `${extraction.suggested_links.length} links, ` +
@@ -128,23 +81,21 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 /**
  * Start the discovery polling loop.
  *
- * @param processor  Function called for each dequeued entry (default: log-only)
+ * @param processor  Function called for each dequeued entry (default: extract→link)
  * @param pollMs     Polling interval in ms (default: 2000)
- * @param vaultId    Vault id to scope dequeues to (default: $GROVE_VAULT_ID)
  */
 export function startDiscoveryLoop(
   processor: Processor = defaultProcessor,
   pollMs: number = DEFAULT_POLL_MS,
-  vaultId: string = getVaultId(),
 ): void {
   if (running) return;
   running = true;
-  const recovered = recoverOrphanedDiscoveryProcessing(vaultId);
+  const recovered = recoverOrphanedDiscoveryProcessing();
   if (recovered > 0) {
     console.log(`[discovery] recovered ${recovered} orphaned 'processing' row(s) from prior worker exit`);
   }
-  console.log(`[discovery] loop started (poll every ${pollMs}ms, vault_id=${vaultId})`);
-  scheduleTick(processor, pollMs, vaultId);
+  console.log(`[discovery] loop started (poll every ${pollMs}ms)`);
+  scheduleTick(processor, pollMs);
 }
 
 /** Stop the discovery loop. */
@@ -157,33 +108,28 @@ export function stopDiscoveryLoop(): void {
   console.log("[discovery] loop stopped");
 }
 
-// P7-COST-1 daily-cap state: per-vault timestamp of the last "cap reached"
-// log so we don't spam logs every 2s once the cap is hit. Process-local;
-// resets on worker restart, which is fine — the cap itself is enforced by
-// counting `discovery_queue` rows, not by in-memory state.
-const lastCapLogAt = new Map<string, number>();
+// Timestamp of the last "cap reached" log so we don't spam every 2s once
+// the cap fires.
+let lastCapLogAt = 0;
 
 /**
- * Hard daily extraction cap per vault. Returns true when the cap has been
- * reached and the caller should treat the tick as a no-op. Reads
- * `GROVE_DISCOVERY_DAILY_CAP` on every call so live env changes take effect
- * without a restart. Defaults to 100; set to 0 (or any non-positive number)
- * to disable.
+ * Hard daily extraction cap. Returns true when the cap is reached and the
+ * caller should treat the tick as a no-op. Reads `GROVE_DISCOVERY_DAILY_CAP`
+ * on every call so env changes take effect without a restart. Defaults to
+ * 100; set to 0 (or any non-positive number) to disable.
  */
-function checkDailyCap(vaultId: string): boolean {
+function checkDailyCap(): boolean {
   const raw = process.env.GROVE_DISCOVERY_DAILY_CAP;
   const cap = raw === undefined ? 100 : Number.parseInt(raw, 10);
   if (!Number.isFinite(cap) || cap <= 0) return false;
-  const today = countTodayProcessed(vaultId);
+  const today = countTodayProcessed();
   if (today < cap) return false;
   const now = Date.now();
-  const lastLog = lastCapLogAt.get(vaultId) ?? 0;
-  if (now - lastLog > 60_000) {
+  if (now - lastCapLogAt > 60_000) {
     console.warn(
-      `[discovery] daily cap of ${cap} reached for vault_id=${vaultId} ` +
-        `(today=${today}); deferring further extractions until UTC midnight`,
+      `[discovery] daily cap of ${cap} reached (today=${today}); deferring until UTC midnight`,
     );
-    lastCapLogAt.set(vaultId, now);
+    lastCapLogAt = now;
   }
   return true;
 }
@@ -191,15 +137,12 @@ function checkDailyCap(vaultId: string): boolean {
 /** Exposed for testing — process a single queue tick synchronously. */
 export async function tick(
   processor: Processor = defaultProcessor,
-  vaultId: string = getVaultId(),
 ): Promise<boolean> {
-  if (checkDailyCap(vaultId)) return false;
-  // P7-COST-5: urgent drain skips `trigger='commit'` rows so they
-  // route through the batch path. Pre-existing callers that test
-  // generic queue draining still work because every other trigger
-  // (`write`, `image_enrich`, `embed_retry`, `ingest`) passes the
-  // urgent filter.
-  const entry = dequeueDiscoveryUrgent(vaultId);
+  if (checkDailyCap()) return false;
+  // Urgent drain skips `trigger='commit'` rows so they route through the
+  // batch path. Every other trigger (`write`, `embed_retry`, `ingest`)
+  // passes the urgent filter.
+  const entry = dequeueDiscoveryUrgent();
   if (!entry) return false;
 
   try {
@@ -232,49 +175,41 @@ export async function tick(
  */
 export async function runDiscoveryCycle(
   processor: Processor = defaultProcessor,
-  vaultId: string = getVaultId(),
 ): Promise<void> {
   const vaultPath = getVaultPath();
 
-  // Phase B — poll open batches; resolve any that have ended.
   try {
-    await pollBatches(vaultPath, vaultId);
+    await pollBatches(vaultPath);
   } catch (err) {
     console.error("[discovery] phase B (poll) failed:", err);
   }
 
-  // Backstop — reclaim rows stuck in 'batched' past the max age.
   try {
-    recoverStaleBatched(vaultId);
+    recoverStaleBatched();
   } catch (err) {
     console.error("[discovery] stale-batched recovery failed:", err);
   }
 
-  // Urgent drain — only non-commit triggers reach this loop. We don't
-  // gate on `running` here so the test harness can call this directly
-  // (and so a stopDiscoveryLoop mid-cycle still finishes the row it's
-  // currently working on rather than orphaning it).
   while (true) {
-    const processed = await tick(processor, vaultId);
+    const processed = await tick(processor);
     if (!processed) break;
   }
 
-  // Phase A — submit one batch of commit-eligible rows.
   try {
-    await submitBatchTick(vaultPath, vaultId);
+    await submitBatchTick(vaultPath);
   } catch (err) {
     console.error("[discovery] phase A (submit) failed:", err);
   }
 }
 
-function scheduleTick(processor: Processor, pollMs: number, vaultId: string): void {
+function scheduleTick(processor: Processor, pollMs: number): void {
   if (!running) return;
   timer = setTimeout(async () => {
     try {
-      await runDiscoveryCycle(processor, vaultId);
+      await runDiscoveryCycle(processor);
     } catch (err) {
       console.error("[discovery] unexpected loop error:", err);
     }
-    scheduleTick(processor, pollMs, vaultId);
+    scheduleTick(processor, pollMs);
   }, pollMs);
 }

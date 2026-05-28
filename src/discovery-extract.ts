@@ -552,21 +552,14 @@ export async function extractEntities(
  * Low-confidence entities (< 0.5) are logged but included in the result
  * for the caller to decide what to do with.
  *
- * **P7-COST-3 content-hash cache.** Before calling Anthropic we look up
- * `discovery_cache` keyed on (vaultId, notePath, sha256(content),
- * DISCOVERY_CACHE_VERSION). On hit, the previous extraction is returned
- * verbatim and no LLM tokens are spent. On miss we extract, then INSERT OR
- * REPLACE the row so the next identical-content call short-circuits.
- * Failures throw before the put, so the cache never stores bad results.
- *
- * `vaultId` is required for cache scoping. Cross-vault entries with the
- * same path + content cache independently — without this, a second vault
- * could read a stale extraction made under a different vault's vocabulary.
+ * Content-hash cache: keyed on (notePath, sha256(content),
+ * DISCOVERY_CACHE_VERSION). Identical-content extractions short-circuit
+ * the Anthropic call. Failures throw before the put, so the cache never
+ * stores bad results.
  */
 export async function extractFromNote(
   vaultPath: string,
   notePath: string,
-  vaultId: string,
   config?: VaultConfig,
 ): Promise<ExtractionResult> {
   const cfg = config ?? loadVaultConfig(vaultPath);
@@ -575,7 +568,6 @@ export async function extractFromNote(
 
   const contentSha256 = createHash("sha256").update(content).digest("hex");
   const cached = getCachedExtraction(
-    vaultId,
     notePath,
     contentSha256,
     DISCOVERY_CACHE_VERSION,
@@ -598,7 +590,6 @@ export async function extractFromNote(
   // Only cache on success — failed extractions throw above this point,
   // so a half-baked result never lands in the cache.
   putCachedExtraction(
-    vaultId,
     notePath,
     contentSha256,
     DISCOVERY_CACHE_VERSION,

@@ -70,10 +70,9 @@ describe("handleWriteNote", () => {
     expect(result.action).toBe("create");
     expect(result.content_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(result.commit).toBe("abc123");
-    // Post-P20: URLs are canonical /@<handle>/<slug>/... form — the
-    // slug lets multi-vault users follow a write response back into
-    // the exact vault that was written.
-    expect(result.url).toMatch(/^https:\/\/grove\.md\/@[a-z0-9][a-z0-9_-]*\/[a-z0-9][a-z0-9_-]*\/Inbox\/test-note$/);
+    // Single-user, single-vault URL form. Default is `grove://vault/...`;
+    // overridable via `GROVE_PUBLIC_BASE_URL`.
+    expect(result.url).toMatch(/^grove:\/\/vault\/Inbox\/test-note$/);
 
     // Verify the file was actually written
     const written = readFileSync(join(tempVault, "Inbox/test-note.md"), "utf-8");
@@ -158,34 +157,6 @@ describe("handleWriteNote", () => {
     }
   });
 
-  it("throws TRAIL_DENIED when trail disallows the path", async () => {
-    const { handleWriteNote } = await loadRest();
-
-    const trail = {
-      id: "t1",
-      name: "restricted",
-      allow_paths: ["Resources/Concepts/"],
-      deny_paths: [],
-      allow_tags: [],
-      deny_tags: [],
-      allow_types: [],
-      deny_types: [],
-      rate_limit_reads: 100,
-      rate_limit_writes: 10,
-    };
-
-    try {
-      await handleWriteNote(defaultVaultContext(), 
-        "Journal/2026/2026-04-13.md",
-        { type: "journal", tags: ["journal"], date: "2026-04-13" },
-        "content",
-        { trail },
-      );
-      expect.unreachable("should have thrown");
-    } catch (err: any) {
-      expect(err.code).toBe("TRAIL_DENIED");
-    }
-  });
 
   it("creates parent directories when they don't exist", async () => {
     const { handleWriteNote } = await loadRest();

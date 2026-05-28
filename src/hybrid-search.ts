@@ -11,13 +11,16 @@ import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
 import { searchMetrics, searchQualityMetrics } from "./metrics.js";
-import { assertUnlocked, indexWorkingPath } from "./index-crypto.js";
 import { getNoteVoicesAndAges } from "./db.js";
-import { priorVoice } from "./provenance-prior.js";
 import {
   PERISHABLE_USAGE_DIRECTIVE,
   PERISHABLE_USAGE_DIRECTIVE_SOFT,
 } from "./provenance.js";
+
+/** Default QMD index location (overrideable via GROVE_QMD_INDEX env). */
+function qmdIndexPath(): string {
+  return process.env.GROVE_QMD_INDEX ?? `${homedir()}/.cache/qmd/index.sqlite`;
+}
 
 const VOYAGE_API_KEY = process.env.VOYAGE_API_KEY ?? "";
 const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4-large";
@@ -330,7 +333,6 @@ export function getAliasIndex(): Map<string, AliasIndexEntry> {
 let _db: InstanceType<typeof Database> | null = null;
 
 function getDb(): InstanceType<typeof Database> {
-  assertUnlocked();
   if (_db) return _db;
 
   const vec0Paths = [
@@ -354,7 +356,7 @@ function getDb(): InstanceType<typeof Database> {
     throw new Error("sqlite-vec vec0 extension not found");
   }
 
-  const db = new Database(indexWorkingPath(), { readonly: true });
+  const db = new Database(qmdIndexPath(), { readonly: true });
   db.loadExtension(vec0Path);
   _db = db;
   return db;
@@ -630,20 +632,9 @@ function applyProvenanceReweight(
     let directive: string | undefined;
 
     if (!meta) {
-      // Legacy-unknown without cached blame → §E covariate prior.
-      const prior = priorVoice({
-        path: r.vault_path,
-        ageDays: 0,
-        frontmatterTags: [],
-        bodyText: "",
-      });
-      factor =
-        prior.p_durable * PROV_DURABLE_FACTOR +
-        prior.p_perishable * perishableFactor(0);
+      // No cached blame — treat as legacy-unknown with neutral weighting.
+      factor = 1.0;
       voice = "legacy-unknown";
-      if (prior.p_perishable >= SOFT_DIRECTIVE_THRESHOLD) {
-        directive = PERISHABLE_USAGE_DIRECTIVE_SOFT;
-      }
     } else if (meta.voice === "durable") {
       factor = PROV_DURABLE_FACTOR;
       voice = "durable";
@@ -654,21 +645,10 @@ function applyProvenanceReweight(
       written_at = meta.written_at;
       directive = PERISHABLE_USAGE_DIRECTIVE;
     } else {
-      // Stamped legacy-unknown (rare) — soft prior fallback as above.
-      const prior = priorVoice({
-        path: r.vault_path,
-        ageDays,
-        frontmatterTags: [],
-        bodyText: "",
-      });
-      factor =
-        prior.p_durable * PROV_DURABLE_FACTOR +
-        prior.p_perishable * perishableFactor(ageDays);
+      // Stamped legacy-unknown — neutral; reader sees the unknown voice.
+      factor = 1.0;
       voice = "legacy-unknown";
       written_at = meta.written_at;
-      if (prior.p_perishable >= SOFT_DIRECTIVE_THRESHOLD) {
-        directive = PERISHABLE_USAGE_DIRECTIVE_SOFT;
-      }
     }
 
     return {
@@ -732,7 +712,6 @@ export async function hybridSearch(
   collection?: string,
   mode: SearchMode = "hybrid",
 ): Promise<HybridResult[]> {
-  assertUnlocked();
   const searchStart = Date.now();
   const oversample = Math.min(limit * 5, 50);
 
@@ -859,22 +838,16 @@ export async function hybridSearch(
 export function formatResults(
   results: HybridResult[],
   resolveRealPath?: (vaultPath: string, title: string) => string,
-  handle?: string,
-  vaultSlug?: string,
 ): string {
   if (results.length === 0) return "No results found.";
-  const base = process.env.GROVE_PUBLIC_BASE_URL ?? "https://grove.md";
-  const slugSegment = handle && vaultSlug ? `/${vaultSlug}` : "";
-  const scope = handle ? `/@${handle}${slugSegment}` : "";
+  const base = process.env.GROVE_PUBLIC_BASE_URL ?? "grove://vault";
   return results
     .map(
       (r) => {
         const displayPath = resolveRealPath ? resolveRealPath(r.vault_path, r.title) : r.vault_path;
         const encodedPath = displayPath.replace(/\.md$/, "").split("/").map(encodeURIComponent).join("/");
-        const url = `${base}${scope}/${encodedPath}`;
+        const url = `${base}/${encodedPath}`;
         const thumb = r.thumbnail_url ? `\n![thumbnail](${r.thumbnail_url})` : "";
-        // V3 §D — surface voice + written_at + usage_directive when reweight emitted them.
-        // Absent on every result when GROVE_PROV_RANKING_ENABLED is off (dark-launch default).
         const voiceTag = r.voice ? `\n_voice: ${r.voice}${r.written_at ? `, written ${r.written_at}` : ""}_` : "";
         const directive = r.usage_directive ? `\n> ${r.usage_directive}` : "";
         return `**${r.title}** (${url})${thumb}\n${r.snippet ?? ""}${voiceTag}${directive}`;
@@ -884,4 +857,3 @@ export function formatResults(
 }
 
 export { embedQuery, bm25Search, vectorSearch, titleSearch, stripWikilinks };
-export { VaultLockedError } from "./index-crypto.js";

@@ -77,11 +77,11 @@ function readMaxAgeHours(): number {
  * once you factor in token usage, but the rule is "any extraction
  * counts" so the cap is honoured uniformly).
  */
-function dailyCapRemaining(vaultId: string): number {
+function dailyCapRemaining(): number {
   const raw = process.env.GROVE_DISCOVERY_DAILY_CAP;
   const cap = raw === undefined ? 100 : Number.parseInt(raw, 10);
   if (!Number.isFinite(cap) || cap <= 0) return Number.POSITIVE_INFINITY;
-  const today = countTodayProcessed(vaultId);
+  const today = countTodayProcessed();
   return Math.max(0, cap - today);
 }
 
@@ -124,7 +124,6 @@ function headers(): Record<string, string> {
  */
 export async function submitBatch(
   vaultPath: string,
-  vaultId: string,
   rows: DiscoveryQueueEntry[],
 ): Promise<{ batch_id: string; row_count: number } | null> {
   if (rows.length === 0) return null;
@@ -183,11 +182,10 @@ export async function submitBatch(
   }
 
   markRowsBatched(includedRowIds, batchId);
-  insertDiscoveryBatch(batchId, vaultId, includedRowIds.length);
+  insertDiscoveryBatch(batchId, includedRowIds.length);
 
   console.log(
-    `[discovery-batch] submitted batch ${batchId} for vault=${vaultId} ` +
-      `with ${includedRowIds.length} rows`,
+    `[discovery-batch] submitted batch ${batchId} with ${includedRowIds.length} rows`,
   );
 
   return { batch_id: batchId, row_count: includedRowIds.length };
@@ -205,13 +203,12 @@ export async function submitBatch(
  */
 export async function submitBatchTick(
   vaultPath: string,
-  vaultId: string,
 ): Promise<number> {
-  const remaining = dailyCapRemaining(vaultId);
+  const remaining = dailyCapRemaining();
   if (remaining <= 0) return 0;
 
   const limit = Math.min(readMaxRows(), remaining);
-  const rows = claimBatchEligible(vaultId, limit);
+  const rows = claimBatchEligible(limit);
   if (rows.length === 0) return 0;
 
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -225,7 +222,7 @@ export async function submitBatchTick(
   }
 
   try {
-    const result = await submitBatch(vaultPath, vaultId, rows);
+    const result = await submitBatch(vaultPath, rows);
     return result?.row_count ?? 0;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -264,9 +261,8 @@ interface BatchResultRow {
  */
 export async function pollBatches(
   vaultPath: string,
-  vaultId: string,
 ): Promise<void> {
-  const open = listOpenBatches(vaultId);
+  const open = listOpenBatches();
   if (open.length === 0) return;
 
   for (const batch of open) {
@@ -407,13 +403,12 @@ function decodeCustomId(customId: string): number | null {
  * path picks them up. Called from the worker tick — cheap when the
  * queue is healthy (zero changed rows).
  */
-export function recoverStaleBatched(vaultId: string): number {
+export function recoverStaleBatched(): number {
   const hours = readMaxAgeHours();
-  const recovered = dbRecoverStaleBatched(vaultId, hours);
+  const recovered = dbRecoverStaleBatched(hours);
   if (recovered > 0) {
     console.warn(
-      `[discovery-batch] reclaimed ${recovered} stale batched rows ` +
-        `(older than ${hours}h) for vault_id=${vaultId} as urgent`,
+      `[discovery-batch] reclaimed ${recovered} stale batched rows (older than ${hours}h) as urgent`,
     );
   }
   return recovered;

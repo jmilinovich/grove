@@ -1,6 +1,0 @@
-{
-  "monitor_id": "4258767",
-  "heartbeat_id": "452386",
-  "heartbeat_url": "https://uptime.betterstack.com/api/v1/heartbeat/yyvRTtMqKdSPp6ZMUXfYpHJb",
-  "api_note": "API key stored in BETTERSTACK_API_KEY env var in .env, not here"
-}

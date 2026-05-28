@@ -193,74 +193,7 @@ describe("formatResults", () => {
     expect(output).not.toContain("![thumbnail]");
   });
 
-  it("scopes URLs to /@<handle>/<path> when handle is supplied without a slug (legacy single-vault)", () => {
-    const output = formatResults(
-      [
-        {
-          vault_path: "Resources/Recipes/Chicken Rice Broccoli.md",
-          title: "Chicken Rice Broccoli",
-          rrf_score: 0.9,
-          snippet: "weeknight dinner",
-          sources: ["bm25"],
-        },
-      ],
-      undefined,
-      "alice",
-    );
-    expect(output).toContain(
-      "(https://grove.md/@alice/Resources/Recipes/Chicken%20Rice%20Broccoli)",
-    );
-  });
-
-  it("scopes URLs to /@<handle>/<slug>/<path> when both handle and vaultSlug are supplied", () => {
-    // Multi-vault: URL must include the slug so the click lands in the same
-    // vault the search ran against — not whatever vault grove-www's legacy
-    // catch-all resolves from the bound session key.
-    const output = formatResults(
-      [
-        {
-          vault_path: "Resources/Concepts/Taste Graph.md",
-          title: "Taste Graph",
-          rrf_score: 0.8,
-          snippet: "graph of preferences",
-          sources: ["bm25"],
-        },
-      ],
-      undefined,
-      "alice",
-      "bravo",
-    );
-    expect(output).toContain(
-      "(https://grove.md/@alice/bravo/Resources/Concepts/Taste%20Graph)",
-    );
-    // Defensive: URL must NOT match the legacy unscoped shape so a click
-    // can't be silently routed to the wrong vault by the catch-all.
-    expect(output).not.toMatch(/\(https:\/\/grove\.md\/@alice\/Resources\//);
-  });
-
-  it("ignores vaultSlug when no handle is supplied (sanity, no slug-without-handle URL shape)", () => {
-    const output = formatResults(
-      [
-        {
-          vault_path: "a/b.md",
-          title: "Note",
-          rrf_score: 0.5,
-          snippet: "",
-          sources: ["bm25"],
-        },
-      ],
-      undefined,
-      undefined,
-      "bravo",
-    );
-    expect(output).toContain("(https://grove.md/a/b)");
-    expect(output).not.toContain("/bravo/");
-    expect(output).not.toContain("/@");
-  });
-
-  it("emits an unscoped URL only when no handle is supplied (test/legacy)", () => {
-    // Production callers in server.ts always pass a handle. This guards the
-    // fallback so unit tests don't need a DB.
+  it("formats URLs against the configured public base", () => {
     const output = formatResults([
       {
         vault_path: "a/b.md",
@@ -270,8 +203,8 @@ describe("formatResults", () => {
         sources: ["bm25"],
       },
     ]);
-    expect(output).toContain("(https://grove.md/a/b)");
-    expect(output).not.toContain("/@");
+    // Default base is `grove://vault`; configurable via GROVE_PUBLIC_BASE_URL.
+    expect(output).toContain("(grove://vault/a/b)");
   });
 
   // V3 §D — envelope additions (voice + written_at + usage_directive)

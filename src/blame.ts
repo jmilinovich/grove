@@ -22,7 +22,6 @@ import {
   type Voice,
 } from "./provenance.js";
 import { getNoteBlame, setNoteBlame } from "./db.js";
-import { lookupIdByPath } from "./vault-router.js";
 
 const execFileP = promisify(execFile);
 
@@ -79,11 +78,7 @@ export async function computeProvenanceBlame(
   }
 
   const segments = await computeFresh(vaultPath, filePath);
-  // Tag the cache row with the vault that computed it so readBlameForNote
-  // in v2-task-detail can scope reads to the correct vault (cross-vault
-  // leak fix — note_blame is a shared control-db table).
-  const vaultId = lookupIdByPath(vaultPath) ?? undefined;
-  setNoteBlame(filePath, cacheKey, JSON.stringify(segments), vaultId);
+  setNoteBlame(filePath, cacheKey, JSON.stringify(segments));
   return segments;
 }
 
@@ -214,28 +209,14 @@ export function provenanceEnabled(): boolean {
 // GROVE_REQUIRE_PROVENANCE makes provenance MANDATORY on every
 // handleWriteNote / handleWriteBatch call. When on, callers must pass
 // `options.provenance` or the write is rejected with a 400 VALIDATION
-// error. Default OFF — flip to "true" only after every caller in the
-// ecosystem has been migrated to pass provenance.
-//
-// Per-vault opt-in (added 2026-05-07): the proxy serves multiple
-// tenants under one process — flipping a single global flag would
-// affect every tenant. So provenanceRequired() also accepts a vault
-// slug; when given, it checks `GROVE_REQUIRE_PROVENANCE_<slug>` first
-// (e.g., GROVE_REQUIRE_PROVENANCE_personal=true), falling back to the
-// global flag. Per-vault servers (grove-server-<slug>) only need the
-// global flag because their process is already vault-pinned;
-// shared-process callers (grove-proxy REST endpoints) pass the slug
-// explicitly.
+// error. Default OFF — flip to "true" if you want a hard guarantee that
+// every caller is provenance-aware.
 //
 // Internal subsystems that bypass handleWriteNote (discovery worker,
 // graph-health auto-heal) write via gitCommit directly — they are NOT
-// affected by this flag. Their commits surface as legacy-unknown at
-// read time, which the blame walker treats as transparent.
-export function provenanceRequired(vaultSlug?: string): boolean {
-  if (vaultSlug) {
-    const perVault = process.env[`GROVE_REQUIRE_PROVENANCE_${vaultSlug}`];
-    if (perVault === "true" || perVault === "1") return true;
-  }
+// affected by this flag. Their commits surface as legacy-unknown at read
+// time, which the blame walker treats as transparent.
+export function provenanceRequired(): boolean {
   const v = process.env.GROVE_REQUIRE_PROVENANCE;
   if (v === undefined) return false;
   return v === "true" || v === "1";
