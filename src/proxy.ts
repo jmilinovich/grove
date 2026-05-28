@@ -88,21 +88,6 @@ import {
   type SharedLink,
 } from "./share.js";
 import {
-  handleV2TasksList,
-  handleV2TaskRun,
-  handleV2TaskDefer,
-  handleV2TaskDismiss,
-  handleV2TaskReview,
-} from "./v2-tasks.js";
-import { handleV2TaskDetail } from "./v2-task-detail.js";
-import { startTaskWorker } from "./v2-task-run.js";
-import {
-  handleV2SkillsList,
-  handleV2SkillConfigure,
-  handleV2SkillEnable,
-  handleV2SkillDisable,
-} from "./v2-skills.js";
-import {
   encryptVault,
   unlockVault,
   lockVault,
@@ -2563,116 +2548,6 @@ const server = createServer(async (req, res) => {
 
     const restHeaders = { "Content-Type": "application/json", "Access-Control-Allow-Origin": REST_CORS_ORIGIN };
 
-    // GET /v1/tasks — v2 dashboard backlog payload (P21-3).
-    //
-    // Path-style only: this endpoint is meaningless without a vault slug,
-    // and the vaultV1Match auth/role/CORS gate above is what makes it
-    // safe. Legacy `/v1/tasks` requests would route to the proxy's
-    // default vault context — exactly the cross-vault leak shape the
-    // per-vault state.db split exists to prevent — so we refuse them.
-    if (restIsVaultScoped && restPath === "/v1/tasks" && req.method === "GET") {
-      handleV2TasksList(req, res, restCtx);
-      return;
-    }
-
-    // GET /v1/tasks/<id> — v2 task detail (P21-4). Same path-style only
-    // discipline as /v1/tasks above; the vaultV1Match block enforces
-    // auth, role, and CORS upstream.
-    const taskDetailMatch =
-      restIsVaultScoped && req.method === "GET"
-        ? /^\/v1\/tasks\/([^/?#]+)$/.exec(restPath)
-        : null;
-    if (taskDetailMatch) {
-      handleV2TaskDetail(req, res, restCtx, taskDetailMatch[1]!);
-      return;
-    }
-
-    // POST /v1/tasks/<id>/run — v2 task execution dispatch (P22-1).
-    // Async: flips pending→running and returns 202 immediately; the
-    // in-process task worker (started below at boot) drains running
-    // tasks out-of-band. Path-style only — `vaultV1Match` enforces auth
-    // and role; the /v1/* block above applied rate limit (write bucket).
-    const taskRunMatch =
-      restIsVaultScoped && req.method === "POST"
-        ? /^\/v1\/tasks\/([^/?#]+)\/run$/.exec(restPath)
-        : null;
-    if (taskRunMatch) {
-      handleV2TaskRun(req, res, restCtx, taskRunMatch[1]!);
-      return;
-    }
-
-    // POST /v1/tasks/<id>/defer — schedule a pending/review task (P22-2).
-    // POST /v1/tasks/<id>/dismiss — terminate a task; cross-DB ATTACH
-    // write-through resolves the originating `graph_health_flags` row
-    // when one is present (Phase 22 locked design decision #1).
-    const taskDeferMatch =
-      restIsVaultScoped && req.method === "POST"
-        ? /^\/v1\/tasks\/([^/?#]+)\/defer$/.exec(restPath)
-        : null;
-    if (taskDeferMatch) {
-      await handleV2TaskDefer(req, res, restCtx, taskDeferMatch[1]!);
-      return;
-    }
-    const taskDismissMatch =
-      restIsVaultScoped && req.method === "POST"
-        ? /^\/v1\/tasks\/([^/?#]+)\/dismiss$/.exec(restPath)
-        : null;
-    if (taskDismissMatch) {
-      await handleV2TaskDismiss(req, res, restCtx, taskDismissMatch[1]!);
-      return;
-    }
-
-    // POST /v1/tasks/<id>/review — disposition a review-state task
-    // (S-INBOX-10). Body is the V2 shape only after C-INBOX-1:
-    //   {kind: "apply", option_id} | {kind: "refine", refinement} | {kind: "dismiss"}
-    // `apply` confirms a decision (matching option = no-op + confirm;
-    // different option = compensate + re-apply). `refine` rolls back
-    // and spawns a refine-handler task. `dismiss` rolls back and
-    // inserts a 14-day suppression (no-op suppression when the task
-    // has no backing decision). Vault-scoped only — vaultV1Match
-    // enforces auth/role.
-    const taskReviewMatch =
-      restIsVaultScoped && req.method === "POST"
-        ? /^\/v1\/tasks\/([^/?#]+)\/review$/.exec(restPath)
-        : null;
-    if (taskReviewMatch) {
-      await handleV2TaskReview(
-        req,
-        res,
-        restCtx,
-        taskReviewMatch[1]!,
-        restKey.user_id,
-      );
-      return;
-    }
-
-    // GET /v1/skills — v2 skills index (P21-5). Path-scoped only.
-    if (restIsVaultScoped && restPath === "/v1/skills" && req.method === "GET") {
-      handleV2SkillsList(res, restCtx, REST_CORS_ORIGIN);
-      return;
-    }
-
-    // POST /v1/skills/<slug>/{configure,enable,disable} — v2 skill config
-    // writes (P22-4). Path-scoped only — the `vaultV1Match` block above
-    // enforces auth + mutation role and the /v1/* block applied rate
-    // limiting (write bucket). Unknown verbs fall through to the legacy
-    // routes below.
-    const skillConfigMatch =
-      restIsVaultScoped && req.method === "POST"
-        ? /^\/v1\/skills\/([^/?#]+)\/(configure|enable|disable)$/.exec(restPath)
-        : null;
-    if (skillConfigMatch) {
-      const skillSlug = skillConfigMatch[1]!;
-      const verb = skillConfigMatch[2]!;
-      if (verb === "configure") {
-        await handleV2SkillConfigure(req, res, restCtx, skillSlug);
-      } else if (verb === "enable") {
-        await handleV2SkillEnable(req, res, restCtx, skillSlug);
-      } else {
-        await handleV2SkillDisable(req, res, restCtx, skillSlug);
-      }
-      return;
-    }
 
     // Resolve trail for this key (null = owner, full access)
     const restTrail = resolveTrail(restKey.id);
@@ -4003,15 +3878,6 @@ import("./vault-usage.js")
   })
   .catch((err) => console.error(`[grove] vault-usage start failed: ${(err as Error).message}`));
 
-// P22-1: start the in-process task worker (drains state='running' rows
-// across vaults). Phase 23 supersedes this with a per-vault PM2 process,
-// but until then proxy.ts owns the loop so /v1/tasks/<id>/run completes
-// end-to-end. Disable with GROVE_DISABLE_TASK_WORKER=1 (tests, scheduler
-// rollouts).
-if (!process.env.GROVE_DISABLE_TASK_WORKER) {
-  startTaskWorker();
-  console.log(`[grove] task worker started (1s interval)`);
-}
 
 process.on("SIGHUP", () => {
   try {

@@ -364,13 +364,6 @@ export async function provisionVault(
       `INSERT INTO api_keys (id, user_id, vault_id, name, hashed_token, scopes, created_at)
        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
     ).run(keyId, ownerUserId, vaultId, `${input.slug}-owner`, hashedToken, "read,write");
-
-    // P23-2: flag for first-run bootstrap. The per-vault grove-scheduler
-    // picks this up on its boot pass or next 1-minute tick and runs
-    // `bootstrapFirstRun()` (src/skills/first-run.ts) out-of-band. We do
-    // NOT invoke any LLM call here — Architecture Smell #5 from the
-    // Phase 23 review.
-    db.prepare("UPDATE vaults SET bootstrap_pending = 1 WHERE id = ?").run(vaultId);
   });
   tx();
 

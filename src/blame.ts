@@ -79,9 +79,9 @@ export async function computeProvenanceBlame(
   }
 
   const segments = await computeFresh(vaultPath, filePath);
-  // Tag the cache row with the vault that computed it so readBlameForNote
-  // in v2-task-detail can scope reads to the correct vault (cross-vault
-  // leak fix — note_blame is a shared control-db table).
+  // Tag the cache row with the vault that computed it so blame reads
+  // can scope to the correct vault (note_blame is a shared control-db
+  // table).
   const vaultId = lookupIdByPath(vaultPath) ?? undefined;
   setNoteBlame(filePath, cacheKey, JSON.stringify(segments), vaultId);
   return segments;

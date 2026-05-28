@@ -2002,63 +2002,6 @@ function cmdRollback(tag: string): CmdResult {
   };
 }
 
-/**
- * S-INBOX-4 — `grove rebuild-projection <slug>` — replay
- * `.grove/decisions.jsonl` into the per-vault `decisions` projection.
- *
- * Local-only (control DB + per-vault state.db lookups, no remote
- * server hop). The JSONL log is the source of truth; this command is
- * the recovery path when state.db is lost or corrupted. Mirrors the
- * `vault set-provenance-required` shape — slug -> control-DB lookup
- * -> targeted state mutation.
- *
- * Wipes `decisions` first for cleanliness, then replays. The replay
- * itself uses INSERT OR REPLACE, so it's idempotent even without the
- * wipe; the wipe is just hygiene for the "fully rebuild" semantics
- * users expect.
- */
-async function cmdRebuildProjection(slug: string): Promise<CmdResult> {
-  if (!slug) {
-    throw new CliError(
-      "bad_request",
-      "Usage: grove rebuild-projection <vault-slug>",
-      1,
-    );
-  }
-
-  const { default: Database } = await import("better-sqlite3");
-  const dbPath = process.env.GROVE_DB_PATH ?? join(homedir(), ".grove", "grove.db");
-  const db = new Database(dbPath, { readonly: true });
-  let row: { id: string; git_repo_path: string } | undefined;
-  try {
-    row = db
-      .prepare("SELECT id, git_repo_path FROM vaults WHERE slug = ?")
-      .get(slug) as { id: string; git_repo_path: string } | undefined;
-  } finally {
-    db.close();
-  }
-  if (!row) {
-    throw new CliError("not_found", `No vault with slug "${slug}"`, 1);
-  }
-
-  const { getVaultDb } = await import("./db-per-vault.js");
-  const { replayDecisionsFromLog } = await import("./decision-writer.js");
-  const vaultDb = getVaultDb(row.id);
-  vaultDb.prepare("DELETE FROM decisions").run();
-  const { restored, skipped } = replayDecisionsFromLog(row.git_repo_path, row.id);
-
-  return {
-    ok: true,
-    slug,
-    restored,
-    skipped,
-    _fmt: () =>
-      `rebuild-projection ${slug}:\n` +
-      `  restored: ${restored} decisions\n` +
-      `  skipped:  ${skipped} malformed lines`,
-  };
-}
-
 function cmdLint(dir: string, flags: Record<string, string | boolean>): CmdResult {
   if (!dir) throw new CliError("bad_request", "Usage: grove lint <dir> [--dry-run]", 1);
   const dryRun = !!flags["dry-run"];
@@ -2547,13 +2490,6 @@ export const HELP: Record<string, CmdHelp> = {
     json_schema: "{ok, rolled_back_to}",
     exit_codes: EXIT_CODES,
   },
-  "rebuild-projection": {
-    usage: "grove rebuild-projection <vault-slug>",
-    description:
-      "Replay .grove/decisions.jsonl into the per-vault `decisions` projection. Used when state.db is lost or corrupted — the JSONL log is canon, state.db is a rebuildable projection.",
-    json_schema: "{ok, slug, restored, skipped}",
-    exit_codes: EXIT_CODES,
-  },
 };
 
 export function printCommandHelp(cmd: string): string {
@@ -2607,7 +2543,6 @@ Commands:
   tag-backfill            Backfill inferred tags on untagged notes
   snapshot                Create/list vault snapshots
   rollback <tag>          Restore vault to snapshot
-  rebuild-projection <slug>  Replay .grove/decisions.jsonl into state.db
 
 Flags:
   --json                  Force JSON output (auto-enabled when piped)
@@ -2764,11 +2699,6 @@ async function main() {
       result = cmdRollback(positional); emitResult(result, flags); return;
     }
     if (command === "lint") { result = cmdLint(positional, flags); emitResult(result, flags); return; }
-    if (command === "rebuild-projection") {
-      result = await cmdRebuildProjection(positional);
-      emitResult(result, flags);
-      return;
-    }
 
     // Phase 3: grove completion <shell> — emit shell completion script to stdout.
     if (command === "completion") {
