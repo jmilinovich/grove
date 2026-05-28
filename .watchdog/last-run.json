@@ -1,16 +1,16 @@
 {
-  "ran_at": "2026-05-27T15:00:00Z",
+  "ran_at": "2026-05-28T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "315ca32cf0a531898bf2bccd1c0fa557e07c0f22",
+  "main_sha": "9db6fe0d9c19544a31c238cc3f4b4ff8cc66f115",
   "green": [
-    "pattern-A (createSchema in worker entrypoints): false positive — scheduler-bin.ts already uses runMigration(), grep matched comment text only",
-    "pattern-B (.unref() on scheduler timers): clean — no matches",
-    "pattern-C (npx tsx in ecosystem-gen): false positive — ecosystem-gen.ts already uses node_modules/.bin/tsx, grep matched comment text only",
-    "stale-prs: 1 open PR (#217 fix/image-upload-provenance, ~6d old) — not yet stale"
+    "pattern_b: .unref() on scheduler timers — clean",
+    "stale_prs: no non-draft PRs older than 7 days"
   ],
   "flagged": [
-    "health: api.grove.md /health → HTTP 403 'Host not in allowlist' — persistent egress gateway block in watchdog sandbox env (tracked in #187). Prod status unknown from this env — verify manually if needed."
+    "health_check: /health returned 403 — TLS cert issuer is Anthropic sandbox egress proxy; real prod may be healthy. See issue #229.",
+    "pattern_a: grep matched comment in scheduler-bin.ts (line 21), not live code — code already calls runMigration(). False positive.",
+    "pattern_c: grep matched comment in ecosystem-gen.ts (line 79), not live code — code already uses node_modules/.bin/tsx. False positive."
   ],
   "prs_opened": [],
-  "issues_opened": []
+  "issues_opened": [229]
 }
