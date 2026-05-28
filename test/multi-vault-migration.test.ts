@@ -64,15 +64,6 @@ describe("multi-vault migration (P8-A1)", () => {
         attempts INTEGER NOT NULL DEFAULT 0,
         error_message TEXT
       );
-      CREATE TABLE discovery_results (
-        id TEXT PRIMARY KEY,
-        source_path TEXT NOT NULL,
-        target_path TEXT NOT NULL,
-        similarity REAL NOT NULL,
-        relationship TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        dismissed_at TEXT
-      );
       CREATE TABLE graph_health (
         id TEXT PRIMARY KEY,
         measured_at TEXT NOT NULL,
@@ -97,9 +88,6 @@ describe("multi-vault migration (P8-A1)", () => {
     db.prepare(
       "INSERT INTO discovery_queue (path, trigger) VALUES (?, ?)",
     ).run("Journal/2026-04-22.md", "write");
-    db.prepare(
-      "INSERT INTO discovery_results (id, source_path, target_path, similarity, relationship) VALUES (?, ?, ?, ?, ?)",
-    ).run("dr_1", "Journal/2026-04-22.md", "Resources/Concepts/Grove.md", 0.91, "mentions");
     db.prepare(
       "INSERT INTO graph_health (id, measured_at, metrics, score) VALUES (?, ?, ?, ?)",
     ).run("gh_1", new Date().toISOString(), "{}", 80);
@@ -126,7 +114,7 @@ describe("multi-vault migration (P8-A1)", () => {
     expect(vault.server_port).toBe(8190);
     expect(vault.discovery_port).toBe(8091);
 
-    for (const t of ["discovery_queue", "discovery_results", "graph_health", "graph_health_flags"]) {
+    for (const t of ["discovery_queue", "graph_health", "graph_health_flags"]) {
       const cols = db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[];
       expect(cols.some((c) => c.name === "vault_id")).toBe(true);
       const row = db.prepare(`SELECT vault_id FROM ${t} LIMIT 1`).get() as { vault_id: string };

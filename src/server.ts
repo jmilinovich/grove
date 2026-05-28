@@ -53,8 +53,6 @@ import {
   enqueueDiscovery,
   discoveryQueueDepth,
   getRecentExtractions,
-  getNewConceptsCreated,
-  getSurprisingConnections,
   getLastProcessedAt,
   getSourceHash,
 } from "./db.js";
@@ -968,8 +966,6 @@ Modes:
       if (mode === "discovery") {
         const result = {
           recent_extractions: getRecentExtractions(20),
-          new_concepts_created: getNewConceptsCreated(20, entityPath(VAULT_CONFIG, "concept")),
-          surprising_connections: getSurprisingConnections(10),
           queue_depth: discoveryQueueDepth(),
           last_processed_at: getLastProcessedAt(),
         };

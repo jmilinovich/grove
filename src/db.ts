@@ -245,18 +245,6 @@ CREATE TABLE IF NOT EXISTS discovery_batches (
 CREATE INDEX IF NOT EXISTS idx_discovery_batches_status ON discovery_batches(status, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_discovery_batches_vault ON discovery_batches(vault_id, status);
 
-CREATE TABLE IF NOT EXISTS discovery_results (
-  id TEXT PRIMARY KEY,
-  source_path TEXT NOT NULL,
-  target_path TEXT NOT NULL,
-  similarity REAL NOT NULL,
-  relationship TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  dismissed_at TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_discovery_results_source ON discovery_results(source_path);
-
 CREATE TABLE IF NOT EXISTS vault_keys (
   vault_id TEXT PRIMARY KEY REFERENCES vaults(id),
   encrypted_key BLOB NOT NULL,
@@ -512,7 +500,7 @@ function migrateVaultMembersBackfill(database: Database.Database): void {
  *   and rename the default slug from "life" → "personal" so URLs match the
  *   multi-vault convention documented in PLAN.md
  * - vaults: add globally UNIQUE index on slug (replaces owner-scoped uniqueness)
- * - discovery_queue / discovery_results / graph_health / graph_health_flags:
+ * - discovery_queue / graph_health / graph_health_flags:
  *   add vault_id (defaults to the personal vault)
  * - vault_members: new table (populated in P8-B1)
  * - vault_usage_daily: new table for per-vault observability counters
@@ -546,7 +534,7 @@ function migrateMultiVault(database: Database.Database): void {
     database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_vaults_server_port ON vaults(server_port) WHERE server_port IS NOT NULL`);
     database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_vaults_discovery_port ON vaults(discovery_port) WHERE discovery_port IS NOT NULL`);
 
-    for (const table of ["discovery_queue", "discovery_results", "graph_health", "graph_health_flags"]) {
+    for (const table of ["discovery_queue", "graph_health", "graph_health_flags"]) {
       const cols = database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
       if (!cols.some((c) => c.name === "vault_id")) {
         // SQLite refuses ALTER TABLE ADD COLUMN with both REFERENCES and a
@@ -1692,92 +1680,6 @@ export function flushDiscoveryCache(vaultId?: string, path?: string): number {
   return result.changes;
 }
 
-// ── Discovery results helpers ────────────────────────────────────
-
-export interface DiscoveryResultRow {
-  id: string;
-  source_path: string;
-  target_path: string;
-  similarity: number;
-  relationship: string | null;
-  created_at: string;
-  dismissed_at: string | null;
-}
-
-/**
- * Insert a discovery result.
- *
- * `vaultId` scopes the row so two vaults' workers — both writing into the
- * shared grove.db — don't pile entries into a single global pool. Without
- * it, vault A's `vault_status mode=discovery` would surface vault B's
- * note paths.
- */
-export function insertDiscoveryResult(
-  id: string,
-  sourcePath: string,
-  targetPath: string,
-  similarity: number,
-  relationship: string,
-  vaultId: string = resolveVaultIdFromEnv(),
-): void {
-  const database = getDb();
-  database
-    .prepare(
-      "INSERT INTO discovery_results (id, source_path, target_path, similarity, relationship, vault_id) VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .run(id, sourcePath, targetPath, similarity, relationship, vaultId);
-}
-
-/**
- * Clear undismissed results for a source path (before re-processing).
- *
- * Scoped to `vaultId` so re-processing a path in vault A doesn't wipe a
- * same-named path's results in vault B.
- */
-export function clearUndismissedResults(
-  sourcePath: string,
-  vaultId: string = resolveVaultIdFromEnv(),
-): void {
-  const database = getDb();
-  database
-    .prepare(
-      "DELETE FROM discovery_results WHERE source_path = ? AND vault_id = ? AND dismissed_at IS NULL",
-    )
-    .run(sourcePath, vaultId);
-}
-
-/**
- * Get discovery results, optionally filtered by source path.
- *
- * Always scoped to `vaultId` so multi-vault deployments don't leak
- * results across vaults.
- */
-export function getDiscoveryResults(
-  sourcePath?: string,
-  vaultId: string = resolveVaultIdFromEnv(),
-): DiscoveryResultRow[] {
-  const database = getDb();
-  if (sourcePath) {
-    return database
-      .prepare(
-        "SELECT * FROM discovery_results WHERE source_path = ? AND vault_id = ? ORDER BY similarity DESC",
-      )
-      .all(sourcePath, vaultId) as DiscoveryResultRow[];
-  }
-  return database
-    .prepare(
-      "SELECT * FROM discovery_results WHERE vault_id = ? ORDER BY created_at DESC, similarity DESC",
-    )
-    .all(vaultId) as DiscoveryResultRow[];
-}
-
-/** Dismiss a discovery result (soft delete). */
-export function dismissDiscoveryResult(id: string): void {
-  const database = getDb();
-  database
-    .prepare("UPDATE discovery_results SET dismissed_at = datetime('now') WHERE id = ?")
-    .run(id);
-}
 
 // ── Discovery digest helpers ────────────────────────────────────
 
@@ -1809,60 +1711,6 @@ export function getRecentExtractions(
     .all(vaultId, limit) as RecentExtraction[];
 }
 
-export interface NewConceptCreated {
-  path: string;
-  created_at: string;
-  triggered_by: string;
-}
-
-/**
- * Get recently created concept notes from discovery results.
- *
- * Callers should pass `conceptPrefix` from the vault config (e.g.
- * `entityPath(config, "concept")`). The default "Resources/Concepts/" keeps
- * legacy behavior for PARA vaults when no prefix is provided.
- */
-export function getNewConceptsCreated(
-  limit = 20,
-  conceptPrefix = "Resources/Concepts/",
-  vaultId: string = resolveVaultIdFromEnv(),
-): NewConceptCreated[] {
-  const database = getDb();
-  return database
-    .prepare(
-      `SELECT DISTINCT target_path AS path, created_at, source_path AS triggered_by
-       FROM discovery_results
-       WHERE target_path LIKE ?
-         AND vault_id = ?
-         AND dismissed_at IS NULL
-       ORDER BY created_at DESC
-       LIMIT ?`,
-    )
-    .all(`${conceptPrefix}%`, vaultId, limit) as NewConceptCreated[];
-}
-
-export interface SurprisingConnection {
-  source: string;
-  target: string;
-  similarity: number;
-}
-
-/** Get top surprising connections (highest similarity, undismissed). */
-export function getSurprisingConnections(
-  limit = 10,
-  vaultId: string = resolveVaultIdFromEnv(),
-): SurprisingConnection[] {
-  const database = getDb();
-  return database
-    .prepare(
-      `SELECT source_path AS source, target_path AS target, similarity
-       FROM discovery_results
-       WHERE vault_id = ? AND dismissed_at IS NULL
-       ORDER BY similarity DESC
-       LIMIT ?`,
-    )
-    .all(vaultId, limit) as SurprisingConnection[];
-}
 
 // ── Graph health flags helpers ───────────────────────────────────
 

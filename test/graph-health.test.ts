@@ -21,7 +21,6 @@ import {
   getDb,
   resetDb,
   createSchema,
-  insertDiscoveryResult,
   getHealthFlags,
 } from "../src/db.js";
 import {
@@ -53,7 +52,6 @@ function baseMetrics(overrides: Partial<GraphHealthMetrics> = {}): GraphHealthMe
     embedding_coverage: 0.98,
     stale_embedding_count: 0,
     missing_frontmatter: 0,
-    duplicate_candidates: 0,
     growth_velocity_7d: 3,
     growth_velocity_30d: 12,
     avg_links_per_note: 2.5,
@@ -71,7 +69,6 @@ function makeMetrics(overrides: Partial<GraphHealthMetrics> = {}): GraphHealthMe
     broken_link_count: 1,
     embedding_coverage: 0.96,
     stale_embedding_count: 2,
-    duplicate_candidates: 1,
     growth_velocity_7d: 5,
     growth_velocity_30d: 18,
     cluster_count: 3,
@@ -119,7 +116,6 @@ beforeEach(() => {
   // Wipe between tests — resetDb only drops the handle, not the file.
   getDb().exec("DELETE FROM graph_health");
   getDb().exec("DELETE FROM graph_health_flags");
-  getDb().exec("DELETE FROM discovery_results");
 });
 
 afterEach(() => {

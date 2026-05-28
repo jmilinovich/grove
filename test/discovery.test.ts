@@ -11,10 +11,7 @@ import {
   markDiscoveryDone,
   markDiscoveryError,
   discoveryQueueDepth,
-  insertDiscoveryResult,
   getRecentExtractions,
-  getNewConceptsCreated,
-  getSurprisingConnections,
   getLastProcessedAt,
   recoverOrphanedDiscoveryProcessing,
   getDb,
@@ -394,8 +391,6 @@ describe("discovery digest helpers", () => {
 
   it("empty state returns zeroed fields", () => {
     expect(getRecentExtractions()).toEqual([]);
-    expect(getNewConceptsCreated()).toEqual([]);
-    expect(getSurprisingConnections()).toEqual([]);
     expect(discoveryQueueDepth()).toBe(0);
     expect(getLastProcessedAt()).toBeNull();
   });
@@ -427,44 +422,6 @@ describe("discovery digest helpers", () => {
     }
     expect(getRecentExtractions(3)).toHaveLength(3);
   });
-
-  it("getNewConceptsCreated returns concept-path results", () => {
-    insertDiscoveryResult("r1", "Journal/2026/2026-04-13.md", "Resources/Concepts/knowledge-graphs.md", 0.85, "mentioned");
-    insertDiscoveryResult("r2", "Journal/2026/2026-04-13.md", "Resources/People/alice.md", 0.9, "mentioned");
-    insertDiscoveryResult("r3", "Notes/scratch.md", "Resources/Concepts/emergence.md", 0.75, "related");
-
-    const concepts = getNewConceptsCreated();
-    expect(concepts).toHaveLength(2);
-    // Both should be concept paths
-    expect(concepts.every((c) => c.path.startsWith("Resources/Concepts/"))).toBe(true);
-    // triggered_by should be the source
-    expect(concepts.find((c) => c.path.includes("knowledge-graphs"))?.triggered_by).toBe("Journal/2026/2026-04-13.md");
-  });
-
-  it("getSurprisingConnections returns by similarity desc", () => {
-    insertDiscoveryResult("r1", "a.md", "b.md", 0.7, "related");
-    insertDiscoveryResult("r2", "c.md", "d.md", 0.95, "similar");
-    insertDiscoveryResult("r3", "e.md", "f.md", 0.8, "related");
-
-    const connections = getSurprisingConnections();
-    expect(connections).toHaveLength(3);
-    expect(connections[0].similarity).toBe(0.95);
-    expect(connections[1].similarity).toBe(0.8);
-    expect(connections[2].similarity).toBe(0.7);
-  });
-
-  it("getSurprisingConnections excludes dismissed results", () => {
-    insertDiscoveryResult("r1", "a.md", "b.md", 0.9, "related");
-    insertDiscoveryResult("r2", "c.md", "d.md", 0.8, "similar");
-
-    const db = getDb();
-    db.prepare("UPDATE discovery_results SET dismissed_at = datetime('now') WHERE id = 'r1'").run();
-
-    const connections = getSurprisingConnections();
-    expect(connections).toHaveLength(1);
-    expect(connections[0].source).toBe("c.md");
-  });
-
   it("getLastProcessedAt returns most recent timestamp", () => {
     enqueueDiscovery("a.md", "write");
     enqueueDiscovery("b.md", "write");
@@ -550,34 +507,6 @@ describe("discovery queue/results vault scoping", () => {
 
     expect(getLastProcessedAt(VAULT_A)).toBeTruthy();
     expect(getLastProcessedAt(VAULT_B)).toBeNull();
-  });
-
-  it("getNewConceptsCreated does not leak across vaults", () => {
-    insertDiscoveryResult(
-      "ra1", "Journal/a.md", "Resources/Concepts/topic-a.md",
-      0.85, "mentioned", VAULT_A,
-    );
-    insertDiscoveryResult(
-      "rb1", "Journal/b.md", "Resources/Concepts/topic-b.md",
-      0.85, "mentioned", VAULT_B,
-    );
-
-    const aConcepts = getNewConceptsCreated(20, "Resources/Concepts/", VAULT_A);
-    const bConcepts = getNewConceptsCreated(20, "Resources/Concepts/", VAULT_B);
-
-    expect(aConcepts.map((c) => c.path)).toEqual(["Resources/Concepts/topic-a.md"]);
-    expect(bConcepts.map((c) => c.path)).toEqual(["Resources/Concepts/topic-b.md"]);
-  });
-
-  it("getSurprisingConnections does not leak across vaults", () => {
-    insertDiscoveryResult("a1", "a-src.md", "a-tgt.md", 0.9, "related", VAULT_A);
-    insertDiscoveryResult("b1", "b-src.md", "b-tgt.md", 0.95, "related", VAULT_B);
-
-    const aConn = getSurprisingConnections(10, VAULT_A);
-    const bConn = getSurprisingConnections(10, VAULT_B);
-
-    expect(aConn.map((c) => c.source)).toEqual(["a-src.md"]);
-    expect(bConn.map((c) => c.source)).toEqual(["b-src.md"]);
   });
 });
 

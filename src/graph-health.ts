@@ -37,7 +37,6 @@ export interface GraphHealthMetrics {
   embedding_coverage: number;
   stale_embedding_count: number;
   missing_frontmatter: number;
-  duplicate_candidates: number;
   growth_velocity_7d: number;
   growth_velocity_30d: number;
   avg_links_per_note: number;
@@ -474,35 +473,6 @@ function computeGrowthVelocity(
   return { v7, v30 };
 }
 
-// ── Duplicate candidates (optional) ──────────────────────────────────
-
-/** Same env-default pattern as src/db.ts so legacy single-vault callers
- * (and tests that rely on the same default for inserts) keep working. */
-function defaultVaultId(): string {
-  return process.env.GROVE_VAULT_ID ?? "vault_00000000";
-}
-
-function countDuplicateCandidates(vaultId: string = defaultVaultId()): number {
-  // Near-duplicate pairs surface in discovery_results once discovery
-  // (Phase 7) embeds notes and compares neighbors. Auto-healing (P13-3)
-  // will flag them explicitly; here we just count undismissed high-sim
-  // pairs that already exist in the table.
-  //
-  // discovery_results is a process-global SQLite table; without
-  // `vault_id = ?` here, vault A's stats report vault B's duplicate
-  // count — same class of cross-vault leak as the unscoped search query
-  // we caught on 2026-04-29.
-  try {
-    const row = getDb()
-      .prepare(
-        "SELECT COUNT(*) AS cnt FROM discovery_results WHERE vault_id = ? AND similarity > 0.85 AND dismissed_at IS NULL",
-      )
-      .get(vaultId) as { cnt: number } | undefined;
-    return row?.cnt ?? 0;
-  } catch {
-    return 0;
-  }
-}
 
 // ── Metric computation ───────────────────────────────────────────────
 
@@ -510,11 +480,11 @@ export interface ComputeOptions {
   indexDb?: Database.Database;
   now?: Date;
   /**
-   * vault_id used to scope process-global tables (discovery_results,
-   * health flags) to this vault. Required for correct stats in
-   * multi-vault deployments; falls back to the empty string only for
-   * legacy single-vault callers, which produces zero matches and is
-   * preferable to leaking other vaults' counts.
+   * vault_id used to scope process-global tables (health flags) to
+   * this vault. Required for correct stats in multi-vault deployments;
+   * falls back to the empty string only for legacy single-vault callers,
+   * which produces zero matches and is preferable to leaking other
+   * vaults' counts.
    */
   vaultId?: string;
 }
@@ -529,7 +499,7 @@ export async function computeHealthMetrics(
   // QMD's documents table tags every row with `collection` (= the last
   // path segment of the vault root). Use it to scope index reads here.
   const collection = vaultPath.split("/").filter(Boolean).pop() ?? "";
-  const vaultId = opts.vaultId ?? defaultVaultId();
+  const vaultId = opts.vaultId ?? process.env.GROVE_VAULT_ID ?? "vault_00000000";
 
   const fileTexts = new Map<string, string>();
   let missingFrontmatter = 0;
@@ -550,7 +520,6 @@ export async function computeHealthMetrics(
   const graph = buildGraph(files, fileTexts);
   const index = computeIndexHealth(totalNotes, files, collection, opts.indexDb);
   const growth = computeGrowthVelocity(vaultPath, now);
-  const duplicateCandidates = countDuplicateCandidates(vaultId);
 
   const linkDensity =
     totalNotes > 0 ? graph.edgeCount / totalNotes : 0;
@@ -571,7 +540,6 @@ export async function computeHealthMetrics(
     embedding_coverage: index.embedding_coverage,
     stale_embedding_count: index.stale_embedding_count,
     missing_frontmatter: missingFrontmatter,
-    duplicate_candidates: duplicateCandidates,
     growth_velocity_7d: growth.v7,
     growth_velocity_30d: growth.v30,
     avg_links_per_note: Math.round(avgLinksPerNote * 100) / 100,
