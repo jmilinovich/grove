@@ -1885,12 +1885,6 @@ export interface HealthFlagRow {
  * Insert a health flag if there isn't already an unresolved one for the
  * same (flag_type, source_path, target_path) tuple. Returns the id of the
  * inserted row, or null when the flag was already present.
- *
- * `vaultId` is required so flags inserted by per-vault autoHeal land on
- * the right tenant. Without it the migration's NOT NULL DEFAULT
- * 'vault_00000000' stamps every vault's flags onto the personal vault —
- * test-vault's autoHeal output would surface in personal admin's
- * /v1/admin/health/flags and stay invisible to test-vault admin.
  */
 export function insertHealthFlag(
   id: string,

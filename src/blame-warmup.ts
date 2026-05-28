@@ -28,12 +28,8 @@
 // worker never throws. Dropping a path on budget overflow is normal
 // behavior, not an error.
 //
-// Wiring: this function is intended to be called from the post-sync
-// hook (TODO — see file footer; right now `post-sync-discover.sh` is
-// a shell script that POSTs to /internal/discovery-trigger; calling
-// this from there requires either a new HTTP endpoint or a Node
-// entry-point invocation. Not blocking V3 §C ship — the function is
-// implemented + tested, and the next person can wire either route.)
+// Wired via /internal/post-sync-warmup (HTTP endpoint called by the
+// post-sync-discover.sh hook).
 
 import { stampPathsInRange, recomputeProvenanceBlame } from "./blame.js";
 import { warmupMetrics } from "./metrics.js";
