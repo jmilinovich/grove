@@ -1,122 +1,66 @@
 # Grove
 
-Grove is a hosted knowledge API that makes Obsidian vaults searchable and writable from any Claude surface.
+Grove is a single-user MCP server over a git-backed Obsidian vault. Six tools, no SaaS layer, no autonomous agent, no multi-tenant routing. The vault is sacred; Grove is the plumbing that makes it reachable from any MCP client.
 
 ## Architecture rules
 
-1. **The vault is the source of truth.** QMD indexes are derived. If they diverge, the index is wrong — rebuild it.
-2. **The server is the sole writer to git.** Local machines pull. One direction. No split brain.
-3. **All writes are serialized.** Single-threaded write queue. No concurrent git operations. Ever.
-4. **Every write creates a git commit** with the API key identity in the message.
-5. **Search index updates synchronously on write.** Agents have no memory between calls — eventual consistency means duplicates.
-6. **Keep tools distinct and composable.** Current count: 6. The original rule said "≤6 because selection degrades past ~10" — 2026 benchmarks showed that's not quite right. The real cliff is around 50 tools; Anthropic's Tool Search Tool (shipped Q1 2026) mostly eliminates count sensitivity by loading tool definitions on demand. The value of the rule was never the number 6 specifically; it was tool *overlap risk*. Before adding a new tool, check: does an existing tool with a new parameter serve? A 7th or 8th tool is fine if it earns its slot. A 20th isn't. If count climbs past 12, stop and reconsider the design.
-
-Read `PLAN.md` for the full spec. This file governs how you work — PLAN.md governs what you build.
-
-## Diagnostic discipline
-
-These exist because they cost us 24 hours and one near-miss data wipe in late April 2026. Each rule has a memory entry under `~/.claude/projects/-Users-jm-src-grove/memory/` with the full incident.
-
-1. **Falsifier-first before anything destructive.** Before recommending or executing `rm`, `DROP`, force-push, vault wipe, key revoke, or a deploy-verb change, write the single command whose output would prove the plan wrong — then run it before the destructive one. If no <60-second falsifier exists, say so explicitly and ask. The autonomy granted in this repo is conditional on this discipline; the operator is not the safety net. (`feedback_verify_before_destroy.md`)
-
-2. **Test deploy/infra verbs against the prod-pinned binary before merging.** CI runs vitest, tsc, audit, gitleaks — none of them touch `pm2`, `ssh`, or shell verbs in `.github/workflows/ci.yml` or `scripts/deploy.sh`. If a PR edits a deploy verb, run it once against the prod-pinned tool with a stub ecosystem before pushing. Otherwise prod is the integration test, and it's also the bug report. (`feedback_test_deploy_verbs_locally.md`)
-
-3. **Cross-tenant leak triage: path-check before pattern-match.** If a tenant reports seeing another tenant's content, derive the file path from the URL/screenshot and run `ssh prod 'test -e /root/vaults/<reporting-tenant>/<path>'` *first*. ENOENT means search/routing leak — do not wipe. EXISTS means data contamination — then verify byte-equality (`cmp`) against suspected origins before destroying anything. (`project_incident_2026_04_29_search_layer_leak.md`)
-
-4. **Check open PRs before assuming a bug is new.** Run `gh pr list --state open` as part of incident triage. A stale security PR can be the exact fix for the live incident — PR #87 (search scope) sat in rebase-rot from 04-25 to 04-29 and would have prevented Sumon's leak. Stale open PRs aren't just process debt; they cause misdiagnosis of live incidents. (`feedback_check_open_prs_first.md`)
+1. **The vault is the source of truth.** State.db, QMD indexes, embeddings — all derived. If they diverge, rebuild the derived state.
+2. **All writes are serialized.** Single-threaded write queue. No concurrent git operations. Ever.
+3. **Every write creates a git commit** with attribution + optional provenance trailers.
+4. **Search index updates synchronously on write.** Agents have no memory between calls — eventual consistency means duplicates.
+5. **Six tools.** `query`, `get`, `multi_get`, `write_note`, `list_notes`, `vault_status`. If you're adding a seventh, prove it doesn't overlap an existing tool's parameter shape first.
 
 ## Running locally
 
 ```bash
-npm run proxy          # Auth proxy on :8420, proxies to QMD MCP (:8181) and BM25 (:8177)
-grove keys             # List API keys (remote, via ~/.grove/cli.json)
-grove keys create foo  # Create a new key (token shown once)
-grove keys revoke id   # Revoke a key
+GROVE_VAULT=/path/to/vault \
+GROVE_API_KEY=$(openssl rand -hex 32) \
+VOYAGE_API_KEY=... \
+npx tsx src/server.ts
 ```
 
-Requires QMD running separately. The proxy does not start QMD — it expects it on ports 8181 (MCP) and 8177 (BM25 search).
+Listens on `127.0.0.1:8420/mcp`. Set `GROVE_AUTH=none` to bypass the bearer check for local-only dev.
 
-## Running on AWS
-
-Grove runs on AWS g4dn.xlarge (T4 GPU) at `api.grove.md`. PM2 manages a per-vault trio plus a shared proxy: for each vault `<slug>` row in the control db, `grove-server-<slug>` (port from `vaults.server_port`), `grove-discovery-<slug>` (worker, no port), and `grove-scheduler-<slug>` (worker, no port — runs the 1-min cron tick + 1s task drain, P23-1). The shared `grove-proxy` (8420) sits in front of every vault server. `qmd-server` is intentionally not emitted post-P8; BM25 runs in-process via FTS5. Nginx terminates TLS.
+The discovery worker (extract→link engine) is a separate process:
 
 ```bash
-ssh -i ~/.ssh/grove-aws.pem ubuntu@52.37.76.231
-sudo pm2 list               # see process status
-sudo pm2 restart grove-server # restart
-sudo pm2 logs grove-server   # tail logs
+GROVE_VAULT=/path/to/vault ANTHROPIC_API_KEY=... npx tsx src/discovery-worker.ts
 ```
-
-Embeddings go direct to Voyage AI (`voyage-4-large`, 1024-dim) from grove-server and grove-discovery — no local embedding service. The earlier self-hosted TEI / sentence-transformers setup was retired once Voyage's hosted API proved both faster and cheaper than running embeddings on the same box.
-Vault syncs every 5 min via cron. Keys live at `~/.grove/keys.json`.
-
-### Checking hosted-product waitlist signups
-
-Signups from `grove.md` land in the `waitlist` table on prod (`/root/.grove/grove.db`) and trigger a Resend notification email to `GROVE_WAITLIST_NOTIFY_EMAIL` (default `jrmilinovich@gmail.com`). Two ways to read them:
-
-```bash
-# Via SSH + sqlite — newest first
-ssh -i ~/.ssh/grove-aws.pem ubuntu@52.37.76.231 \
-  'sudo sqlite3 /root/.grove/grove.db "SELECT created_at, email, source FROM waitlist ORDER BY created_at DESC LIMIT 50"'
-
-# Via the admin endpoint (requires admin session cookie or bearer token)
-curl -sS -H "Authorization: Bearer $GROVE_ADMIN_TOKEN" https://api.grove.md/admin/waitlist | jq
-```
-
-The endpoint returns `{count, entries}` — `entries` is newest first, capped at `?limit=N` (max 5000, default 500). Inserts are idempotent (`INSERT OR IGNORE` on `email`), so duplicate clicks don't double-notify.
 
 ## Code conventions
 
 - **TypeScript, strict mode.** No `any` unless interfacing with untyped externals.
-- **Raw `node:http`.** No Express, no Fastify, no framework. The server is small enough.
-- **Node >= 22.** Use built-in fetch, crypto, etc. Don't polyfill.
-- **ESM only** (`"type": "module"` in package.json).
-- **Run with `tsx`** in dev. Compile for production.
-- **Dependencies are intentionally minimal.** Don't add packages for things Node can do natively.
+- **Raw `node:http`.** No Express, no Fastify. The server is small enough.
+- **Node ≥ 22.** Built-in `fetch`, `crypto`. Don't polyfill.
+- **ESM only** (`"type": "module"`).
+- **Run with `tsx`** in dev.
+- **Dependencies are intentionally minimal.** Don't add packages for what Node can do natively.
 
 ## What not to do
 
-- Don't add web frameworks. Raw `node:http` is the choice and it's final.
-- Don't break the MCP protocol. Claude.ai connects as a custom connector — if the proxy changes response shape, it breaks every connected surface.
-- Don't sprawl MCP tools. 6 is the current count; 10–12 is fine on modern models; past that, tool-overlap hurts selection even if raw model performance holds. See architecture rule #6.
+- Don't add web frameworks. Raw `node:http` is the choice.
+- Don't break the MCP protocol. The server speaks `StreamableHTTPServerTransport`; clients connect with a static bearer.
+- Don't sprawl tools. Six tools today. The next-cliff is around twelve, where overlap risk starts hurting tool selection.
 - Don't write to the vault outside the write queue. Ever.
-- Don't store raw API tokens anywhere. Hash with SHA-256 first.
-- Don't over-engineer. This is a proxy today, growing into a server. Build what's needed now.
+- Don't store raw API tokens anywhere. Compare in constant time with `timingSafeEqual`.
+- Don't re-introduce multi-tenant routing, encryption, OAuth, trails, waitlists, or per-vault key minting. Those were costumes; the teardown was deliberate. (See `RETROSPECTIVE.md`.)
 
 ## Testing
 
-Tests use `vitest`. Test fixtures live in `test/fixtures/vault/` — a small vault with sample notes, proper frontmatter, and an initialized git repo.
+Tests use `vitest`. Run them with:
 
 ```bash
-npm test                    # run all tests
-npm run test -- --watch     # watch mode
+npm test                    # full suite
+npm run typecheck           # tsc --noEmit
 ```
 
-Write tests for: frontmatter parsing, auth/token validation, write queue serialization, search result formatting. Integration tests should cover full request cycles through the proxy.
+Write tests for: frontmatter parsing, write-queue serialization, search-result formatting, blame trailer parsing, discovery enqueue dedup.
 
-## Relationship to QMD
+## What's around
 
-Grove wraps QMD. It does not replace it. QMD handles indexing, BM25 search, and MCP tool execution. Grove adds auth, write operations, git integration, and the HTTP surface that Claude.ai connects to.
-
-If search quality regresses, the problem is almost certainly in QMD or its index — not in Grove's proxy layer.
-
-## Relationship to the vault
-
-Grove serves the vault at `~/life/`. It does not own it. The vault is an Obsidian-based, git-tracked knowledge system that predates Grove and will outlive it. Grove is infrastructure that makes the vault accessible remotely — it should never restructure, reorganize, or make policy decisions about vault content.
-
-Vault conventions (frontmatter, linking, folder structure) are defined in `~/life/CLAUDE.md`. Read that before building anything that touches note structure.
-
-## Deploy process
-
-Deploys run through GitHub Actions (`.github/workflows/ci.yml`, `deploy` job) via `workflow_dispatch` — health-gated with auto-rollback. Trigger from the Actions tab after `main` is green. Set `confirm_schema_change=true` when the deploy touches `src/db.ts` or `src/db-migration*.ts`.
-
-Manual fallback (only when Actions is down):
-
-```bash
-ssh -i ~/.ssh/grove-aws.pem ubuntu@52.37.76.231
-sudo bash -c 'cd /root/grove && git pull && npm install'
-sudo pm2 restart grove-server grove-proxy grove-discovery
-```
+- `RETROSPECTIVE.md` — the deep history of the hosted product and what each layer cost. Read this before reintroducing anything that was deleted.
+- `TEARDOWN-RUNBOOK.md` — the day-by-day teardown sequence.
+- `SIMPLIFY.md` / `ZOOM-OUT.md` — the decision-audit trail.
 
 ## Values
 

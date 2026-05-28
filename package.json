@@ -1,16 +1,12 @@
 {
   "name": "grove",
   "version": "1.0.0",
-  "description": "A hosted knowledge API that makes Obsidian vaults searchable and writable from any MCP client.",
+  "description": "Single-user MCP server over a git-backed Obsidian vault. Six tools — query, get, multi_get, write_note, list_notes, vault_status.",
   "type": "module",
-  "bin": {
-    "grove": "./bin/grove"
-  },
   "repository": {
     "type": "git",
     "url": "https://github.com/jmilinovich/grove.git"
   },
-  "homepage": "https://grove.md",
   "author": "John Milinovich",
   "license": "MIT",
   "keywords": [
@@ -24,21 +20,11 @@
     "personal-knowledge"
   ],
   "scripts": {
-    "proxy": "tsx src/proxy.ts",
-    "keys": "tsx src/keys.ts",
-    "grove": "tsx src/cli.ts",
+    "start": "tsx src/server.ts",
+    "discovery": "tsx src/discovery-worker.ts",
     "test": "vitest run",
-    "test:unit": "vitest run test/unit/",
-    "test:int": "vitest run test/integration/",
-    "test:smoke": "bats test/smoke/*.bats",
-    "test:eval": "tsx scripts/eval-vector-search.ts",
-    "iterate": "tsx scripts/iterate.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run check:invariants && npm test",
-    "check:plan": "tsx scripts/check-plan-drift.ts",
-    "check:invariants": "tsx scripts/check-invariants.ts",
-    "check:cache-version": "tsx scripts/check-cache-version.ts",
-    "ship": "tsx scripts/ship.ts"
+    "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/node": "^25.9.0",
