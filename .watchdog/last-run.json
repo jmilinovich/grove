@@ -1,0 +1,16 @@
+{
+  "ran_at": "2026-05-29T15:06:01Z",
+  "prod_sha": null,
+  "main_sha": "640fba92a1a580290a6b3f0b6fd88b4ddea4cdd6",
+  "green": [
+    "Pattern A (createSchema in worker entrypoint)",
+    "Pattern B (.unref() on scheduler timers)",
+    "Pattern C (npx tsx in ecosystem-gen)",
+    "Stale PRs (none open)"
+  ],
+  "flagged": [
+    "prod health: curl https://api.grove.md/health failed — exit 6 (DNS resolution failure); second consecutive day; tracked in issue #229"
+  ],
+  "prs_opened": [],
+  "issues_opened": []
+}
