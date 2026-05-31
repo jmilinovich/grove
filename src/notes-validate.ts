@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { resolve, relative } from "node:path";
+import { resolve, relative, dirname } from "node:path";
 import { lstatSync } from "node:fs";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
 import { getDefaultConfig, journalFilenameRegex, type VaultConfig } from "./vault-config.js";
@@ -62,12 +62,31 @@ export function validatePath(vaultRoot: string, filePath: string): string {
   if (rel.startsWith(".obsidian/") || rel === ".obsidian")
     throw new Error("Cannot write into .obsidian/");
 
+  // Check the target file itself for symlinks.
   try {
     const stat = lstatSync(abs);
     if (stat.isSymbolicLink()) throw new Error("Symlinks not allowed");
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
     // file doesn't exist yet — that's fine
+  }
+
+  // Walk every intermediate directory between root and abs and reject any
+  // that is a symlink. Without this check, a caller could write through a
+  // symlinked parent directory (e.g. Notes/ -> /etc) to escape the vault
+  // even though the resolved path string appears to stay inside root.
+  let cursor = dirname(abs);
+  while (cursor.length > root.length) {
+    try {
+      const s = lstatSync(cursor);
+      if (s.isSymbolicLink()) throw new Error("Symlink in path not allowed");
+    } catch (e: unknown) {
+      const err = e as NodeJS.ErrnoException;
+      if (err.message === "Symlink in path not allowed") throw e;
+      if (err.code !== "ENOENT") throw e;
+      // Directory doesn't exist yet — fine, it will be created
+    }
+    cursor = dirname(cursor);
   }
 
   return abs;
