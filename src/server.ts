@@ -941,13 +941,26 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
-  // Discovery trigger — called by git post-commit hook (localhost only by convention).
+  // Discovery trigger — called by git post-commit hook. Bearer-gated so an
+  // arbitrary local process cannot inject paths into the discovery queue.
   if (req.url?.startsWith("/internal/discovery-trigger")) {
+    const authCheck = checkAuth(req);
+    if (!authCheck.ok) {
+      res.writeHead(authCheck.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: authCheck.reason }));
+      return;
+    }
     const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
     const path = url.searchParams.get("path");
     if (!path) {
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "missing path parameter" }));
+      return;
+    }
+    // Reject paths that would escape the vault root.
+    if (!sanitizePath(VAULT_PATH, path)) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "path rejected: traversal outside vault not allowed" }));
       return;
     }
     try {
@@ -1016,6 +1029,19 @@ const httpServer = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: authCheck.reason }));
       return;
     }
+
+    // Rate limiting — key on API_KEY so the limiter has a stable identity.
+    // Single-user means there is effectively one bucket; this protects against
+    // runaway agent loops or accidental tight loops.
+    const rlKey = API_KEY || "anon";
+    const rlType = req.method === "POST" ? "write" : "read";
+    const rlResult = rateLimiter.check(rlKey, rlType);
+    if (!rlResult.allowed) {
+      res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(Math.ceil((rlResult.retryAfterMs ?? 60_000) / 1000)) });
+      res.end(JSON.stringify({ error: "rate limit exceeded", retry_after_ms: rlResult.retryAfterMs }));
+      return;
+    }
+    rateLimiter.record(rlKey, rlType);
 
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
