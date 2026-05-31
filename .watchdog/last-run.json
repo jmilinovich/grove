@@ -1,16 +1,16 @@
 {
-  "ran_at": "2026-05-30T15:00:00Z",
+  "ran_at": "2026-05-31T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "ef25603873f94dfc4ec62091ab020e93f1eeaed1",
+  "main_sha": "e6aab69b6649fdd1645a4aac3d398a6579fc74df",
   "green": [
-    "Pattern A (createSchema in worker entrypoint)",
-    "Pattern B (.unref() on scheduler timers)",
-    "Pattern C (npx tsx in ecosystem-gen)",
-    "Stale PRs (none open)"
+    "pattern-A (createSchema in worker entrypoints) — files not present",
+    "pattern-B (unref on scheduler timers) — files not present",
+    "pattern-C (npx tsx in ecosystem-gen) — files not present",
+    "stale-prs — none open"
   ],
   "flagged": [
-    "prod health: curl https://api.grove.md/health failed — exit 6 (DNS resolution failure); issue #232 opened"
+    "health-check: curl -fsS https://api.grove.md/health failed with exit 6 (Could not resolve host: api.grove.md)"
   ],
   "prs_opened": [],
-  "issues_opened": [232]
+  "issues_opened": [236]
 }
