@@ -1,16 +1,16 @@
 {
-  "ran_at": "2026-05-31T15:00:00Z",
+  "ran_at": "2026-06-01T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "e6aab69b6649fdd1645a4aac3d398a6579fc74df",
+  "main_sha": "718c07919f8d82d3f0ae43da8ce2408eca81e553",
   "green": [
-    "pattern-A (createSchema in worker entrypoints) — files not present",
-    "pattern-B (unref on scheduler timers) — files not present",
-    "pattern-C (npx tsx in ecosystem-gen) — files not present",
-    "stale-prs — none open"
+    "stale-prs (none open)",
+    "pattern-A (src/*-bin.ts / src/*-worker.ts not present — N/A)",
+    "pattern-B (src/scheduler.ts not present — N/A)",
+    "pattern-C (src/ecosystem-gen.ts not present — N/A)"
   ],
   "flagged": [
     "health-check: curl -fsS https://api.grove.md/health failed with exit 6 (Could not resolve host: api.grove.md)"
   ],
   "prs_opened": [],
-  "issues_opened": [236]
+  "issues_opened": [238]
 }
