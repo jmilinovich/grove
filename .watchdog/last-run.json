@@ -1,16 +1,16 @@
 {
-  "ran_at": "2026-06-02T15:00:00Z",
+  "ran_at": "2026-06-04T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "7065f74ec280a439c5624b43a0fad92d6afb0b61",
+  "main_sha": "c7f9baec70ace3b71300f629837501842280569c",
   "green": [
-    "stale-prs (none open)",
-    "pattern-A: clean (no createSchema() in src/discovery-worker.ts)",
+    "pattern-A: clean (no createSchema() in worker entrypoints)",
     "pattern-B: n/a (src/scheduler.ts not present)",
-    "pattern-C: n/a (src/ecosystem-gen.ts not present)"
+    "pattern-C: n/a (src/ecosystem-gen.ts not present)",
+    "stale-prs: none (PR #245 from 2026-06-03 is <7 days old)"
   ],
   "flagged": [
-    "health-check: curl exit 6 (Could not resolve host: api.grove.md) — day 5 of recurring DNS failure"
+    "health-check: curl exit 6 (Could not resolve host: api.grove.md) — day 7 of recurring DNS failure, see issue #244"
   ],
   "prs_opened": [],
-  "issues_opened": [242]
+  "issues_opened": []
 }
