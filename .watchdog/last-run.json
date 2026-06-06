@@ -1,5 +1,5 @@
 {
-  "ran_at": "2026-06-05T15:00:00Z",
+  "ran_at": "2026-06-06T15:00:00Z",
   "prod_sha": null,
   "main_sha": "e5d2113a4dc083987bd8147485492e61622195e7",
   "green": [
@@ -9,8 +9,8 @@
     "stale-prs: none (PR #245 from 2026-06-03 is <7 days old)"
   ],
   "flagged": [
-    "health-check: curl exit 6 (Could not resolve host: api.grove.md) — day 8 of recurring DNS failure, issue #247 opened"
+    "health-check: curl exit 6 (Could not resolve host: api.grove.md) — ongoing DNS failure, comment added to existing issue #244"
   ],
   "prs_opened": [],
-  "issues_opened": [247]
+  "issues_opened": []
 }
