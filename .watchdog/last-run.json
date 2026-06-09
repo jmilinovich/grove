@@ -1,16 +1,16 @@
 {
-  "ran_at": "2026-06-08T15:00:00Z",
+  "ran_at": "2026-06-09T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "83725749ef1ef4076665d8dc2eae5b1174bb6567",
+  "main_sha": "dfe05d1ab43b1e5ec24234fdb3e99ddfe52dd4ec",
   "green": [
-    "pattern-A: clean (no createSchema() in worker entrypoints)",
+    "pattern-A: clean (no matching src/*-bin.ts or src/*-worker.ts files)",
     "pattern-B: n/a (src/scheduler.ts not present)",
     "pattern-C: n/a (src/ecosystem-gen.ts not present)",
-    "stale-prs: none (PR #245 is 5d old, PR #249 is 2d old, PR #250 is 1d old — all under 7-day threshold)"
+    "stale-prs: none (PR #245 6d old, PR #249 3d old, PR #250 2d old — all under 7-day threshold)"
   ],
   "flagged": [
-    "health-check: curl exit 6 (Could not resolve host: api.grove.md) — issue #253 opened (NOTE: prior incident tracked in #244; #253 is a duplicate — watchdog should de-duplicate on future runs)"
+    "health-check: curl exit 6 (Could not resolve host: api.grove.md) — ongoing since ~2026-05-30; comment added to incident #244, no new issue opened"
   ],
   "prs_opened": [],
-  "issues_opened": [253]
+  "issues_opened": []
 }
