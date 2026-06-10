@@ -1,15 +1,15 @@
 {
-  "ran_at": "2026-06-09T15:00:00Z",
+  "ran_at": "2026-06-10T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "dfe05d1ab43b1e5ec24234fdb3e99ddfe52dd4ec",
+  "main_sha": "a60dba2643f97c2d486aa3f75650d06c92078752",
   "green": [
     "pattern-A: clean (no matching src/*-bin.ts or src/*-worker.ts files)",
     "pattern-B: n/a (src/scheduler.ts not present)",
     "pattern-C: n/a (src/ecosystem-gen.ts not present)",
-    "stale-prs: none (PR #245 6d old, PR #249 3d old, PR #250 2d old — all under 7-day threshold)"
+    "stale-prs: none (PR #245 ~7d old but not yet past threshold, PR #249 4d old, PR #250 3d old)"
   ],
   "flagged": [
-    "health-check: curl exit 6 (Could not resolve host: api.grove.md) — ongoing since ~2026-05-30; comment added to incident #244, no new issue opened"
+    "health-check: curl exit 6 (Could not resolve host: api.grove.md) — ongoing since ~2026-05-30 (~day 14); comment added to incident #244, no new issue opened"
   ],
   "prs_opened": [],
   "issues_opened": []
