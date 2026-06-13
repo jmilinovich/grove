@@ -1,11 +1,12 @@
 {
-  "ran_at": "2026-06-12T15:02:57Z",
+  "ran_at": "2026-06-13T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "997cb5d5794e7988edc8964e7090f516b2de03d3",
+  "main_sha": "4f9ae6f98680ae23c68dd10f1535fb76bcc4fb63",
   "green": ["pattern-A", "pattern-B", "pattern-C"],
   "flagged": [
-    "health-check: curl exit 6, could not resolve api.grove.md (ongoing, comment added to #244)",
-    "stale-prs: PR #245 last updated 2026-06-03 (9 days ago, no auto-action)"
+    "health-check: curl exit 6, could not resolve api.grove.md (ongoing ~day 20, comment added to #244)",
+    "stale-prs: PR #245 created 2026-06-03 (10 days, no auto-action)",
+    "stale-prs: PR #249 created 2026-06-06 (7 days, no auto-action)"
   ],
   "prs_opened": [],
   "issues_opened": []
