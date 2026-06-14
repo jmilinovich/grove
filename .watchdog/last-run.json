@@ -1,12 +1,15 @@
 {
-  "ran_at": "2026-06-13T15:00:00Z",
+  "ran_at": "2026-06-14T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "4f9ae6f98680ae23c68dd10f1535fb76bcc4fb63",
-  "green": ["pattern-A", "pattern-B", "pattern-C"],
+  "main_sha": "b8a64e10d0079bdcff490ddbd9a73f2ec876111a",
+  "green": [
+    "pattern_a_clean",
+    "pattern_b_na",
+    "pattern_c_na"
+  ],
   "flagged": [
-    "health-check: curl exit 6, could not resolve api.grove.md (ongoing ~day 20, comment added to #244)",
-    "stale-prs: PR #245 created 2026-06-03 (10 days, no auto-action)",
-    "stale-prs: PR #249 created 2026-06-06 (7 days, no auto-action)"
+    "health: curl api.grove.md/health -> exit 6 (Could not resolve host), day ~16 of DNS failure, comment added to existing incident #244",
+    "stale_prs: #245 (11d stale), #249 (8d stale), #250 (7d stale) - open watchdog report PRs past 7-day threshold"
   ],
   "prs_opened": [],
   "issues_opened": []
