@@ -1,7 +1,7 @@
 {
-  "ran_at": "2026-06-16T15:00:00Z",
+  "ran_at": "2026-06-17T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "f13a3bf1329533403f0d7172911d2913ac31abf9",
+  "main_sha": "0bdc3f7fd52923e091017a5c9c385d988dd48890",
   "green": [
     "pattern_a_clean",
     "pattern_b_na",
@@ -9,7 +9,7 @@
     "stale_prs_clean"
   ],
   "flagged": [
-    "health: curl api.grove.md/health -> exit 6 (Could not resolve host), day ~17 of DNS failure, comment added to existing incident #244"
+    "health: curl api.grove.md/health -> exit 6 (Could not resolve host), day ~18 of DNS failure, comment added to existing incident #244"
   ],
   "prs_opened": [],
   "issues_opened": []
