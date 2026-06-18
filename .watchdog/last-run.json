@@ -1,15 +1,15 @@
 {
-  "ran_at": "2026-06-17T15:00:00Z",
+  "ran_at": "2026-06-18T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "0bdc3f7fd52923e091017a5c9c385d988dd48890",
+  "main_sha": "5e80eb6709239a52c9f800ad7a27b688adef5f54",
   "green": [
-    "pattern_a_clean",
-    "pattern_b_na",
-    "pattern_c_na",
-    "stale_prs_clean"
+    "pattern-a (createSchema in worker entrypoint)",
+    "pattern-b (.unref on scheduler timers)",
+    "pattern-c (npx tsx in ecosystem-gen)"
   ],
   "flagged": [
-    "health: curl api.grove.md/health -> exit 6 (Could not resolve host), day ~18 of DNS failure, comment added to existing incident #244"
+    "health-check: api.grove.md /health DNS failure (curl exit 6), ongoing since ~2026-05-28, see issue #244",
+    "stale-pr: PR #256 (chore(watchdog): daily report 2026-06-10) last updated 2026-06-10, 8 days past threshold"
   ],
   "prs_opened": [],
   "issues_opened": []
