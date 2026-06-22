@@ -1,15 +1,15 @@
 {
-  "ran_at": "2026-06-20T15:00:00Z",
+  "ran_at": "2026-06-21T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "6373bb478a69a2eaee71887f1e6e4461ea05b430",
+  "main_sha": "87ee4faebf98505e3f99973dfc192ede05c4308b",
   "green": [
     "pattern-a (createSchema in worker entrypoint)",
     "pattern-b (.unref on scheduler timers)",
     "pattern-c (npx tsx in ecosystem-gen)"
   ],
   "flagged": [
-    "health-check: api.grove.md /health DNS failure (curl exit 6), ongoing since ~2026-05-28, see issue #244",
-    "stale-pr: PR #256 (chore(watchdog): daily report 2026-06-10) last updated 2026-06-10, 10 days past threshold"
+    "health-check: api.grove.md /health DNS failure (curl exit 6), ongoing since ~2026-05-28, day ~25 — comment added to issue #244",
+    "stale-pr: PR #256 (chore(watchdog): daily report 2026-06-10) last updated 2026-06-10, >7 days with no activity"
   ],
   "prs_opened": [],
   "issues_opened": []
