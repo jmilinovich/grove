@@ -1,15 +1,15 @@
 {
-  "ran_at": "2026-06-20T15:00:00Z",
+  "ran_at": "2026-06-24T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "6373bb478a69a2eaee71887f1e6e4461ea05b430",
+  "main_sha": "9e4c28c104acf1886671c2b5c14e472911992d2c",
   "green": [
+    "stale-prs (no PRs with updatedAt > 7 days)",
     "pattern-a (createSchema in worker entrypoint)",
     "pattern-b (.unref on scheduler timers)",
     "pattern-c (npx tsx in ecosystem-gen)"
   ],
   "flagged": [
-    "health-check: api.grove.md /health DNS failure (curl exit 6), ongoing since ~2026-05-28, see issue #244",
-    "stale-pr: PR #256 (chore(watchdog): daily report 2026-06-10) last updated 2026-06-10, 10 days past threshold"
+    "health-check: api.grove.md /health unreachable, proxy CONNECT 403 (curl exit 56); ongoing since ~2026-05-28, see issue #244 (comment added)"
   ],
   "prs_opened": [],
   "issues_opened": []
