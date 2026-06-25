@@ -1,16 +1,9 @@
 {
-  "ran_at": "2026-06-24T15:00:00Z",
+  "ran_at": "2026-06-25T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "9e4c28c104acf1886671c2b5c14e472911992d2c",
-  "green": [
-    "stale-prs (no PRs with updatedAt > 7 days)",
-    "pattern-a (createSchema in worker entrypoint)",
-    "pattern-b (.unref on scheduler timers)",
-    "pattern-c (npx tsx in ecosystem-gen)"
-  ],
-  "flagged": [
-    "health-check: api.grove.md /health unreachable, proxy CONNECT 403 (curl exit 56); ongoing since ~2026-05-28, see issue #244 (comment added)"
-  ],
+  "main_sha": "d8d99578d0b6b79d13e2cfb629271fafe3c075c6",
+  "green": ["pattern-A", "pattern-B", "pattern-C", "stale-prs"],
+  "flagged": ["health-check: curl returned exit 22 (HTTP 403 Forbidden) — changed from prior DNS failure (exit 6); prod_sha unknown; comment added to issue #244"],
   "prs_opened": [],
   "issues_opened": []
 }
