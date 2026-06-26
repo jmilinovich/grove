@@ -1,7 +1,7 @@
 {
-  "ran_at": "2026-06-24T15:00:00Z",
+  "ran_at": "2026-06-26T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "9e4c28c104acf1886671c2b5c14e472911992d2c",
+  "main_sha": "d8d99578d0b6b79d13e2cfb629271fafe3c075c6",
   "green": [
     "stale-prs (no PRs with updatedAt > 7 days)",
     "pattern-a (createSchema in worker entrypoint)",
