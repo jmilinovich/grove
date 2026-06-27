@@ -1,7 +1,7 @@
 {
-  "ran_at": "2026-06-26T15:00:00Z",
+  "ran_at": "2026-06-27T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "d8d99578d0b6b79d13e2cfb629271fafe3c075c6",
+  "main_sha": "e530ef4c81cdd8be98eaae1fb5dee0d6aa9626fc",
   "green": [
     "stale-prs (no PRs with updatedAt > 7 days)",
     "pattern-a (createSchema in worker entrypoint)",
@@ -9,7 +9,7 @@
     "pattern-c (npx tsx in ecosystem-gen)"
   ],
   "flagged": [
-    "health-check: api.grove.md /health unreachable, proxy CONNECT 403 (curl exit 56); ongoing since ~2026-05-28, see issue #244 (comment added)"
+    "health-check: api.grove.md /health returned HTTP 403 (curl exit 22); ongoing since ~2026-05-28, see issue #244 (comment added)"
   ],
   "prs_opened": [],
   "issues_opened": []
