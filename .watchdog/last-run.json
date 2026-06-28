@@ -1,15 +1,17 @@
 {
-  "ran_at": "2026-06-27T15:00:00Z",
+  "ran_at": "2026-06-28T15:02:00Z",
   "prod_sha": null,
-  "main_sha": "e530ef4c81cdd8be98eaae1fb5dee0d6aa9626fc",
+  "main_sha": "05f95a2b366f9a50f684b9108c7730414f1f8b6a",
   "green": [
-    "stale-prs (no PRs with updatedAt > 7 days)",
-    "pattern-a (createSchema in worker entrypoint)",
-    "pattern-b (.unref on scheduler timers)",
-    "pattern-c (npx tsx in ecosystem-gen)"
+    "pattern-A (createSchema in worker)",
+    "pattern-B (.unref on scheduler timers)",
+    "pattern-C (npx tsx in ecosystem-gen)",
+    "stale-prs (none over 7d threshold)"
   ],
   "flagged": [
-    "health-check: api.grove.md /health returned HTTP 403 (curl exit 22); ongoing since ~2026-05-28, see issue #244 (comment added)"
+    "health-check: api.grove.md /health unreachable — proxy 403 CONNECT denial (day ~31, ongoing, see issue #244)",
+    "prod-main-drift: skipped — prod_sha unavailable",
+    "note: 8 open watchdog report PRs (#245,#249,#250,#256,#269,#272,#273,#275) accumulating unmerged"
   ],
   "prs_opened": [],
   "issues_opened": []
