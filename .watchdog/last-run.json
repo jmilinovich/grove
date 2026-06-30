@@ -1,15 +1,15 @@
 {
-  "ran_at": "2026-06-29T15:00:00Z",
+  "ran_at": "2026-06-30T15:00:00Z",
   "prod_sha": null,
-  "main_sha": "1bb7a741409ee44ae316e6bfdd63f3f87caf98bb",
+  "main_sha": "02e0b8f0a288022f6250c91e66d5d6430ac28af3",
   "green": [
-    "stale-prs (no PRs with updatedAt > 7 days; 9 open watchdog report PRs accumulating, touched by needs-rebase bot today)",
-    "pattern-a (createSchema in worker entrypoint)",
-    "pattern-b (.unref on scheduler timers)",
-    "pattern-c (npx tsx in ecosystem-gen)"
+    "pattern-a (createSchema in worker entrypoint: clean)",
+    "pattern-b (.unref on scheduler timers: N/A, src/scheduler.ts absent)",
+    "pattern-c (npx tsx in ecosystem-gen: N/A, src/ecosystem-gen.ts absent)"
   ],
   "flagged": [
-    "health-check: api.grove.md /health → HTTP 403, curl exit 22; proxy blocking CONNECT tunnel; ongoing since ~2026-05-28, see issue #244 (comment added)"
+    "health-check: api.grove.md /health → curl exit 56 (proxy CONNECT 403); ongoing since ~2026-05-28, day ~33; comment added to issue #244",
+    "stale-pr: #272 (daily report 2026-06-22) updatedAt 2026-06-22, 8 days ago — exceeds 7-day threshold"
   ],
   "prs_opened": [],
   "issues_opened": []
