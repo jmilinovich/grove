@@ -1,15 +1,15 @@
 {
-  "ran_at": "2026-06-30T15:00:00Z",
+  "ran_at": "2026-07-01T15:04:00Z",
   "prod_sha": null,
-  "main_sha": "02e0b8f0a288022f6250c91e66d5d6430ac28af3",
+  "main_sha": "c4d0063cff1e21cb3870c027e1a2006b2b1a9927",
   "green": [
     "pattern-a (createSchema in worker entrypoint: clean)",
     "pattern-b (.unref on scheduler timers: N/A, src/scheduler.ts absent)",
     "pattern-c (npx tsx in ecosystem-gen: N/A, src/ecosystem-gen.ts absent)"
   ],
   "flagged": [
-    "health-check: api.grove.md /health → curl exit 56 (proxy CONNECT 403); ongoing since ~2026-05-28, day ~33; comment added to issue #244",
-    "stale-pr: #272 (daily report 2026-06-22) updatedAt 2026-06-22, 8 days ago — exceeds 7-day threshold"
+    "health-check: api.grove.md /health → curl exit 22 (proxy CONNECT 403); ongoing since ~2026-05-28, day ~34; comment added to issue #244",
+    "stale-prs: #272 (updated 2026-06-22, 9 days ago), #273 (updated 2026-06-23, 8 days ago)"
   ],
   "prs_opened": [],
   "issues_opened": []
