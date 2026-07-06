@@ -27,10 +27,10 @@
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
-    "@types/node": "^26.0.1",
-    "tsx": "^4.22.4",
+    "@types/node": "^26.1.0",
+    "tsx": "^4.23.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=22.0.0"
